@@ -99,18 +99,41 @@ static void *worker(void *arg) {
     return NULL;
 }
 
+uint32_t thr_cur_handle(void) { return 0xabc; }   // this fixture's main-thread handle
+void dm_probe_text_install(void);
+
+static void run_boot_probe(const char *dir) {
+    uintptr_t entry = (uintptr_t)guest_sym("nnMain");
+    module_t *mod = module_of((void *)entry);
+    assert(mod);
+    char spec[128], dump[1024], path[1024];
+    assert(snprintf(path, sizeof path, "%s/probe-hit.bin", dir) < sizeof path);
+    assert(snprintf(dump, sizeof dump, "%s:0:4:%s", mod->name, path) < sizeof dump);
+    snprintf(spec, sizeof spec, "%s:%lx", mod->name, (unsigned long)(entry - (uintptr_t)mod->base));
+    unlink(path);
+    assert(setenv("DM_PROBE", spec, 1) == 0 && setenv("DM_PROBE_DUMP", dump, 1) == 0);
+    dm_probe_text_install();
+    test_bootstrap();
+    uint32_t word;
+    FILE *f = fopen(path, "rb");
+    assert(f && fread(&word, sizeof word, 1, f) == 1 && fgetc(f) == EOF && !fclose(f));
+    assert(word == 0x14000002u);  // the module's first B, written only when the BRK handler runs
+    unlink(path);
+    puts("Guest breakpoint dumped the requested four bytes and resumed the original instruction: OK");
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     alarm(15);
     const char *names[] = {"main", "sdk", "clockprobe", "bootprobe"};
     load_modules(argv[1], names, 4);
     loader_hash_log();
-    test_bootstrap();
+    crash_install();
+    run_boot_probe(argv[1]);
     guest_entry = (uintptr_t)guest_sym("guest_entry");
     callback = (guest_callback)guest_sym("guest_callback");
     read_steady = guest_sym("read_steady");
     assert(guest_entry && callback && read_steady && !dm_sdk_ounce());
-    crash_install();
     crash_set_trap_hook(trap);
     pthread_t a, b;
     assert(!pthread_create(&a, NULL, worker, (void *)101) && !pthread_create(&b, NULL, worker, (void *)202));
