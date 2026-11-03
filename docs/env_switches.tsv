@@ -273,6 +273,7 @@ DM_SAVE	path	This run's save folder (must be set); the device save is `<DM_SAVE>
 DM_SAVED_CHOICES	switch	`0` ignores the player's saved choices (launcher.<VAR> in the app's preferences) and leaves them saved; the Mac launcher and the iOS settings screen
 DM_SAVE_SYNC	player	Cloud saves: the folder whose `<title ID>/save.dmsync` the save is synced through, `icloud` for iCloud Drive/nxnative Saves (the Mac); `0` or unset, off. The Mac launcher sets the folder chosen in its settings window's Cloud saves, the iPhone app the one picked in its launcher (dm/host/save_sync.h)
 DM_SCHEME_NAME	switch	Set by `build_ipa.sh` itself for xcodegen's `project.yml`: the Xcode scheme name, `DmIOS`, or `<display name> (<title ID>)` for a project prepared with `--prepare-xcode`
+DM_SCREEN_FIT	player	`stretch` scales the presented Vulkan image to fill its window. The default preserves the game aspect ratio.
 DM_SCREEN_MATCH	switch	`0` keeps the screen's refresh rate in fullscreen; by default a Mac screen whose rate is not a multiple of the game's frame rate switches to one that is (144 → 120 Hz)
 DM_SF_TRACE	diagnostic	`=1` logs every request on the game's own HIPC client sessions that the host answers (`hle_sf.c`)
 DM_SHAKE_G	switch	`=<G>`: on iOS, the acceleration beyond gravity above which a flick of the phone shakes the controller's six-axis sensor (default 1.5)
@@ -316,7 +317,17 @@ DM_UDC_SELFTEST	diagnostic	`=1` runs a start-up check of DontCare load and store
 DM_UE_SHADERS	path	Folder of the Unreal shader code archives decoded by `uepak.py`, for `shader_split.py` (default `ue_shaders` beside the RomFS); needed when the RomFS has Unreal paks
 DM_UE_TEXTURE_POOL	switch	Megabytes Unreal's texture streaming pool (`r.Streaming.PoolSize`) is raised to, overriding the profile's `ue_texture_pool`; `0` keeps the game's own pool. On iOS only this switch turns it on (`Documents/env.txt`)
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
+DM_VK_DIR	path	Directory containing the exported NVN Vulkan shader pairs `<key>.spv` and `<key>.vk.txt`.
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer
+DM_VK_NO_DYNREND	diagnostic	Set to exercise the Vulkan render-pass fallback on a device that supports dynamic rendering.
+DM_VK_NO_TIMELINE	diagnostic	Set to exercise Vulkan submission without timeline semaphores.
+DM_VK_PASSLOG	diagnostic	`=<frame>` logs passes, draws, copies, clears and uploads for one frame. Append `+` to continue logging.
+DM_VK_RTDUMP	diagnostic	`=<frame>` dumps color render targets at presentation as raw level-zero, layer-zero images.
+DM_VK_RTDUMP_DEC	diagnostic	Include textures decoded from BC6H in the Vulkan render-target dump.
+DM_VK_SHOTS	diagnostic	Comma-separated presented frame numbers to save as BMP screenshots.
+DM_VK_SHOT_DIR	path	Output directory for Vulkan screenshots and render-target dumps. Defaults to the current directory.
+DM_VK_SKIP	diagnostic	Bit mask for isolating Vulkan workload costs. Bits 1, 2 and 4 skip buffer-to-texture, texture-to-texture and texture-to-buffer. Bits 8, 16, 32 and 64 skip texture clears, uploads, draws/dispatches and attachment clears.
+DM_VK_TEXCOUNT	diagnostic	Report live Vulkan textures by category and storage addresses shared with older textures.
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path
