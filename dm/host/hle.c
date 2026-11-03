@@ -1,7 +1,6 @@
 // Import resolution (implemented ones go to the host, the rest go to named stubs) and host gate dispatch.
 #include "hle.h"
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
+#include <inttypes.h>
 #include <dlfcn.h>
 #include <time.h>
 
@@ -15,7 +14,7 @@ extern uint64_t unimpl_stubs[MAX_STUB];   // 8 bytes per stub
 uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
     if (!g_stub_seen[idx]) {   // once per stub (a counter in the byte wrapped every 256 calls: Ace Attorney Investigations Collection calls nnProfilerRecordHeartbeat every frame)
         g_stub_seen[idx] = 1;
-        LOG("UNIMPL %s (x0=%#llx x1=%#llx x2=%#llx)", g_stub_name[idx], regs[0], regs[1], regs[2]);
+        LOG("UNIMPL %s (x0=%#" PRIx64 " x1=%#" PRIx64 " x2=%#" PRIx64 ")", g_stub_name[idx], regs[0], regs[1], regs[2]);
     }
     return 0;
 }
@@ -32,7 +31,7 @@ static unsigned *g_hle_idx, g_hle_mask; static const hle_ent *g_hle_sec;
 static const hle_ent *hle_find(const char *name) {
     if (!g_hle_mask) {
         unsigned long secsz;
-        g_hle_sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
+        g_hle_sec = DM_SECTION_DATA(swhle, &secsz);
         unsigned n = g_hle_sec ? (unsigned)(secsz / sizeof *g_hle_sec) : 0;
         unsigned cap = 16; while (cap < n * 2) cap <<= 1;
         g_hle_idx = calloc(cap, sizeof *g_hle_idx); g_hle_mask = cap - 1;
@@ -103,7 +102,7 @@ void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig) {
     if (k == G_OBS) { if ((arg & 0xff) <= 0 || (arg & 0xff) >= OBS_MAX) die("observation gate number out of range %d", arg & 0xff); g_obs_have[arg & 0xff] = 1; }
     if (++g_ngate > (1 << GATE_BITS) / 4) die("gate overflow");
     unsigned i = gate_h(ret_abs);
-    while (g_gate[i].ret) { if (g_gate[i].ret == ret_abs) die("gate registered twice %#llx", ret_abs); i = (i + 1) & ((1u << GATE_BITS) - 1); }
+    while (g_gate[i].ret) { if (g_gate[i].ret == ret_abs) die("gate registered twice %#" PRIx64, ret_abs); i = (i + 1) & ((1u << GATE_BITS) - 1); }
     g_gate[i] = (gate_t){ret_abs, k, arg, orig};
 }
 
@@ -127,6 +126,6 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
                 void thr_svc_enter(uint64_t *, uint64_t), thr_svc_leave(void);
                 thr_svc_enter(regs, g->orig); uint64_t r = svc_dispatch(g->arg, regs, g->orig); thr_svc_leave(); return r; }
         }
-        if (!g->ret) die("unknown gate at %#llx", ret_addr);
+        if (!g->ret) die("unknown gate at %#" PRIx64, ret_addr);
     }
 }

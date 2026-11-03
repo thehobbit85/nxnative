@@ -21,17 +21,30 @@ HLE_FORCE_BIG("_ZN4test5probeEmmd", "unit test", uint64_t, probe, uint64_t a, ui
 // call_on(a, b, d, top, fn): calls fn(a, b, d) with sp = top (0: on this stack); _call_on_site is the return address the call leaves, the "game's call site"
 uint64_t call_on(uint64_t a, uint64_t b, double d, uintptr_t top, const void *fn);
 extern const char call_on_site[];
-__asm__(".text\n.p2align 2\n.globl _call_on\n_call_on:\n"
+__asm__(".text\n.p2align 2\n.globl " DM_ASM_SYM(call_on) "\n" DM_ASM_SYM(call_on) ":\n"
         "    stp x29, x30, [sp, #-16]!\n    mov x29, sp\n"
         "    cbz x2, 1f\n    mov sp, x2\n"
         "1:  blr x3\n"
-        ".globl _call_on_site\n_call_on_site:\n"
+        ".globl " DM_ASM_SYM(call_on_site) "\n" DM_ASM_SYM(call_on_site) ":\n"
         "    mov sp, x29\n    ldp x29, x30, [sp], #16\n    ret\n");
 
 static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 
+HLE_FORCE("ordinary_force", "test normal override", int, plain, int tag) { return tag + 1; }
+static void *registered_force(const char *name) {
+    unsigned long size;
+    const hle_force_ent *entries = DM_SECTION_DATA(swforce, &size);
+    for (unsigned i = 0; i < size / sizeof *entries; ++i)
+        if (!strcmp(entries[i].name, name)) return entries[i].fn;
+    return NULL;
+}
+
 int main(void) {
+    const void *registered = registered_force("_ZN4test5probeEmmd");
+    int (*normal)(int) = registered_force("ordinary_force");
+    CHECK(registered == probe_bs && normal && normal(7) == 8, "normal and large-stack forced imports resolve by name");
+    if (!registered) return 1;
     size_t guard = 16384, size = 16384;
     uint8_t *m = mmap(NULL, guard + size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m == MAP_FAILED) { perror("mmap"); return 1; }
@@ -39,17 +52,17 @@ int main(void) {
     g_lo = (uintptr_t)m; g_hi = (uintptr_t)m + guard + size;
 
     // on the guest stack: switched to the host stack, arguments kept, call site given back
-    uint64_t r = call_on(5, 7, 2.0, g_hi, probe_bs);
+    uint64_t r = call_on(5, 7, 2.0, g_hi, registered);
     CHECK(r == 5 * 3 + 7 + 2 + 3, "arguments carried over through the switch");
     CHECK(g_fp && !dm_guest_as_contains(g_fp), "the implementation ran off the guest stack");
     CHECK(g_site == (void *)call_on_site, "dm_bigstack_caller gives the call site back after a switch");
 
     // a second call on the same thread reuses the thread's host stack
-    g_site = NULL; r = call_on(1, 1, 1.0, g_hi, probe_bs);
+    g_site = NULL; r = call_on(1, 1, 1.0, g_hi, registered);
     CHECK(r == 3 + 1 + 1 + 3 && g_site == (void *)call_on_site, "second switched call");
 
     // off the guest block: jumped to straight, the return address is already the caller's
-    g_site = NULL; r = call_on(2, 0, 0.0, 0, probe_bs);
+    g_site = NULL; r = call_on(2, 0, 0.0, 0, registered);
     CHECK(r == 6 + 3, "arguments on the direct path");
     CHECK(g_site == (void *)call_on_site, "dm_bigstack_caller passes the call site through on the direct path");
 

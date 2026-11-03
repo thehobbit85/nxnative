@@ -24,7 +24,7 @@ ENTRY = (
 )
 CALLBACK = (
     0xaa0003f2, 0xd53bd061,              # mov x18,x0; mrs x1,tpidrro_el0
-    0xb9411021, 0x8b010240, 0xd65f03c0,  # ldr w1,[x1,#0x110]; add x0,x18,x1; ret
+    0xb9411021, 0x8b010240, 0xd61f0040,  # ldr w1,[x1,#0x110]; add x0,x18,x1; br x2 (resolved host import)
 )
 
 
@@ -43,13 +43,13 @@ def main():
         subprocess.run([sys.executable, ROOT / 'dm/tools/patch_nso.py', nso, d, 'guest', '--thread-slots', target],
                        check=True, env=dict(os.environ, DM_REWRITE_J='1'))
         fields = dict(line[2:].split('\t') for line in (d / 'guest.fixups.tsv').read_text().splitlines())
-        pc, kind, svc, _ = (d / 'guest.gates.tsv').read_text().split()
+        pc, kind, svc, orig = (d / 'guest.gates.tsv').read_text().split()
         assert kind == 'svc' and int(svc) == 0x1e
         image = (d / 'guest.patched.bin').read_bytes()
         words = (f'    [{i}] = {w:#x},' for i, (w,) in enumerate(struct.iter_unpack('<I', image)) if w)
         header = [f'static const uint32_t guest_image[{len(image) // 4}] = {{', *words, '};',
                   f'#define GUEST_CALLBACK_PC {callback_pc:#x}', f'#define GUEST_GATE_PC {int(pc, 16):#x}',
-                  f'#define GUEST_KEY_PAGE {fields["KEY_PAGE_OFF"]}']
+                  f'#define GUEST_SVC_PC {int(orig, 16):#x}', f'#define GUEST_KEY_PAGE {fields["KEY_PAGE_OFF"]}']
         for key in ('K18', 'KTLS', 'KTLR', 'KGATE'):
             header.append(f'#define GUEST_{key} {fields[f"KEY_{key}_IDX"]}')
         Path(dest).write_text('\n'.join(header) + '\n')

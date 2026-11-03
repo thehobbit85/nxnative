@@ -345,5 +345,5 @@ GATE_RUNNER ?=
 gate-test: $(GAME_H)
 	mkdir -p "$(B)/gate-$(GATE_ABI)"
 	DM_GAME=$(GAME) $(PYTHON) gate/fixture.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)/guest_image.h"
-	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) -I"$(B)/gate-$(GATE_ABI)" gate/roundtrip.c ../thread.c ../entry.S -o "$(B)/gate-$(GATE_ABI)/roundtrip"
+	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) -I"$(B)/gate-$(GATE_ABI)" gate/roundtrip.c ../thread.c ../entry.S ../hle.c -ldl -o "$(B)/gate-$(GATE_ABI)/roundtrip"
 	$(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip"
