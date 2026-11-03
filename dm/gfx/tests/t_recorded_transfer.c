@@ -1,10 +1,31 @@
-// Exercise the public NVN entry implementations on the Mac, where the recorder currently builds.
+// Exercise the public NVN bootstrap registration and generated entry thunks on Metal or Vulkan.
 // Only the backend's submission boundary is called directly. The recorder owns the command bytes.
 #include "../nvn/hle_nvn.c"
 
-#define API(name) ((NVNT_##name)h_nvnBootstrapLoader(#name))
+static void *(*bootstrap)(const char *);
+#define API(name) ((NVNT_##name)bootstrap(#name))
 
-uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static void load_bootstrap(void) {
+    unsigned long size;
+    const hle_force_ent *table = DM_SECTION_DATA(swforce, &size);
+    for (size_t i = 0; i < size / sizeof *table; i++) {
+        if (strcmp(table[i].name, "nvnBootstrapLoader")) continue;
+        assert(!bootstrap);
+        bootstrap = table[i].fn;
+    }
+    assert(bootstrap);
+    NVNT_nvnDeviceGetProcAddress get_proc = API(nvnDeviceGetProcAddress);
+    for (size_t i = 0; i < NVN_NFUNC; i++) {
+        assert(bootstrap(nvn_names[i]) == nvn_thunk[i]);
+        assert((void *)get_proc(NULL, nvn_names[i]) == nvn_thunk[i]);
+    }
+}
+
+uint64_t now_ns(void) {
+    struct timespec t;
+    assert(clock_gettime(CLOCK_MONOTONIC, &t) == 0);
+    return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
 uint64_t guest_ns(void) { return now_ns(); }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 
@@ -12,7 +33,41 @@ void *front_metal_layer(void) { return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 
+#ifdef __ANDROID__
+static void check_sparse_alias(NVNmemoryPoolBuilder *builder) {
+    size_t page = (size_t)getpagesize();
+    NVNmemoryPool physical, sparse, private_pool;
+    uint8_t *src = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+    uint8_t *other = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(src != MAP_FAILED && other != MAP_FAILED);
+    API(nvnMemoryPoolBuilderSetFlags)(builder, NVN_MEMORY_POOL_FLAGS_PHYSICAL);
+    API(nvnMemoryPoolBuilderSetStorage)(builder, src, page);
+    assert(API(nvnMemoryPoolInitialize)(&physical, builder));
+    API(nvnMemoryPoolBuilderSetStorage)(builder, other, page);
+    assert(API(nvnMemoryPoolInitialize)(&private_pool, builder));
+    API(nvnMemoryPoolBuilderSetFlags)(builder, NVN_MEMORY_POOL_FLAGS_VIRTUAL);
+    API(nvnMemoryPoolBuilderSetStorage)(builder, NULL, page * 2);
+    assert(API(nvnMemoryPoolInitialize)(&sparse, builder));
+    map_req map = {.phys = &physical, .size = page};
+    assert(API(nvnMemoryPoolMapVirtual)(&sparse, 1, (const NVNmappingRequest *)&map));
+    uint8_t *alias = (uint8_t *)API(nvnMemoryPoolGetBufferAddress)(&sparse);
+    src[13] = 42; assert(alias[13] == 42);
+    alias[17] = 55; assert(src[17] == 55);
+    map.phys = &private_pool;
+    assert(!API(nvnMemoryPoolMapVirtual)(&sparse, 1, (const NVNmappingRequest *)&map));
+    assert(vpt_get(((pool_t *)&sparse)->vp, 0)->phys == src);
+    assert(alias[13] == 42);
+    map.phys = NULL;
+    assert(API(nvnMemoryPoolMapVirtual)(&sparse, 1, (const NVNmappingRequest *)&map));
+    API(nvnMemoryPoolFinalize)(&sparse);
+    API(nvnMemoryPoolFinalize)(&private_pool);
+    API(nvnMemoryPoolFinalize)(&physical);
+    assert(!munmap(src, page) && !munmap(other, page));
+}
+#endif
+
 int main(void) {
+    load_bootstrap();
     enum { pool_size = 0x10000, cmd_size = 0x4000, tex_offset = 0x4000, dst_offset = 0x8000,
            row_pitch = 24, image_pitch = 80, dst_bytes = 176, guard = 8 };
     static _Alignas(16384) uint8_t storage[pool_size];
@@ -25,6 +80,9 @@ int main(void) {
     NVNmemoryPoolBuilder pb;
     API(nvnMemoryPoolBuilderSetDefaults)(&pb);
     API(nvnMemoryPoolBuilderSetDevice)(&pb, &device);
+#ifdef __ANDROID__
+    check_sparse_alias(&pb);
+#endif
     API(nvnMemoryPoolBuilderSetStorage)(&pb, storage, sizeof storage);
     API(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
     assert(API(nvnMemoryPoolInitialize)(&pool, &pb));

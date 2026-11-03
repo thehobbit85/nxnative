@@ -47,7 +47,7 @@ $(B)/shaders/0000000000000004.spv: tests/groups.comp tests/groups.vk.txt
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/groups.vk.txt $(@:.spv=.vk.txt)
 
-# The public NVN recorder currently builds on Apple Silicon. Point VULKAN_SDK at the Mac SDK
+# For a Mac build, point VULKAN_SDK at the Mac SDK
 # with an offscreen driver installed, or provide RECORDER_CPPFLAGS and LIBS for a local loader.
 RECORDER_CPPFLAGS = $(if $(VULKAN_SDK),-I$(VULKAN_SDK)/include)
 RECORDER_LDFLAGS = $(if $(VULKAN_SDK),-L$(VULKAN_SDK)/lib -Xlinker -rpath -Xlinker $(VULKAN_SDK)/lib)
@@ -58,6 +58,16 @@ recorded-transfer-test: $(B)/t_recorded_transfer
 	$(B)/t_recorded_transfer
 recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
-$(B)/t_recorded_transfer: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h $(RECORDER_SRC) $(GAME_H) | profile
+$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
 	mkdir -p $(B)
-	$(CC) $(CPPFLAGS) $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) -framework CoreFoundation $(RECORDER_LDFLAGS) -o $@ $(LIBS)
+	$(CC) $(CPPFLAGS) $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
+
+# The Android SHA implementation is the loader's as well. The driver and ANativeWindow
+# are linked from the NDK. Use the device's Vulkan loader when executing the fixture.
+.PHONY: android-recorder
+android-recorder: RECORDER_CPPFLAGS = -I../../../android/compat
+android-recorder: RECORDER_EXTRA = ../../../android/compat/sha256.c
+android-recorder: CFLAGS += -fPIC -fvisibility=hidden -Wno-format -ffunction-sections -fdata-sections
+android-recorder: RECORDER_LDFLAGS = -Wl,--gc-sections -Wl,--no-undefined -Wl,-z,max-page-size=16384
+android-recorder: LIBS = -lvulkan -landroid -lm -ldl
+android-recorder: $(B)/t_recorded_transfer_android
