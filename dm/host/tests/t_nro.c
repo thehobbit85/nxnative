@@ -4,6 +4,9 @@ void dm_thread_service_connect(void) {}   // threads started so far have nothing
 #include "../hle_ro.c"
 #include <assert.h>
 #include <stddef.h>
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
 
 struct dm_flags g_flag;
@@ -53,7 +56,34 @@ static void fixture(int i) {
 static void load(int i) { assert(h_ro_LoadModule(&handles[i - 1], raw[i - 1], NULL, 32, 1) == 0); }
 static void unload(int i) { h_ro_UnloadModule(&handles[i - 1]); assert(!g_mod[i].loaded); }
 
+// A valid historical Apple header has no TP_SLOT. Android's rewriter adds slot 2
+// for the bionic thread pointer. Reject the latter before mapping any module.
+static void test_thread_slot_layout(void) {
+    char dir[] = "/tmp/dm-layout-XXXXXX", path[128];
+    assert(mkdtemp(dir));
+    snprintf(path, sizeof path, "%s/main.fixups.tsv", dir);
+    FILE *f = fopen(path, "w"); assert(f);
+    fputs("# PATCH_OFF\t0x8000\n# KEY_PAGE_OFF\t0x4000\n# KEY_PAGE_SIZE\t0x4000\n"
+          "# KEY_K18_IDX\t0\n# KEY_KTLS_IDX\t1\n# KEY_KTLR_IDX\t2\n# KEY_KGATE_IDX\t3\n", f);
+    assert(!fclose(f));
+    module_t m = {.name = "main"};
+    read_layout(&m, dir);
+
+    f = fopen(path, "a"); assert(f);
+    fputs("# TP_SLOT\t2\n", f); assert(!fclose(f));
+    pid_t pid = fork(); assert(pid >= 0);
+    if (!pid) {
+        struct rlimit limit = {0, 0}; setrlimit(RLIMIT_CORE, &limit);
+        read_layout(&m, dir);
+        _exit(0);
+    }
+    int status; assert(waitpid(pid, &status, 0) == pid);
+    assert(!unlink(path)); assert(!rmdir(dir));
+    assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+}
+
 int main(void) {
+    test_thread_slot_layout();
     FILE *manifest = tmpfile(); assert(manifest);
     fputs("# NRO manifest\n\nrefused 00 128\n", manifest);
     for (int i = 0; i < 1432; i++) fprintf(manifest, "nro%d 00 128\n", i);
