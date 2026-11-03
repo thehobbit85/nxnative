@@ -22,15 +22,13 @@ static __thread jmp_buf finished;
 static __thread uint64_t tag, result[5], host_x18;
 static __thread volatile sig_atomic_t handled;
 
-struct dm_flags g_flag;
+void test_bootstrap(void);
 // Clock reads use the production gate and host clock. This fixture has no GPU or deterministic frame source.
 __thread _Atomic int dm_host_work;
 void dm_guest_clock_advanced(void) { abort(); }
 int svc_nro_deactivate(module_t *m) { abort(); }
-void hlecount_seal(void) {}
 extern void loader_hash_log(void);
 HLE("test_sdk_call", uint64_t, sdk_call, uint64_t x) { return x + 13; }
-void *hlecount_wrap(const char *kind, const char *name, void *fn) { return fn; }
 void dm_spin_wait(uint64_t pc, uint64_t orig) { abort(); }
 void thr_svc_enter(uint64_t *regs, uint64_t orig) {}
 void thr_svc_leave(void) {}
@@ -104,9 +102,10 @@ static void *worker(void *arg) {
 int main(int argc, char **argv) {
     assert(argc == 2);
     alarm(15);
-    const char *names[] = {"main", "sdk", "clockprobe"};
-    load_modules(argv[1], names, 3);
+    const char *names[] = {"main", "sdk", "clockprobe", "bootprobe"};
+    load_modules(argv[1], names, 4);
     loader_hash_log();
+    test_bootstrap();
     guest_entry = (uintptr_t)guest_sym("guest_entry");
     callback = (guest_callback)guest_sym("guest_callback");
     read_steady = guest_sym("read_steady");
