@@ -150,6 +150,14 @@ $(B)/android-fs/hle_fs.o: ../hle_fs.c $(ANDROID_FS_HEADERS) $(GAME_H) | $(B)/and
 $(addprefix $(B)/android-fs/,$(ANDROID_FS_TESTS)): $(B)/android-fs/%: %.c ../hle_fs.c $(ANDROID_FS_SRC) $(ANDROID_FS_HEADERS) $(GAME_H) | $(B)/android-fs
 	$(CLANG) $(ANDROID_FS_FLAGS) -o $@ $< $(ANDROID_FS_SRC)
 
+$(B)/t_fdstat: t_fdstat.c ../hle_fdstat.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fdstat.c
+
+.PHONY: fdstat
+fdstat: $(B)/t_fdstat
+	TMPDIR="$(abspath $(B))" $(B)/t_fdstat
+run: fdstat
+
 # Inject only the folder handle allocation; directory I/O remains real.
 $(B)/t_fs_directory: t_fs_directory.c t_fs_stub.c ../hle_fs.c ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_directory.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
