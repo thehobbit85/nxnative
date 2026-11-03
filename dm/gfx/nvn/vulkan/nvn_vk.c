@@ -14,6 +14,7 @@
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
 #include "nvn_timestamp.h"
+#include "dmsh_abi.h"
 #include "spv_vertex_fetch.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
@@ -1155,6 +1156,7 @@ static struct {
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc;
+    uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
     float blend_color[4]; int64_t copy_stride, copy_img_stride;
 } S;
 static int g_depth_zero = 1, g_origin_ll;
@@ -1507,6 +1509,11 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                 if (stage == 5 && gb && g_nwb < 16) g_wb[g_nwb++] = (gw_t){u->addr, u->size, gb, go, gp, 0};
                 if (stage != 5) { static const shader_t *seen[8]; static int nseen; int k = 0; while (k < nseen && seen[k] != s) k++;
                                   if (k == nseen && nseen < 8) { seen[nseen++] = s; LOG("[RED] vk: shader %s (stage %d) binds storage buffer c%d at %#llx size %llu: what a draw writes to it is lost", s->key, stage, b->reg, (unsigned long long)u->addr, (unsigned long long)u->size); } }
+            } else if (b->kind == K_DRVCB && b->off == DMSH_PUSH_BANK) {
+                VkDeviceSize align = b->type == BT_UBO ? g_props.limits.minUniformBufferOffsetAlignment : g_props.limits.minStorageBufferOffsetAlignment;
+                VkDeviceSize offset = ring_put(S.push[stage == 5], DMSH_PUSH_SIZE, align);
+                if (offset == VK_WHOLE_SIZE) return VK_NULL_HANDLE;
+                *d = (VkDescriptorBufferInfo){C->ring, offset, DMSH_PUSH_SIZE};
             } else if (b->kind == K_DRVCB) {   // driver segments: c2 holds the bound texture / sampler handles (as nvn_mtl.m fills them), c0 the storage buffer table
                 uint8_t seg[4096]; memset(seg, 0, sizeof seg);
                 if (b->off == 2) {
@@ -1961,6 +1968,14 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
             case OP_VIEWPORTS: { const p_viewports *b = (const p_viewports *)a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
             case OP_DEPTH_RANGE: { const p_depth_range *b = (const p_depth_range *)a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
+            case OP_PUSH_CONST: {
+                const p_push_const *b = (const p_push_const *)a;
+                if (h.size < sizeof h + sizeof *b || b->size > h.size - sizeof h - sizeof *b ||
+                    b->offset > DMSH_PUSH_SIZE || b->size > DMSH_PUSH_SIZE - (uint32_t)b->offset)
+                    die("Vulkan: invalid NVN push-constant range");
+                memcpy(S.push[b->compute != 0] + b->offset, b->data, b->size);
+                break;
+            }
             case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
             case OP_COPY_STRIDE: { const p_copy_stride *cs = (const p_copy_stride *)a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
             default: {

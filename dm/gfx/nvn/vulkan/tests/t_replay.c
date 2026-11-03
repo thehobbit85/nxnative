@@ -46,6 +46,16 @@ static void put(list_t *list, unsigned op, const void *payload, size_t bytes) {
 }
 #define RECORD(op, type, ...) put(&list, op, &(type){__VA_ARGS__}, sizeof(type))
 
+// The payload width is in bytes. The recorder allows partial updates to either stage group's block.
+static void push_constants(list_t *list, int compute, uint16_t offset, const void *data, size_t size) {
+    _Alignas(p_push_const) uint8_t bytes[sizeof(p_push_const) + 16];
+    assert(size <= 16);
+    p_push_const *p = (p_push_const *)bytes;
+    p->compute = compute; p->offset = offset; p->size = (uint32_t)size;
+    memcpy(p->data, data, size);
+    put(list, OP_PUSH_CONST, p, sizeof *p + size);
+}
+
 static void textured_draw(int compact, int split_submit) {
     list_t list = {0};
     tex_t faces = {.serial = 10 + 2 * compact + 100 * split_submit, .d = {.width = 8, .height = 8, .depth = 6, .levels = 1,
@@ -67,6 +77,12 @@ static void textured_draw(int compact, int split_submit) {
     // next dispatch, or only X, leaving Y and Z in guest memory. Both execute before the fence.
     uint32_t count_command[] = {compact ? 1u : 3u, 1, 1};
     uint32_t image_groups[] = {0, compact ? 8u : 0u, compact ? 6u : 0u};
+    float tint[] = {1, 1, 1, 0}, alpha = 1;
+    uint32_t dims[] = {8, 8, 1, 0}, depth = 6;
+    push_constants(&list, 0, 240, tint, sizeof tint);
+    push_constants(&list, 1, 240, dims, sizeof dims);
+    push_constants(&list, 0, 252, &alpha, sizeof alpha);
+    push_constants(&list, 1, 248, &depth, sizeof depth);
     RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &groups, .stages = 0x20);
     RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)image_groups,
            .size = count_command[0] * sizeof(uint32_t));
