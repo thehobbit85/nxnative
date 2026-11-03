@@ -74,6 +74,10 @@ class AndroidShaderTests(unittest.TestCase):
             bindings = vk.vk_reflect(spv.read_bytes(), {'bindings': [{'msl_name': 'output_image', 'kind': 'img', 'reg': 3}]})
             self.assertIn('b 7 simg 1 img 3 -1 - -1 ro\n', vk.vk_txt({'stage': 'cs', 'bindings': bindings}))
 
+    def test_driver_constant_binding_uses_guest_bank(self):
+        binding = {'binding': 1, 'type': 'ubo', 'count': 1, 'kind': 'drvcb', 'bank': 24, 'off': 0}
+        self.assertIn('b 1 ubo 1 drvcb -1 24 - -1', vk.vk_txt({'stage': 'cs', 'bindings': [binding]}))
+
     def test_keep_required_optional_capabilities(self):
         hdr = [0x07230203, 0x10300, 0, 20, 0]
         caps = [2 << 16 | 17, 10, 2 << 16 | 17, 5378]
