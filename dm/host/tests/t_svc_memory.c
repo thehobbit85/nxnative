@@ -130,6 +130,9 @@ static memory_info query(uintptr_t a) {
 }
 static void expect(uintptr_t a, uintptr_t base, size_t size, unsigned state, unsigned attr, unsigned perm) {
     memory_info m = query(a);
+    if (m.base != base || m.size != size || m.state != state || m.attr != attr || m.perm != perm)
+        fprintf(stderr, "QueryMemory(%p): got %p+%zu state %u attr %u perm %u; expected %p+%zu state %u attr %u perm %u\n",
+                (void *)a, (void *)(uintptr_t)m.base, (size_t)m.size, m.state, m.attr, m.perm, (void *)base, size, state, attr, perm);
     assert(m.base == base && m.size == size && m.state == state && m.attr == attr && m.perm == perm);
 }
 static void host_memory(void) {
@@ -306,7 +309,8 @@ static void module_back_patch(void) {
     assert(!mprotect(b + 0x10000, 0x4000, PROT_READ));
     assert(!mprotect(b + 0x20000, 0x8000, PROT_READ));
     expect((uintptr_t)b - 0x8000, (uintptr_t)b - 0x8000, 0x4000, 4, 0, 5);
-    expect((uintptr_t)b + 0x4000, (uintptr_t)b + 0x4000, 0xc000, 4, 0, 3);
+    size_t text_seal = dm_text_seal_end(&g_mod[0], memory_getpagesize());
+    expect((uintptr_t)b + 0x4000, (uintptr_t)b + text_seal, 0x10000 - text_seal, 4, 0, 3);
     expect((uintptr_t)b + 0x14000, (uintptr_t)b + 0x14000, 0xc000, 4, 0, 3);
     expect((uintptr_t)b + 0x20000, (uintptr_t)b + 0x20000, 0x8000, 4, 0, 5);
     expect((uintptr_t)b + 0x27000, (uintptr_t)b + 0x20000, 0x8000, 4, 0, 5);
