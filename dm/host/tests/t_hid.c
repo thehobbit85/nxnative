@@ -352,7 +352,7 @@ static void t_rec(void) {
     CHECK(!rec_live[50].btn && !rec_replay[50].btn && rec_replay[51].btn == DM_BTN_X, "input that came after a frame's read reaches the replay's next frame, as it did live");
     CHECK(!atomic_load(&g_sc_btn) && !touch_down, "the replay releases everything at its end");
     free(g_steps); g_steps = NULL; g_nsteps = g_cap_steps = 0;
-    // With the step limit raised for long recordings the steps are ordered by a merge sort: repeated groups still interleave, and steps at one time keep their listed order
+    // With the step limit raised for long recordings repeated groups must interleave and steps at one time must keep their listed order
     keys_parse("290:A*3/3,291:Left*3/3 291.5:B*3/3\n300:X,300:Y");
     static const uint64_t order[11] = {DM_BTN_A, DM_BTN_LEFT, DM_BTN_B, DM_BTN_A, DM_BTN_LEFT, DM_BTN_B, DM_BTN_A, DM_BTN_LEFT, DM_BTN_B, DM_BTN_X, DM_BTN_Y};
     int ordered = g_nsteps == 11; for (int i = 0; ordered && i < 11; i++) ordered = g_steps[i].btn == order[i];
