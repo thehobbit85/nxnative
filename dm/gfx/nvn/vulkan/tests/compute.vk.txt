@@ -1,0 +1,3 @@
+stage cs
+tg 1 1 1
+b 0 simg 2 img 1 -1 - -1
