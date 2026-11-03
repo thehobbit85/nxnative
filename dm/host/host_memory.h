@@ -18,6 +18,7 @@ static inline size_t dm_host_stack(uintptr_t *base) {
 }
 #else
 #include <sys/uio.h>
+#include <errno.h>
 static inline int dm_host_read(uintptr_t address, void *buf, size_t size) {
     struct iovec local = {buf, size}, remote = {(void *)address, size};
     return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)size;
@@ -28,6 +29,19 @@ static inline size_t dm_host_stack(uintptr_t *base) {
     void *start;
     size_t size;
     int err = pthread_attr_getstack(&attr, &start, &size);
+#ifdef __ANDROID__
+    // Bionic includes its inaccessible guard in a worker's reported extent.
+    // It also retains the requested guard size for a caller-supplied stack
+    // even though it did not insert a guard. The main stack can grow down.
+    size_t guard;
+    if (!err && gettid() != getpid() && !pthread_attr_getguardsize(&attr, &guard) && guard && guard < size) {
+        unsigned char byte;
+        if (!dm_host_read((uintptr_t)start, &byte, 1) && errno == EFAULT) {
+            start = (char *)start + guard;
+            size -= guard;
+        }
+    }
+#endif
     pthread_attr_destroy(&attr);
     if (err) return 0;
     *base = (uintptr_t)start;
