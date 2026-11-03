@@ -51,7 +51,7 @@ static VkBuffer buf_new(VkDeviceSize n, VkBufferUsageFlags u, VkDeviceMemory *m,
     return b;
 }
 #define ALL_BUF_USAGE (VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | \
-                       VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT)
+                       VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
 
 static _Atomic uint64_t g_big_bytes, g_extra_ring_bytes;   // memory of the big images and of the extra rings now held (the frame stats line)
 // ---------- Image memory: 64 MB blocks, each with a list of its free ranges (first fit; a freed range joins its neighbours; a block with no image left is freed) ----------
@@ -153,7 +153,11 @@ enum { NGW = 512 };
 static gw_t g_gw[NGW]; static int g_ngw; static pthread_mutex_t g_gwmu = PTHREAD_MUTEX_INITIALIZER;
 static void gw_add(uint64_t addr, uint64_t size, VkBuffer buf, VkDeviceSize off, uint8_t *p, uint64_t fence) {
     pthread_mutex_lock(&g_gwmu);
-    for (int i = 0; i < g_ngw; i++) if (g_gw[i].addr == addr && g_gw[i].size == size) { g_gw[i] = g_gw[--g_ngw]; break; }   // the newer write of one range replaces the older
+    for (int i = 0; i < g_ngw; i++) if (g_gw[i].addr == addr && g_gw[i].size == size) {
+        --g_ngw;
+        memmove(g_gw + i, g_gw + i + 1, (size_t)(g_ngw - i) * sizeof *g_gw);
+        break;
+    }   // keep overlapping writes in submission order
     if (g_ngw == NGW) { RED_ONCE(62, "more than %d GPU-written buffer ranges in flight: the oldest is forgotten", NGW); memmove(g_gw, g_gw + 1, (NGW - 1) * sizeof *g_gw); g_ngw--; }
     g_gw[g_ngw++] = (gw_t){addr, size, buf, off, p, fence};
     pthread_mutex_unlock(&g_gwmu);
@@ -178,7 +182,9 @@ static int gw_find(uint64_t addr, uint64_t size, VkDeviceSize align, VkBuffer *b
 }
 static void gw_expire(uint64_t fence) {   // completion: the submission's writes are in guest memory now, and its rings go
     pthread_mutex_lock(&g_gwmu);
-    for (int i = 0; i < g_ngw;) if (g_gw[i].fence <= fence) g_gw[i] = g_gw[--g_ngw]; else i++;
+    int keep = 0;
+    for (int i = 0; i < g_ngw; ++i) if (g_gw[i].fence > fence) g_gw[keep++] = g_gw[i];
+    g_ngw = keep;
     pthread_mutex_unlock(&g_gwmu);
 }
 static void ctx_complete(ctx_t *c) {
@@ -1541,13 +1547,53 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (fs) g_pass_image_writes |= mark_image_writes(1);
     g_stat_draws++;
 }
+// Resolve the 12 argument bytes at execution time. A shader may supply just X,
+// with Y and Z initialized by the CPU. A current submission's ring is live
+// through its fence. Older rings must finish copying back before taking CPU bytes.
+static void dispatch_indirect(uint64_t addr) {
+    enum { BYTES = sizeof(VkDispatchIndirectCommand) };
+    struct { VkBuffer buf; VkDeviceSize off; } source[BYTES] = {0};
+    uint64_t wait = 0;
+    pthread_mutex_lock(&g_gwmu);
+    for (int i = 0; i < g_ngw; ++i) {
+        const gw_t *w = &g_gw[i];
+        if (addr >= w->addr + w->size || w->addr >= addr + BYTES) continue;
+        if (w->fence != g_fence + 1) {
+            if (w->fence > wait) wait = w->fence;
+            continue;
+        }
+        for (int j = 0; j < BYTES; ++j) if (addr + j >= w->addr && addr + j - w->addr < w->size) {
+            source[j].buf = w->buf;
+            source[j].off = w->off + (addr + j - w->addr);
+        }
+    }
+    pthread_mutex_unlock(&g_gwmu);
+    if (wait) mtl_wait(wait, UINT64_MAX);
+    VkDeviceSize dst = ring_alloc(BYTES, 4);
+    int copied = 0;
+    for (int first = 0; first < BYTES;) {
+        VkBuffer src = source[first].buf;
+        int end = first + 1;
+        while (end < BYTES && source[end].buf == src &&
+               (!src || source[end].off == source[first].off + (end - first))) ++end;
+        if (src) {
+            VkBufferCopy region = {source[first].off, dst + first, (VkDeviceSize)(end - first)};
+            vkCmdCopyBuffer(C->cb, src, C->ring, 1, &region);
+            copied = 1;
+        } else {
+            memcpy(C->ringp + dst + first, (const void *)(uintptr_t)(addr + first), (size_t)(end - first));
+        }
+        first = end;
+    }
+    if (copied) barrier_all(C->cb);
+    vkCmdDispatchIndirect(C->cb, C->ring, dst);
+}
 // Compute: the bound compute program's shader, its own pipeline and layout (one set), recorded outside render passes; afterwards every storage buffer it had is
 // GPU-written: written back to guest memory at completion and read from the ring by the work recorded until then (gw_add)
 static void dispatch(const p_dispatch *d) {
     if (vk_skip() & SK_DRAW) return;
     const prog_t *p = S.cprog; if (!p) return;
-    if (d->ind) { RED_ONCE(61, "indirect compute dispatches are not implemented yet"); return; }
-    if (d->x <= 0 || d->y <= 0 || d->z <= 0) return;
+    if (!d->ind && (d->x <= 0 || d->y <= 0 || d->z <= 0)) return;
     static struct { const prog_t *p; uint64_t ser; shader_t *cs; } pc[256];
     unsigned h = (unsigned)(((uintptr_t)p >> 4) ^ p->serial) % 256;
     if (pc[h].p != p || pc[h].ser != p->serial) {
@@ -1565,7 +1611,8 @@ static void dispatch(const p_dispatch *d) {
     if (g_plog) LOG("plog:  dispatch cs %s %dx%dx%d, %d storage buffers", cs->key, d->x, d->y, d->z, g_nwb);
     vkCmdBindPipeline(C->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cs->cpp);
     vkCmdBindDescriptorSets(C->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cs->cpl, 0, 1, &ds, 0, NULL);
-    vkCmdDispatch(C->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
+    if (d->ind) dispatch_indirect(d->ind);
+    else vkCmdDispatch(C->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     mark_image_writes(5);
     barrier_all(C->cb);
     for (int i = 0; i < g_nwb; i++) {
