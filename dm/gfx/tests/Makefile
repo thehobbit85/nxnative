@@ -491,3 +491,8 @@ check_t_logic: t_logic
 # MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
 t_mufu_turns: t_mufu_turns.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
+
+# The same public recording and byte oracle run against Vulkan in ../nvn/vulkan.
+t_recorded_transfer: t_recorded_transfer.c $(MTL_T_DEP)
+	clang $(CFLAGS) -UNDEBUG -fobjc-arc -o $@ $< $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) ../nvn/nvn_mtl.m $(FW)
+check_t_recorded_transfer: RUN_ENV = MTL_DEBUG_LAYER=1
