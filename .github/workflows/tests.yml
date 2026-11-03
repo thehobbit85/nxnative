@@ -52,6 +52,7 @@ jobs:
             GATE_CC="$bin/aarch64-linux-android30-clang -static" GATE_RUNNER=qemu-aarch64 gate-test
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -Wl,--gc-sections" build/t_bigstack
           qemu-aarch64 dm/host/tests/build/t_bigstack
+          make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" GATE_RUNNER=qemu-aarch64 android-memory
 
   host-tests:
     name: Host unit tests and CPU-only gfx tests
