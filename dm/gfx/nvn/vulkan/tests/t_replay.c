@@ -142,7 +142,7 @@ static void strided_layers(void) {
 // red a wrong value and blue that the draw was rejected before pipeline creation.
 static void vertex_fetch(void) {
     static const struct {
-        NVNformat format; unsigned location; uint32_t data[4], expected[4]; int reject;
+        NVNformat format; unsigned location; uint32_t data[4], expected[4]; int reject; NVNformat second_format;
     } cases[] = {
         {NVN_FORMAT_R8, 0, {255}, {0x3f800000, 0, 0, 0x3f800000}},
         {NVN_FORMAT_R16I, 2, {0xff80}, {0xffffff80, 0, 0, 1}},
@@ -151,9 +151,14 @@ static void vertex_fetch(void) {
                                 {0x3fc00000, 0xc0100000, 0, 0x3f000000}},
         {NVN_FORMAT_RGBA32UI, 0, {0x3fc00000, 0xc0100000, 0, 0x3f000000},
                                  {0x3fc00000, 0xc0100000, 0, 0x3f000000}},
-        {NVN_FORMAT_R8, 1, {255}, {0x3f800000, 0, 0, 0x3f800000}, 1},
-        {NVN_FORMAT_RG32F, 1, {0x3f800000, 0x40000000}, {0x3f800000, 0x40000000, 0, 0x3f800000}, 1},
-        {NVN_FORMAT_R16I, 1, {0xff80}, {0xffffff80, 0, 0, 1}, 1},
+        {NVN_FORMAT_R8, 1, {255}, {0x3f800000, 0, 0, 0x3f800000}},
+        {NVN_FORMAT_RG32F, 1, {0x3f800000, 0x40000000}, {0x3f800000, 0x40000000, 0, 0x3f800000}},
+        {NVN_FORMAT_R16I, 1, {0xff80}, {0xffffff80, 0, 0, 1}},
+        {NVN_FORMAT_RG16F, 2, {0xc4003e00}, {0x3fc00000, 0xc0800000, 0, 0x3f800000}},
+        {NVN_FORMAT_RG8SN, 1, {0x7f80}, {0xbf800000, 0x3f800000, 0, 0x3f800000}},
+        {NVN_FORMAT_R16I, 0, {0xff80}, {0xffffff80, 0, 0, 1}},
+        // Two different source classes in one pipeline. The shader XORs both fetches.
+        {NVN_FORMAT_RG16F, 1, {0xc4003e00}, {0x3fc03e00, 0xc0800000, 0, 0x3f800001}, 0, NVN_FORMAT_R16I},
         {NVN_FORMAT_R32_UI2F, 0, {3}, {0x40400000, 0, 0, 0x3f800000}, 1},
     };
     tex_t output = {.serial = 0x2100, .d = {.width = 1, .height = 1, .depth = 1, .levels = 1,
@@ -166,6 +171,7 @@ static void vertex_fetch(void) {
         memcpy(check, cases[c].expected, 16); check[4] = cases[c].location;
         va_st va[] = {{.fmt = NVN_FORMAT_RGBA32F}, {.fmt = NVN_FORMAT_RGBA32UI}, {.fmt = NVN_FORMAT_RGBA32I}};
         va[cases[c].location].fmt = cases[c].format;
+        if (cases[c].second_format) { va[2].fmt = cases[c].second_format; check[4] = 3; }
         p_bind_vattr attr = {.n = 3}; memcpy(attr.st, va, sizeof va);
         RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &output, .r = {.width = 1, .height = 1, .depth = 1}, .mask = 15, .c.f = {0, 0, 1, 1});
         RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});

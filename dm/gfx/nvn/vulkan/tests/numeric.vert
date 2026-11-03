@@ -6,7 +6,8 @@ layout(set = 0, binding = 0) uniform Check { uvec4 expected; uint location; } ch
 layout(location = 0) flat out uint match;
 void main() {
     uvec4 bits = check.location == 0 ? floatBitsToUint(floats) :
-                 check.location == 1 ? unsigneds : uvec4(signeds);
+                 check.location == 1 ? uvec4(unsigneds.x, unsigneds.y, unsigneds.z, unsigneds.w) : uvec4(signeds);
+    if (check.location == 3) bits = unsigneds ^ uvec4(signeds);
     match = uint(all(equal(bits, check.expected)));
     vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
     gl_Position = vec4(2 * p - 1, 0, 1);
