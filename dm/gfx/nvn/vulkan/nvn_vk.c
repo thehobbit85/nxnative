@@ -233,7 +233,7 @@ static void *completion_thread(void *a) {
 }
 
 // ---------- Device ----------
-static int g_has_u8;
+static int g_has_u8, g_storage_ms;
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -311,6 +311,7 @@ static void vk_init_(void) {
     if (dv >= VK_API_VERSION_1_2) { f12.pNext = chain; chain = &f12; f11.pNext = chain; chain = &f11; } else { sdp.pNext = chain; chain = &sdp; }
     VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, chain};
     vkGetPhysicalDeviceFeatures2(g_pd, &f2);
+    g_storage_ms = f2.features.shaderStorageImageMultisample;
     f13.robustImageAccess = VK_FALSE;
     const char *ext[4]; uint32_t next = 0;
     if (has_sc && g_has_surface) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
@@ -595,6 +596,18 @@ static int init_fill(const tex_t *t, const fmt_t *f) {
     if (t->d.samples > 1 || (t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) || f->depth || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     return mem_any(t->mem, t->L.size);
 }
+// Vulkan fixes usage at allocation. NVN may register an image after drawing into it
+// or bind an ordinary texture descriptor as an image. Reserve storage usage only
+// when the complete image configuration supports both its original roles and storage.
+static int storage_compatible(const VkImageCreateInfo *ii) {
+    if (ii->samples != VK_SAMPLE_COUNT_1_BIT && !g_storage_ms) return 0;
+    VkImageFormatProperties limits;
+    if (vkGetPhysicalDeviceImageFormatProperties(g_pd, ii->format, ii->imageType, ii->tiling,
+            ii->usage | VK_IMAGE_USAGE_STORAGE_BIT, ii->flags, &limits) != VK_SUCCESS) return 0;
+    return ii->extent.width <= limits.maxExtent.width && ii->extent.height <= limits.maxExtent.height &&
+           ii->extent.depth <= limits.maxExtent.depth && ii->mipLevels <= limits.maxMipLevels &&
+           ii->arrayLayers <= limits.maxArrayLayers && (limits.sampleCounts & ii->samples);
+}
 static vtex *tex_get(const tex_t *t, int for_rt) {
     pthread_mutex_lock(&g_rmu); vtex *v = tex_find(t->serial); pthread_mutex_unlock(&g_rmu);
     if (v) {
@@ -616,7 +629,6 @@ static vtex *tex_get(const tex_t *t, int for_rt) {
     VkImageUsageFlags u = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    if ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) u |= VK_IMAGE_USAGE_STORAGE_BIT;
     VkSampleCountFlagBits sc = t->d.samples > 1 ? (VkSampleCountFlagBits)t->d.samples : VK_SAMPLE_COUNT_1_BIT;
     // NVN permits a six-face square 2D array to be sampled through a cube view.
     int cube_views = cube || (t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY && v->w == v->h &&
@@ -625,8 +637,16 @@ static vtex *tex_get(const tex_t *t, int for_rt) {
                             is3d ? VK_IMAGE_TYPE_3D : t->d.target == NVN_TEXTURE_TARGET_1D || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
                             f.f, {v->w, t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY ? 1 : v->h, v->d}, v->levels, v->layers, sc, VK_IMAGE_TILING_OPTIMAL, u, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
     if (sc != VK_SAMPLE_COUNT_1_BIT) ii.mipLevels = 1;
-    v->usage = ii.usage;
+    if (!f.dec && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && storage_compatible(&ii))
+        ii.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     VkResult r = vkCreateImage(g_dev, &ii, NULL, &v->img);
+    // maxResourceSize can only be checked by creation. Keep a valid sampled/target
+    // allocation if the driver's storage-capable layout would exceed its size limit.
+    if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY && ii.usage != u) {
+        ii.usage = u;
+        r = vkCreateImage(g_dev, &ii, NULL, &v->img);
+    }
+    v->usage = ii.usage;
     if (r != VK_SUCCESS) { LOG("[RED] vk: image %ux%ux%u x%u levels %u format %#x target %d not created (%d)", v->w, v->h, v->d, v->layers, v->levels, t->d.format, t->d.target, (int)r); free(v); return NULL; }
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_dev, v->img, &mr); VkDeviceSize off;
     v->blk = img_mem(mr, &v->m, &off); v->moff = off; v->msize = mr.size; VKCHECK(vkBindImageMemory(g_dev, v->img, v->m, off));
@@ -734,8 +754,20 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
     for (int i = 0; i < v->nviews; i++) if (v->views[i].key == key) return v->views[i].v;
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, v->img, vt, f.f,
                                 {(VkComponentSwizzle)(swz[0] + 1), (VkComponentSwizzle)(swz[1] + 1), (VkComponentSwizzle)(swz[2] + 1), (VkComponentSwizzle)(swz[3] + 1)}, {asp, bl, nl, b0, nly}};
-    VkImageViewUsageCreateInfo view_usage = {VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL, VK_IMAGE_USAGE_STORAGE_BIT};
-    if (storage) { vi.components = (VkComponentMapping){0}; vi.pNext = &view_usage; }
+    // A sampled sRGB alias of a storage-capable UNORM image need only support
+    // sampling. Do not make aliased formats inherit unrelated image usages.
+    VkImageUsageFlags usage = rt ? (v->f.depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+                                 : storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (!(v->usage & usage)) return VK_NULL_HANDLE;
+    if (f.f != v->f.f) {
+        VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, f.f, &fp);
+        VkFormatFeatureFlags need = rt ? (v->f.depth ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+                                       : storage ? VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT : VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if (!(fp.optimalTilingFeatures & need)) return VK_NULL_HANDLE;
+    }
+    VkImageViewUsageCreateInfo view_usage = {VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL, usage};
+    vi.pNext = &view_usage;
+    if (storage) vi.components = (VkComponentMapping){0};
     VkImageView view; VkResult r = vkCreateImageView(g_dev, &vi, NULL, &view);
     if (r != VK_SUCCESS) { static int n; if (n++ < 8) LOG("[RED] vk: image view (format %d type %d levels %u+%u layers %u+%u) failed (%d)", f.f, vt, bl, nl, b0, nly, (int)r); return VK_NULL_HANDLE; }
     v->views = realloc(v->views, (v->nviews + 1) * sizeof *v->views); v->views[v->nviews++] = (vview){key, view};
@@ -749,9 +781,14 @@ static samp_par *g_sreg; static uint8_t *g_sreg_ok; static int g_nsreg;
 void mtl_reg_tex(int id, const tex_t *t, const view_t *v) {
     if (id < 0) return;
     pthread_mutex_lock(&g_rmu);
+    if (!t) { if (id < g_ntreg) g_treg[id] = (treg_t){0}; pthread_mutex_unlock(&g_rmu); return; }
     if (id >= g_ntreg) { int n = id + 1024; g_treg = realloc(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
     g_treg[id].t = *t; g_treg[id].ok = 1; g_treg[id].has_v = v != NULL; if (v) g_treg[id].v = *v;
     pthread_mutex_unlock(&g_rmu);
+}
+void mtl_reg_image(int id, const tex_t *t, const view_t *v) {
+    // Texture and image handles address the same NVN descriptor pool.
+    mtl_reg_tex(id, t, v);
 }
 void mtl_reg_samp(int id, const samp_par *p) {
     if (id < 0) return;

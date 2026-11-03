@@ -16,9 +16,9 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
 void dm_fault_hook_register(int (*fn)(void *, int, void *)) { abort(); }
 void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { abort(); }
 
-static void clear_and_readback(void) {
-    tex_t tex = {.serial = 1, .d = {.width = 8, .height = 8, .depth = 1, .levels = 1,
-                                    .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+static void clear_and_readback(NVNformat format) {
+    tex_t tex = {.serial = 0x3000 + format, .d = {.width = 8, .height = 8, .depth = 1, .levels = 1,
+                                    .target = NVN_TEXTURE_TARGET_2D, .format = format}};
     nvn_tex_layout(&tex.d, &tex.L);
     uint8_t pixels[8 * 8 * 4] = {0};
     struct { op_hdr h; p_clear_tex p; } clear = {
@@ -54,7 +54,7 @@ static void textured_draw(int compact, int split_submit) {
                     .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&faces.d, &faces.L); nvn_tex_layout(&output.d, &output.L);
     unsigned slot = compact ? 7 : 5;
-    view_t cube = {.set_target = 1, .target = NVN_TEXTURE_TARGET_CUBEMAP, .set_layers = 1, .nlayers = 6};
+    view_t cube = {.set_format = 1, .format = NVN_FORMAT_RGBA8_SRGB, .set_target = 1, .target = NVN_TEXTURE_TARGET_CUBEMAP, .set_layers = 1, .nlayers = 6};
     mtl_reg_tex(slot, &faces, &cube);
     tex_t other = faces; other.serial += 32;
     mtl_reg_tex(slot + 17, &other, NULL);
@@ -115,6 +115,54 @@ static void textured_draw(int compact, int split_submit) {
             abort();
         }
     }
+}
+
+// First create and clear the backing, then register image views of its layers and
+// mips. A null registration must stop the dispatch; replacing it must reuse that backing.
+static void registered_images(void) {
+    enum { a = 600, b = 601 };
+    tex_t tex = {.serial = 0x2000, .d = {.width = 4, .height = 4, .depth = 2, .levels = 2,
+                 .target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&tex.d, &tex.L);
+    list_t list = {0};
+    view_t mip = {.set_levels = 1, .base_level = 1, .nlevels = 1};
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &tex, .r = {.width = 4, .height = 4, .depth = 2}, .mask = 15, .c.f = {0, 0, 1, 1});
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &tex, .view = mip, .has_view = 1,
+           .r = {.width = 2, .height = 2, .depth = 2}, .mask = 15, .c.f = {1, 0, 1, 1});
+    put(&list, OP_END, NULL, 0);
+    mtl_sub_begin(); mtl_exec(list.bytes); mtl_sub_commit();
+    for (int pass = 0; pass < 3; pass++) {
+        view_t yellow = {.set_layers = 1, .min_layer = pass == 2, .nlayers = 1,
+                         .set_levels = 1, .base_level = pass == 2, .nlevels = 1};
+        view_t cyan = {.set_layers = 1, .min_layer = !pass, .nlayers = 1,
+                       .set_levels = 1, .base_level = pass != 0, .nlevels = 1};
+        mtl_reg_image(a, pass == 1 ? NULL : &tex, &yellow);
+        mtl_reg_image(b, &tex, &cyan);
+        assert(!tex.d.flags);
+        uint8_t pixels[2][2][16][4] = {0};
+        list = (list_t){0};
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &compute, .stages = 0x20);
+        RECORD(OP_BIND_IMG, p_bind_handles, .stage = 5, .first = 1, .n = 2, .h = {a, b});
+        RECORD(OP_DISPATCH, p_dispatch, .x = 1, .y = 1, .z = 1);
+        for (int level = 0; level < 2; ++level) for (int layer = 0; layer < 2; ++layer) {
+            int w = 4 >> level;
+            RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &tex, .src = (uintptr_t)pixels[level][layer],
+                   .has_view = 1, .view = {.set_levels = 1, .base_level = level, .nlevels = 1},
+                   .r = {.zoffset = layer, .width = w, .height = w, .depth = 1});
+        }
+        put(&list, OP_END, NULL, 0);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (int level = 0; level < 2; ++level) for (int layer = 0; layer < 2; ++layer) {
+            int w = 4 >> level;
+            for (int i = 0; i < w * w; ++i) {
+                int written = !i && (!level || pass == 2), yellow_pixel = layer == level;
+                uint8_t expected[] = {written ? (yellow_pixel ? 255 : 0) : (level ? 255 : 0),
+                                      written ? 255 : 0, written && yellow_pixel ? 0 : 255, 255};
+                assert(!memcmp(pixels[level][layer][i], expected, 4));
+            }
+        }
+    }
+    puts("Late image registration, descriptor replacement and all untouched pixels passed");
 }
 
 static void strided_layers(void) {
@@ -206,11 +254,13 @@ static void vertex_fetch(void) {
 }
 
 int main(void) {
-    clear_and_readback();
+    clear_and_readback(NVN_FORMAT_RGBA8);
+    clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     textured_draw(0, 0);  // CPU argument block, followed by a fully GPU-generated block
     textured_draw(1, 0);  // X is GPU-generated, Y and Z are CPU-written
     textured_draw(0, 1);  // argument producer and consumer in successive submissions
     vertex_fetch();
+    registered_images();
     strided_layers();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
