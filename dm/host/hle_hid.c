@@ -85,13 +85,16 @@ uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 //   An f before the hold counts presented frames too ("f7600:A~f12"): held until 12 frames after the step's frame, and a step that begins by then follows without a release in between (the buttons
 //   go straight to its state, a held touch moves instead of lifting): DM_REC writes a run as such steps, one state after the other, and a list of only such steps is applied at the
 //   game's reads (keys_sync) instead of by keys_main. Whitespace and newlines separate steps as commas do
-typedef struct { double at, hold; uint64_t btn; int32_t lx, ly, rx, ry; int frame, fhold, tap; float tx, ty; } key_step;   // tap: a touch at (tx, ty), normalized; fhold: hold in frames
+typedef struct { double at, hold; uint64_t btn; int32_t lx, ly, rx, ry; int frame, fhold, tap; float tx, ty; int sequence; } key_step;   // tap: a touch at (tx, ty), normalized; fhold: hold in frames
 #define KEY_STEPS (1 << 20)
 static key_step *g_steps; static int g_nsteps, g_cap_steps;
 static int step_add(const key_step *st) {
     if (g_nsteps >= KEY_STEPS) return 0;
     if (g_nsteps == g_cap_steps) { int cap = g_cap_steps ? g_cap_steps * 2 : 64; key_step *n = realloc(g_steps, (size_t)cap * sizeof *n); if (!n) return 0; g_steps = n; g_cap_steps = cap; }
-    g_steps[g_nsteps++] = *st; return 1;
+    g_steps[g_nsteps] = *st;
+    g_steps[g_nsteps].sequence = g_nsteps;
+    ++g_nsteps;
+    return 1;
 }
 static void *keys_main(void *arg) {
     // touching: the previous step handed its finger over to this one; released: the frame the previous step released in (a frame step presses in a later frame, so the game reads the
@@ -168,7 +171,13 @@ static void parse_keys(char *spec, key_step *st) {
         if (!found) LOG("[RED] DM_KEYS unknown key name: %s", k);
         k = plus ? plus + 1 : NULL; }
 }
-static int step_cmp(const void *a, const void *b) { double x = ((const key_step *)a)->at, y = ((const key_step *)b)->at; return (x > y) - (x < y); }
+static int step_cmp(const void *a, const void *b) {
+    const key_step *x = a, *y = b;
+    if (x->at < y->at) return -1;
+    if (x->at > y->at) return 1;
+    if (isnan(x->at) != isnan(y->at)) return isnan(x->at) ? 1 : -1;
+    return x->sequence - y->sequence;   // bounded by KEY_STEPS
+}
 // A DM_KEYS list into g_steps, in time order
 static void keys_parse(const char *spec) {
     char *buf = strdup(spec), *save = NULL; if (!buf) return;
@@ -184,10 +193,10 @@ static void keys_parse(const char *spec) {
     }
     free(buf);
     // Steps run in time order, so repeated groups interleave ("290:A*200/3,291:Left*200/3,291.5:A*200/3" = A, Left, A every 3 s): they used to run in list order, one group after the
-    // other, and a group listed after a long repeat waited for all of it. A stable sort keeps the listed order of steps at the same time; times and frame numbers are not comparable, so a list
+    // other, and a group listed after a long repeat waited for all of it. The sequence number keeps the listed order of steps at the same time; times and frame numbers are not comparable, so a list
     // that mixes them keeps its listed order
     int mixed = 0; for (int i = 1; i < g_nsteps; i++) mixed |= g_steps[i].frame != g_steps[0].frame;
-    if (!mixed && g_nsteps > 1) mergesort(g_steps, (size_t)g_nsteps, sizeof *g_steps, step_cmp);   // stable (BSD libc), and not quadratic for long interleaved repeats
+    if (!mixed && g_nsteps > 1) qsort(g_steps, (size_t)g_nsteps, sizeof *g_steps, step_cmp);
 }
 // DM_KEYS=@<file>: the steps are read from the file (a DM_REC recording as it is). An environment value is capped by ARG_MAX (1 MiB for arguments and environment together on macOS,
 // about 40,000 recorded steps), and iOS's env.txt takes one line per switch; a relative path is from the working directory (Documents on iOS)
@@ -761,7 +770,7 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
         clock_gettime(CLOCK_MONOTONIC, &ts);
         uint64_t now = ts.tv_sec; sends += n; dropped += unrouted;
         for (int i = 0; i < n; i++) peak = fmaxf(peak, fmaxf(values[i].amplitude_low, values[i].amplitude_high));
-        if (now != t0) { LOG("rumble: %llu values sent, %llu with no output, peak amplitude %.2f, handle %#x", sends, dropped, peak, handles[0]); sends = dropped = 0; peak = 0; t0 = now; }
+        if (now != t0) { LOG("rumble: %llu values sent, %llu with no output, peak amplitude %.2f, handle %#x", (unsigned long long)sends, (unsigned long long)dropped, peak, handles[0]); sends = dropped = 0; peak = 0; t0 = now; }
         pthread_mutex_unlock(&log_lock);
     }
     dm_haptics_send(updates, count);
