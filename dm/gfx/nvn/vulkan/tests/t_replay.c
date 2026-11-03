@@ -7,8 +7,9 @@
 
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 uint64_t guest_ns(void) { return now_ns(); }
-static prog_t program = {.nstage = 2};
+static prog_t program = {.nstage = 2}, compute = {.nstage = 1};
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &compute) { assert(stage == 0); memset(key, 0, 8); key[7] = 3; return 1; }
     assert(p == &program && stage < 2);
     memset(key, 0, 8); key[7] = (uint8_t)(stage + 1); return 1;
 }
@@ -48,17 +49,23 @@ static void put(list_t *list, unsigned op, const void *payload, size_t bytes) {
 static void textured_draw(int compact) {
     list_t list = {0};
     tex_t faces = {.serial = 10 + 2 * compact, .d = {.width = 8, .height = 8, .depth = 6, .levels = 1,
-                   .target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8}};
+                   .target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8, .flags = NVN_TEXTURE_FLAGS_IMAGE}};
     tex_t output = {.serial = faces.serial + 1, .d = {.width = 8, .height = 8, .depth = 1, .levels = 1,
                     .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&faces.d, &faces.L); nvn_tex_layout(&output.d, &output.L);
     unsigned slot = compact ? 7 : 5;
     view_t cube = {.set_target = 1, .target = NVN_TEXTURE_TARGET_CUBEMAP, .set_layers = 1, .nlayers = 6};
     mtl_reg_tex(slot, &faces, &cube);
+    tex_t other = faces; other.serial += 32;
+    mtl_reg_tex(slot + 17, &other, NULL);
+    mtl_reg_tex(slot + 16, &faces, NULL);  // the same six faces, exposed as a storage image array
     float positions[] = {-1,-1, 3,-1, -1,3};
     float color[] = {compact ? 1.f : 0.f, compact ? 0.f : 1.f, 1.f, 1.f};
-    uint8_t pixels[8 * 8 * 4] = {0};
-    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &faces, .r = {.width = 8, .height = 8, .depth = 6}, .mask = 15, .c.f = {1, 1, 0, 1});
+    uint8_t pixels[8 * 8 * 4] = {0}, second[sizeof pixels] = {0};
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &faces, .r = {.width = 8, .height = 8, .depth = 6}, .mask = 15, .c.f = {0, 0, 1, 1});
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &compute, .stages = 0x20);
+    RECORD(OP_BIND_IMG, p_bind_handles, .stage = 5, .first = 1, .n = 2, .h = {slot + 16, slot + 17});
+    RECORD(OP_DISPATCH, p_dispatch, .x = 8, .y = 8, .z = 6);
     RECORD(OP_BARRIER, uint32_t, 0);
     RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
     RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &program, .stages = 3);
@@ -78,11 +85,14 @@ static void textured_draw(int compact) {
     }
     RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
     RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels, .r = {.width = 8, .height = 8, .depth = 1});
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &other, .src = (uintptr_t)second, .r = {.width = 8, .height = 8, .depth = 1});
     put(&list, OP_END, NULL, 0);
     mtl_sub_begin(); mtl_exec(list.bytes);
     assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
     const uint8_t expected[] = {compact ? 255 : 0, compact ? 0 : 255, 0, 255};
     for (size_t i = 0; i < sizeof pixels; i += 4) {
+        const uint8_t cyan[] = {0, 255, 255, 255};
+        assert(!memcmp(second + i, cyan, 4));
         if (memcmp(pixels + i, expected, 4)) {
             fprintf(stderr, "binding form %d, pixel %zu: %u %u %u %u\n", compact, i / 4, pixels[i], pixels[i+1], pixels[i+2], pixels[i+3]);
             abort();
@@ -116,5 +126,5 @@ int main(void) {
     textured_draw(0);
     textured_draw(1);
     strided_layers();
-    puts("Textured NVN draw, cube view, full/compact bindings and fenced Vulkan readback passed");
+    puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }

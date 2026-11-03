@@ -99,6 +99,8 @@ def vk_reflect(data, reflection):
                 raise ValueError(f'no guest resource for descriptor {binding} ({name!r})')
             resource = {'kind': 'support'}
         entry = dict(resource, binding=binding, count=count, type=descriptor_type(ty, types, dec, x[3]))
+        if entry['type'] == 'simg' and 24 in dec[x[2]]:  # NonWritable on the descriptor variable
+            entry['read_only'] = True
         if name + 'Smplr' in resources:
             entry['samp'] = resources[name + 'Smplr']
         bindings[binding] = entry
@@ -161,6 +163,8 @@ def vk_txt(meta):
         reg, sreg = bind.get('reg'), sampler.get('reg')
         fields = (bind['binding'], bind['type'], bind['count'], bind['kind'], -1 if reg is None else reg,
                   bind.get('off', bind.get('bank', -1)), sampler.get('kind', '-'), -1 if sreg is None else sreg)
+        if bind.get('read_only'):
+            fields += ('ro',)
         lines.append('b ' + ' '.join(map(str, fields)))
     return '\n'.join(lines) + '\n'
 

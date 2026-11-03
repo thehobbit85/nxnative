@@ -62,6 +62,18 @@ class AndroidShaderTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'no guest resource'):
                     vk.vk_reflect(prepared, {'bindings': []})
 
+    @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val'), 'requires SPIRV-Tools')
+    def test_readonly_image_keeps_guest_ownership(self):
+        source = COMPUTE.replace('Unknown', 'Rgba32f').replace('OpImageWrite %image %coord %color',
+                              '%sample = OpImageRead %f4 %image %coord')
+        source = source.replace('OpDecorate %dst Binding 7', 'OpDecorate %dst Binding 7\nOpDecorate %dst NonWritable')
+        with tempfile.TemporaryDirectory() as tmp:
+            spv = Path(tmp) / 'read.spv'
+            subprocess.run(['spirv-as', '--target-env', 'vulkan1.1', '-o', spv, '-'], input=source, text=True, check=True)
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', spv], check=True)
+            bindings = vk.vk_reflect(spv.read_bytes(), {'bindings': [{'msl_name': 'output_image', 'kind': 'img', 'reg': 3}]})
+            self.assertIn('b 7 simg 1 img 3 -1 - -1 ro\n', vk.vk_txt({'stage': 'cs', 'bindings': bindings}))
+
     def test_keep_required_optional_capabilities(self):
         hdr = [0x07230203, 0x10300, 0, 20, 0]
         caps = [2 << 16 | 17, 10, 2 << 16 | 17, 5378]
