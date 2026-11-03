@@ -136,11 +136,12 @@ static void expect(uintptr_t a, uintptr_t base, size_t size, unsigned state, uns
     assert(m.base == base && m.size == size && m.state == state && m.attr == attr && m.perm == perm);
 }
 static void host_memory(void) {
-    uintptr_t local = 0xcafe, value = 0, address = (uintptr_t)&local;
+    uintptr_t local = 0xcafe, value = 0;
+    uintptr_t address = (uintptr_t)__builtin_frame_address(0);   // ASan may move address-taken locals to a fake stack
     memory_info stack_info = query(address);
     assert(stack_info.state == 0x0b && stack_info.perm == 3);
     assert(address >= stack_info.base && address - stack_info.base < stack_info.size);
-    assert(dm_host_read(address, &value, sizeof value) && value == local);
+    assert(dm_host_read((uintptr_t)&local, &value, sizeof value) && value == local);
     assert(!dm_host_read(1, &value, sizeof value));   // unwinding an invalid guest frame must not fault
 }
 #ifdef __ANDROID__
