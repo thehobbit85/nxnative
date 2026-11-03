@@ -292,7 +292,15 @@ tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_hid_tsan
 
 MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
-MEM_DEPS = t_svc_memory.c memory_profile/game_profile.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
+# Android builds use the NDK and execute with static bionic on the CI runner.
+.PHONY: android-memory
+android-memory: | $(B)
+	$(CLANG) -D_GNU_SOURCE $(MEM_FLAGS) -o $(B)/t_memory_android t_svc_memory.c
+	$(GATE_RUNNER) $(B)/t_memory_android
+	$(CLANG) -D_GNU_SOURCE $(MEM_FLAGS) -DDM_GAME_MEM_MAP_LIMIT=0 -o $(B)/t_memory_android_unlimited t_svc_memory.c
+	$(GATE_RUNNER) $(B)/t_memory_android_unlimited
+
+MEM_DEPS = t_svc_memory.c memory_profile/game_profile.h ../host_memory.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
 $(B)/t_svc_memory: $(MEM_DEPS) | $(B)
 	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c
 $(B)/t_svc_memory_unlimited: $(MEM_DEPS) | $(B)
