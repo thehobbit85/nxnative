@@ -426,9 +426,20 @@ def site_br_call(ins):
     emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16)); emit(BR(16))
     return start
 
+def site_slot_copy(ins, source, dest):
+    """A TLS move with guest x18 names two slots. Preserve the platform's physical x18."""
+    start = here()
+    emit(STP_PRE(16, 17, 31, -32))
+    emit_slot_addr(16, 17, source); emit(LDRX(17, 16)); emit(STRX(17, 31, 2))
+    emit_slot_addr(16, 17, dest); emit(LDRX(17, 31, 2)); emit(STRX(17, 16))
+    emit(LDP_POST(16, 17, 31, 32)); emit(B(here(), ins.address + 4))
+    return start
+
 def site_sysreg_read(ins, kind):
     """mrs xN, tpidr_el0 / tpidrro_el0 → xN = thread slot value."""
     N = ins.bytes[0] & 31
+    if N == 31: return ins.address + 4   # discarded TLS read: branch straight to the next instruction
+    if N == 18: return site_slot_copy(ins, kind, 'K18')
     tmp = 16 if N != 16 else 17
     start = here()
     emit(STUR(tmp, 31, -16)); emit_slot_addr(N, tmp, kind); emit(LDRX(N, N)); emit(LDUR(tmp, 31, -16))   # tmp is saved by borrowing the red zone
@@ -437,6 +448,7 @@ def site_sysreg_read(ins, kind):
 
 def site_tpidr_write(ins):
     N = struct.unpack('<I', ins.bytes)[0] & 31
+    if N == 18: return site_slot_copy(ins, 'K18', 'KTLS')
     (T,) = pick({N}, 1)
     start = here()
     emit(0xF81F0000 | (31 << 5) | T)           # stur xT,[sp,#-16]
