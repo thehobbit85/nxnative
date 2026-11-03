@@ -36,6 +36,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_swkbd
 	$(B)/t_altstack
 	$(B)/t_fault_access
+	$(B)/t_lifecycle
 	$(B)/t_bigstack
 	$(B)/t_condvar
 	$(B)/t_condvar_old
@@ -306,7 +307,9 @@ tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 
 MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
 # The same kernel signal test also runs on Apple Silicon in the host suite.
-run: $(B)/t_fault_access
+run: $(B)/t_fault_access $(B)/t_lifecycle
+$(B)/t_lifecycle: t_lifecycle.c ../hle_lifecycle.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -pthread -I.. $(GINC) -o $@ t_lifecycle.c ../hle_lifecycle.c
 $(B)/t_fault_access: t_fault_access.c t_altstack_stub.c ../crash.c ../dm.h ../dm_uc.h ../host_memory.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -I.. $(GINC) -o $@ t_fault_access.c t_altstack_stub.c ../crash.c -ldl
 # Cross-build static bionic binaries for execution on a native ARM64 kernel.
