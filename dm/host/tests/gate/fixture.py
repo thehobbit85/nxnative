@@ -15,6 +15,7 @@ ENTRY = (
     0xaa0003e1, 0xf9400020,              # mov x1,x0; ldr x0,[x1]
     0xd51bd040, 0xaa0003f2,              # msr tpidr_el0,x0; mov x18,x0
     0xd53bd042, 0xd53bd063,              # mrs x2,tpidr_el0; mrs x3,tpidrro_el0
+    0x9e67001f,                         # fmov d31,x0 (signal context must preserve the tag)
     0xf81c03e0, 0xd42000e0, 0xf85c03e4,  # stur x0,[sp,#-64]; brk #7; ldur x4,[sp,#-64]
     0xd40003c1,                          # svc #0x1e
     0xf9000020, 0xf9000432,              # str x0,[x1]; str x18,[x1,#8]
