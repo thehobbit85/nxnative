@@ -7,11 +7,11 @@
 
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 uint64_t guest_ns(void) { return now_ns(); }
-static prog_t program = {.nstage = 2}, compute = {.nstage = 1};
+static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, compute = {.nstage = 1};
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &compute) { assert(stage == 0); memset(key, 0, 8); key[7] = 3; return 1; }
-    assert(p == &program && stage < 2);
-    memset(key, 0, 8); key[7] = (uint8_t)(stage + 1); return 1;
+    assert((p == &program || p == &numeric_program) && stage < 2);
+    memset(key, 0, 8); key[7] = (uint8_t)((p == &numeric_program ? 0x21 : 1) + stage); return 1;
 }
 void dm_fault_hook_register(int (*fn)(void *, int, void *)) { abort(); }
 void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { abort(); }
@@ -121,10 +121,62 @@ static void strided_layers(void) {
     }
     assert(!memcmp(bytes, expected, sizeof bytes));
 }
+// The shader reports all four fetched register words. Green means a faithful fetch,
+// red a wrong value and blue that the draw was rejected before pipeline creation.
+static void vertex_fetch(void) {
+    static const struct {
+        NVNformat format; unsigned location; uint32_t data[4], expected[4]; int reject;
+    } cases[] = {
+        {NVN_FORMAT_R8, 0, {255}, {0x3f800000, 0, 0, 0x3f800000}},
+        {NVN_FORMAT_R16I, 2, {0xff80}, {0xffffff80, 0, 0, 1}},
+        {NVN_FORMAT_R32I, 1, {0xffff1234}, {0xffff1234, 0, 0, 1}},
+        {NVN_FORMAT_RGBA32F, 2, {0x3fc00000, 0xc0100000, 0, 0x3f000000},
+                                {0x3fc00000, 0xc0100000, 0, 0x3f000000}},
+        {NVN_FORMAT_RGBA32UI, 0, {0x3fc00000, 0xc0100000, 0, 0x3f000000},
+                                 {0x3fc00000, 0xc0100000, 0, 0x3f000000}},
+        {NVN_FORMAT_R8, 1, {255}, {0x3f800000, 0, 0, 0x3f800000}, 1},
+        {NVN_FORMAT_RG32F, 1, {0x3f800000, 0x40000000}, {0x3f800000, 0x40000000, 0, 0x3f800000}, 1},
+        {NVN_FORMAT_R16I, 1, {0xff80}, {0xffffff80, 0, 0, 1}, 1},
+        {NVN_FORMAT_R32_UI2F, 0, {3}, {0x40400000, 0, 0, 0x3f800000}, 1},
+    };
+    tex_t output = {.serial = 0x2100, .d = {.width = 1, .height = 1, .depth = 1, .levels = 1,
+                    .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d, &output.L);
+    for (size_t c = 0; c < sizeof cases / sizeof *cases; c++) {
+        list_t list = {0};
+        uint8_t pixel[4] = {0};
+        uint32_t check[8] = {0};
+        memcpy(check, cases[c].expected, 16); check[4] = cases[c].location;
+        va_st va[] = {{.fmt = NVN_FORMAT_RGBA32F}, {.fmt = NVN_FORMAT_RGBA32UI}, {.fmt = NVN_FORMAT_RGBA32I}};
+        va[cases[c].location].fmt = cases[c].format;
+        p_bind_vattr attr = {.n = 3}; memcpy(attr.st, va, sizeof va);
+        RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &output, .r = {.width = 1, .height = 1, .depth = 1}, .mask = 15, .c.f = {0, 0, 1, 1});
+        RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &numeric_program, .stages = 3);
+        put(&list, OP_BIND_VATTR, &attr, sizeof attr);
+        RECORD(OP_BIND_VSTREAM, p_bind_vstream, .n = 1, .st = {{.stride = 0}});
+        RECORD(OP_BIND_VBUF1, p_bind_vbuf1, .index = 0, .size = 16, .addr = (uintptr_t)cases[c].data);
+        RECORD(OP_BIND_UBO_SMALL, p_bind_ubo_small, .stage = 0, .index = 0, .size = sizeof check, .addr = (uintptr_t)check);
+        RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+        RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixel, .r = {.width = 1, .height = 1, .depth = 1});
+        put(&list, OP_END, NULL, 0);
+        mtl_sub_begin(); mtl_exec(list.bytes);
+        assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        const uint8_t expected[] = {0, cases[c].reject ? 0 : 255, cases[c].reject ? 255 : 0, 255};
+        if (memcmp(pixel, expected, 4)) {
+            fprintf(stderr, "vertex format %#x to location %u: pixel %u %u %u %u\n", cases[c].format,
+                    cases[c].location, pixel[0], pixel[1], pixel[2], pixel[3]);
+            abort();
+        }
+    }
+    puts("Vulkan vertex fetch values and rejected conversions passed");
+}
+
 int main(void) {
     clear_and_readback();
     textured_draw(0);
     textured_draw(1);
+    vertex_fetch();
     strided_layers();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
