@@ -29,6 +29,28 @@ defaults:
 
 # Actions are pinned to commit SHAs (the tag in the comment): a tag can be moved, a SHA cannot. Dependabot (github-actions) can raise them.
 jobs:
+  android-gates:
+    name: Android ARM64 service gates (emulated)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+      - name: Build with the NDK and execute the rewritten module with static bionic
+        run: |
+          python -m pip install lz4 'capstone>=5,<6'
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends qemu-user
+          bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$bin/aarch64-linux-android30-clang" -fPIC -c dm/host/entry.S -o "$RUNNER_TEMP/gates.o"
+          "$bin/ld.lld" -shared -z text -z noexecstack "$RUNNER_TEMP/gates.o" -o "$RUNNER_TEMP/gates.so"
+          make -C dm/host/tests GAME="$GAME" GATE_ABI=android \
+            GATE_CC="$bin/aarch64-linux-android30-clang -static" GATE_RUNNER=qemu-aarch64 gate-test
+
   host-tests:
     name: Host unit tests and CPU-only gfx tests
     runs-on: xcode-27

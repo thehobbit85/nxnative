@@ -16,7 +16,9 @@ int g_nmod;
 // Stable module addresses live in g_mod; lookup order follows activation, including unload/reload.
 static module_t **g_loaded; static int g_nloaded, g_mod_capacity;
 static pthread_rwlock_t g_modules_mu = PTHREAD_RWLOCK_INITIALIZER;
+#ifndef __ANDROID__
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
+#endif
 enum { KEY_K18, KEY_KTLS, KEY_KTLR, KEY_KGATE, KEY_N };
 
 uint64_t resolve_import(module_t *m, const char *name);
@@ -29,6 +31,7 @@ static pthread_key_t key_value(unsigned i) {
     default: return g_keygate;
     }
 }
+#ifndef __ANDROID__
 static void create_keys(void) {
     if (pthread_key_create(&g_key18, NULL) || pthread_key_create(&g_keytls, NULL) ||
         pthread_key_create(&g_keytlr, NULL) || pthread_key_create(&g_keygate, NULL)) die("cannot create the host key");
@@ -43,6 +46,8 @@ static void tsd_check(void) {
     if (((uint64_t *)(base & ~7ull))[off / 8] != 0x1234) die("TSD layout mismatch");
     pthread_setspecific(g_key18, 0);
 }
+
+#endif
 
 static void build_symhash(module_t *m);
 static void parse_dynamic(module_t *m) {
@@ -246,7 +251,7 @@ static void read_layout(module_t *m, const char *dir) {
     FILE *f = fopen(path, "r");
     if (!f) die("open %s", path);
     static const char *kn[KEY_N] = {"K18", "KTLS", "KTLR", "KGATE"};
-    char line[256], key[48]; unsigned long v; unsigned seen = 0;
+    char line[256], key[48]; unsigned long v; unsigned seen = 0; int saw_tp_slot = 0;
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "# %47s %lx", key, &v) != 2) die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
         if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
@@ -254,7 +259,10 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "FILE_IMAGE_LEN")) m->file_image_len = v;
         else if (!strcmp(key, "BACK_OFF")) m->back_off = v;
         else if (!strcmp(key, "BACK_LEN")) m->back_len = v;
-        else if (!strcmp(key, "TP_SLOT") && v) die("%s: incompatible thread-slot layout TP_SLOT=%#lx; rewrite the modules for Apple", path, v);
+        else if (!strcmp(key, "TP_SLOT")) {
+            if (v != DM_TP_SLOT) die("%s: incompatible thread-slot layout TP_SLOT=%#lx (host expects %d)", path, v, DM_TP_SLOT);
+            saw_tp_slot = 1;
+        }
         else if (!strcmp(key, "KEY_PAGE_OFF")) m->key_page_off = v;
         else if (!strcmp(key, "KEY_PAGE_SIZE")) m->key_page_size = v;
         else if (!strcmp(key, "TEXT_END")) m->text_end = v;
@@ -276,6 +284,7 @@ static void read_layout(module_t *m, const char *dir) {
         }
     }
     fclose(f);
+    if (DM_TP_SLOT && !saw_tp_slot) die("%s: missing TP_SLOT; rewrite the modules with --thread-slots android", path);
     if (!m->patch_off || m->key_page_off % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1)
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))
@@ -329,7 +338,7 @@ static void register_gates(module_t *m, const char *dir) {
             if (sscanf(line, "%lx %15s %d %lx", &ret, kind, &arg, &orig) == 4) { gate_register((uint64_t)m->base + ret, kind, arg, orig); ng++; }
         fclose(f);
     }
-    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
+    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, (unsigned long long)m->patch_off, (unsigned long)g_key18, (unsigned long)g_keytls, (unsigned long)g_keytlr, (unsigned long)g_keygate);
 }
 
 // DT_RELR (from SDK 20; all three modules of The Legend of Zelda: Breath of the Wild 1.9.0 have it): a compact table of relative relocations with the addend in the slot (*slot += base).
@@ -693,11 +702,15 @@ void load_modules(const char *dir, const char **names, int n) {
         strlcpy(m->name, names[i], sizeof m->name);
         read_layout(m, dir);
     }
+#ifndef __ANDROID__
     create_keys();
+#endif
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+#ifndef __ANDROID__
         if (!i) tsd_check();
+#endif
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
         t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
