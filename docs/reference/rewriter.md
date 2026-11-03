@@ -379,7 +379,9 @@ To enroll a cut for any game's own module:
 - **Fix:** regenerate the modules for the target host. The Apple loader accepts historical headers without `TP_SLOT` and rejects a nonzero slot before mapping the module.
 - **Found on:** a synthetic loader test using the header format of the [Android port](https://github.com/seedds/nxnative/issues/733).
 
-For the Android host, run `DM_GAME=<id> python3 dm/tools/patch_nso.py <input> <android-output-dir> <module> --thread-slots android` for each NSO or NRO. This emits the bionic slot ABI introduced by the Android port. Use a separate output directory for each ABI. The existing Apple pipeline selects the default. This switch only changes thread-slot access. An Android host must also supply the slot block and gate on each guest thread and protect the rewriter’s temporary spills below the guest stack pointer from asynchronous signal frames.
+For the Android host, run `DM_GAME=<id> python3 dm/tools/patch_nso.py <input> <android-output-dir> <module> --thread-slots android` for each NSO or NRO. Keep a separate output directory for each ABI. Android guest threads store the four values in a per-thread block reached through bionic’s application slot (API 29 onward). The Android loader layout check requires `TP_SLOT=2`. Signal handlers that can interrupt rewritten guest code need an alternate stack to preserve temporary values below the guest stack pointer.
+
+Run `make -C dm/host/tests GAME=<id> gate-test` on Apple Silicon to execute a synthetic guest through the same ARM64 service gate. The Android CI job builds the test with the NDK and runs it with static bionic under `qemu-aarch64`. Two guest threads take a signal on alternate stacks, enter a service call concurrently and resume with their own register and TLS values. Android kernel signal delivery and app lifecycle still need a device test.
 
 ### Stack pointer writes through x18
 

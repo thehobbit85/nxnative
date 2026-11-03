@@ -85,7 +85,20 @@ extern int g_nmod;
 // main's build ID (empty if none): code with fixed addresses in a game's module runs only on the build they were found in
 static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
 // Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
+#ifdef __ANDROID__
+// bionic reserves TLS_SLOT_APP for applications from API 29. The rewriter indexes our block through that slot.
+#if __ANDROID_API__ < 29
+#error "The Android guest thread-slot ABI requires API level 29 or later"
+#endif
+enum { DM_TP_SLOT = 2, g_key18 = 1, g_keytls, g_keytlr, g_keygate };
+void dm_slot_set(unsigned key, void *value);
+void *dm_slot_get(unsigned key);
+#else
+enum { DM_TP_SLOT = 0 };   // Apple pthread TSD, including rewrites that predate the TP_SLOT header
 extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
+#define dm_slot_set pthread_setspecific
+#define dm_slot_get pthread_getspecific
+#endif
 
 void load_modules(const char *dir, const char **names, int n);
 const char *dm_module_dir(void);   // the folder load_modules read the modules and the rewriter's tables from (the cheat engine reads main.changed.tsv there)
