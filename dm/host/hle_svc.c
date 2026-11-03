@@ -456,7 +456,7 @@ static int device_shared(uint64_t addr, uint64_t size, const char *what) {
                                                   what, (unsigned long long)addr, (unsigned long long)size, (unsigned long long)lo, (unsigned long long)hi);
     return hi != 0;
 }
-// Loader text/patch seals use 16 KiB boundaries, independently of host page size.
+// Match the loader: text ends on a native page, while patch and key page offsets use the rewrite layout.
 static void module_readonly_run(uint64_t off, uint64_t start, uint64_t end,
                                 uint64_t *lo, uint64_t *hi, uint64_t *perm) {
     if (start >= end) return;
@@ -465,7 +465,7 @@ static void module_readonly_run(uint64_t off, uint64_t start, uint64_t end,
     else { if (start > *lo) *lo = start; if (end < *hi) *hi = end; *perm &= ~UINT64_C(2); }
 }
 static void module_data_query(const module_t *m, uint64_t off, uint64_t *lo, uint64_t *hi, uint64_t *perm) {
-    module_readonly_run(off, 0, (m->text_end + 0x3fff) & ~UINT64_C(0x3fff), lo, hi, perm);
+    module_readonly_run(off, 0, dm_text_seal_end(m, (size_t)getpagesize()), lo, hi, perm);
     if (m->patch_off > 0) module_readonly_run(off, (uint64_t)m->patch_off & ~UINT64_C(0x3fff), m->size, lo, hi, perm);
     if (m->back_len) module_readonly_run(off, m->back_off, m->back_off + m->back_len, lo, hi, perm);
     module_readonly_run(off, m->key_page_off, m->key_page_off + m->key_page_size, lo, hi, perm);

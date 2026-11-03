@@ -80,6 +80,10 @@ typedef struct {
     unsigned loads;            // how many times the game loaded it
 } module_t;
 
+// Native text permissions are page-granular. The serialized key and patch layouts have a separate 16 KiB alignment.
+static inline uint64_t dm_text_seal_end(const module_t *m, size_t page) {
+    return (m->text_end + page - 1) & ~(uint64_t)(page - 1);
+}
 extern module_t *g_mod;         // allocated once from the NSO list and NRO manifest; module addresses stay stable
 extern int g_nmod;
 // main's build ID (empty if none): code with fixed addresses in a game's module runs only on the build they were found in
