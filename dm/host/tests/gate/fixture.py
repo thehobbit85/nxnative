@@ -29,14 +29,14 @@ CALLBACK = (
 )
 
 
-def module(dest, target, name, code, exports, imported, align):
+def module(dest, target, name, code, exports, imported, align, init=0):
     """The last two instructions load a relocated GOT entry and tail-call it."""
     ro_off, data_off = align, 2 * align
     load_pc = 4 * len(code)
     code += (0x58000010 | ((data_off - load_pc) // 4 << 5), 0xd61f0200)  # ldr x16,got; br x16
-    ro = bytearray(512)
+    ro = bytearray(2048)
     ro[:4] = b'MOD0'
-    struct.pack_into('<i', ro, 4, 0x80)   # MOD0-relative dynamic table
+    struct.pack_into('<i', ro, 4, 0x100)  # MOD0-relative dynamic table
     struct.pack_into('<i', ro, 16, 0x30)  # MOD0-relative EH header
     starts = sorted({8, *exports.values()})
     struct.pack_into('<4BII', ro, 0x30, 1, 3, 3, 3, 0, len(starts))
@@ -45,17 +45,19 @@ def module(dest, target, name, code, exports, imported, align):
 
     symbols = [('', 0), *exports.items(), (imported, 0)]
     strings = bytearray(b'\0')
-    symtab = 0x100
+    symtab = 0x180
     strtab = symtab + 24 * len(symbols)
     for i, (symbol, pc) in enumerate(symbols[1:], 1):
         struct.pack_into('<IBBHQQ', ro, symtab + 24 * i, len(strings), 0x12, 0, bool(pc), pc, 0)
         strings += symbol.encode() + b'\0'
     ro[strtab:strtab + len(strings)] = strings
-    rela = 0x1d0
+    rela = (strtab + len(strings) + 7) & ~7
     struct.pack_into('<QQq', ro, rela, data_off, (len(symbols) - 1) << 32 | 1026, 0)  # JUMP_SLOT
-    for i, (kind, value) in enumerate(((6, ro_off + symtab), (5, ro_off + strtab),
-                                       (23, ro_off + rela), (2, 24))):
-        struct.pack_into('<QQ', ro, 0x80 + i * 16, kind, value)
+    dynamic = [(6, ro_off + symtab), (5, ro_off + strtab), (23, ro_off + rela), (2, 24)]
+    if init:
+        dynamic.append((12, init))  # DT_INIT
+    for i, (kind, value) in enumerate(dynamic):
+        struct.pack_into('<QQ', ro, 0x100 + i * 16, kind, value)
 
     text = bytearray(struct.pack(f'<{len(code)}I', *code))
     struct.pack_into('<I', text, 4, ro_off)  # MOD0 pointer
@@ -79,6 +81,21 @@ def main():
     # A guest import resolved from the production service registry.
     module(dest, target, 'clockprobe', (0x14000002, 0), {'read_steady': 8},
            '_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE', align)
+
+    # Each synthetic SDK function passes its sequence number in x2 to a relocated
+    # host import. x0/x1 still hold the arguments supplied by the real bootstrap.
+    calls = ('_init_libc0', 'nnosInitialize', '_init_libc1', 'nninitInitializeSdkModule',
+             '_ZN2nn2os11SetHostArgcEi', '_ZN2nn2os11SetHostArgvEPPc', 'nninitStartup',
+             '_init_libc2', 'constructor', 'nnMain')
+    code = [0x14000002, 0]
+    exports = {}
+    tail = len(code) + 2 * len(calls)
+    for step, name in enumerate(calls):
+        exports[name] = 4 * len(code)
+        code.append(0x52800002 | step << 5)  # mov w2, #step
+        code.append(0x14000000 | (tail - len(code)))  # b relocated import
+    module(dest, target, 'bootprobe', tuple(code), exports, 'test_boot_checkpoint', align,
+           init=exports['constructor'])
 
 
 if __name__ == '__main__':
