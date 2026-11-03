@@ -375,3 +375,15 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Build the synthetic guest with the selected rewrite ABI and run its two-thread SVC round trip.
+# Android CI uses an NDK compiler, static bionic and qemu-aarch64. The same binary runs directly on an arm64 Android device.
+GATE_ABI ?= apple
+GATE_CC ?= $(CLANG)
+GATE_RUNNER ?=
+.PHONY: gate-test
+gate-test: $(GAME_H)
+	mkdir -p "$(B)/gate-$(GATE_ABI)"
+	DM_GAME=$(GAME) $(PYTHON) gate/fixture.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)/guest_image.h"
+	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) -I"$(B)/gate-$(GATE_ABI)" gate/roundtrip.c ../thread.c ../entry.S -o "$(B)/gate-$(GATE_ABI)/roundtrip"
+	$(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip"
