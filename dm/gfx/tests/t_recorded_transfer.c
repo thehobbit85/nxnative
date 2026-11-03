@@ -104,6 +104,13 @@ int main(void) {
     assert(API(nvnCommandBufferInitialize)(&cb, &device));
     API(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, cmd_size);
     API(nvnCommandBufferBeginRecording)(&cb);
+    typedef void (*push_fn)(NVNcommandBuffer *, uint64_t, uint64_t, uint64_t, const void *);
+    push_fn push = (push_fn)h_nvnBootstrapLoader("nvnCommandBufferPushGraphicsConstants");
+    uint32_t word = 37;
+    push(&cb, 0, DMSH_PUSH_SIZE - sizeof word, sizeof word, &word);
+    size_t used = API(nvnCommandBufferGetCommandMemoryUsed)(&cb);
+    push(&cb, 0, UINT64_MAX, sizeof word, &word);
+    assert(API(nvnCommandBufferGetCommandMemoryUsed)(&cb) == used);
     // Compare the units and epoch of a recorded timestamp with the public device clock.
     const size_t report_offset = dst_offset + 4096;
     NVNcounterData *reports = (NVNcounterData *)(storage + report_offset);

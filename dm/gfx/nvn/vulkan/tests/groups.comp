@@ -1,7 +1,8 @@
 #version 450
 layout(local_size_x = 1) in;
 layout(set = 0, binding = 0, std430) buffer Groups { uint counts[]; };
+layout(set = 0, binding = 1, std140) uniform ComputePush { layout(offset = 240) uvec4 groups; } cs;
 void main() {
     uint word = gl_GlobalInvocationID.x;
-    counts[word] = word == 2 ? 6 : 8;
+    counts[word] = cs.groups[word];
 }

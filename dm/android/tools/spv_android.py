@@ -161,8 +161,11 @@ def vk_txt(meta):
             raise ValueError(f"unsupported guest binding kind: {bind['kind']}")
         sampler = bind.get('samp', {})
         reg, sreg = bind.get('reg'), sampler.get('reg')
+        offset = bind.get('off', bind.get('bank', -1))
+        if bind['kind'] == 'drvcb' and 'bank' in bind:
+            offset = bind['bank']
         fields = (bind['binding'], bind['type'], bind['count'], bind['kind'], -1 if reg is None else reg,
-                  bind.get('off', bind.get('bank', -1)), sampler.get('kind', '-'), -1 if sreg is None else sreg)
+                  offset, sampler.get('kind', '-'), -1 if sreg is None else sreg)
         if bind.get('read_only'):
             fields += ('ro',)
         lines.append('b ' + ' '.join(map(str, fields)))
