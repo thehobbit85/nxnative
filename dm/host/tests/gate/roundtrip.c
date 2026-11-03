@@ -1,5 +1,5 @@
 // Execute a synthetic rewritten module on two real pthreads through entry.S and thread.c.
-#include "../../dm.h"
+#include "../../hle.h"
 #include "guest_image.h"
 #include <assert.h>
 #include <sched.h>
@@ -23,11 +23,21 @@ static __thread jmp_buf finished;
 static __thread uint64_t tag, result[4], host_x18;
 static __thread volatile sig_atomic_t handled;
 
-void unimpl_c(void) { abort(); }  // no unimplemented imports in this module
+struct dm_flags g_flag;
+extern void gate_register(uint64_t pc, const char *kind, int arg, uint64_t orig);
+extern uint64_t resolve_import(module_t *m, const char *name);
+static uint64_t host_import;
+HLE("test_sdk_call", uint64_t, sdk_call, uint64_t x) { return x + 13; }
+void *hlecount_wrap(const char *kind, const char *name, void *fn) { return fn; }
+uint64_t guest_ticks(void) { abort(); }
+void guest_clock_read_wait(void) { abort(); }
+void dm_spin_wait(uint64_t pc, uint64_t orig) { abort(); }
+void thr_svc_enter(uint64_t *regs, uint64_t orig) {}
+void thr_svc_leave(void) {}
 void dm_thread_returned(void) { longjmp(finished, 1); }
 
-uint64_t gate_dispatch(uint64_t pc, uint64_t *regs) {
-    assert(pc == (uintptr_t)image + GUEST_GATE_PC);
+uint64_t svc_dispatch(int svc, uint64_t *regs, uint64_t orig) {
+    assert(svc == 0x1e && orig == (uintptr_t)image + GUEST_SVC_PC);
     uintptr_t entry = (uintptr_t)dm_slot_get(g_keygate);
     size_t slot = (entry - (uintptr_t)dm_gate_stubs) / 16;
     assert(slot < 1024 && dm_gate_top[slot] == (uintptr_t)regs + 800);
@@ -71,8 +81,9 @@ static void *worker(void *arg) {
     guest_thread_init();
     guest_thread_set_id(tag);
     __asm__ volatile("mov %0, x18" : "=r"(host_x18));
-    uint64_t (*callback)(uint64_t) = (uint64_t (*)(uint64_t))(image + GUEST_CALLBACK_PC);
-    assert(callback(37) == tag + 37 && (uintptr_t)dm_slot_get(g_key18) == 37);
+    typedef uint64_t (*guest_callback)(uint64_t, uint64_t, uint64_t);
+    guest_callback callback = (guest_callback)(image + GUEST_CALLBACK_PC);
+    assert(callback(37, 0, host_import) == tag + 37 + 13 && (uintptr_t)dm_slot_get(g_key18) == 37);
     if (!setjmp(finished)) {
         guest_gate_stack(1);
         dm_thread_enter((uintptr_t)image, (uintptr_t)result, (uintptr_t)(guest_stack + stack_bytes));
@@ -101,6 +112,9 @@ int main(void) {
     page[GUEST_KTLR] = g_keytlr * 8; page[GUEST_KGATE] = g_keygate * 8;
     __builtin___clear_cache((char *)image, (char *)image + sizeof guest_image);
     assert(!mprotect(image, sizeof guest_image, PROT_READ | PROT_EXEC));
+    host_import = resolve_import(NULL, "test_sdk_call");
+    assert(host_import == (uintptr_t)sdk_call);
+    gate_register((uintptr_t)image + GUEST_GATE_PC, "svc", 0x1e, (uintptr_t)image + GUEST_SVC_PC);
     struct sigaction sa = {.sa_sigaction = trap, .sa_flags = SA_SIGINFO | SA_ONSTACK};
     sigemptyset(&sa.sa_mask);
     assert(!sigaction(SIGTRAP, &sa, NULL));
