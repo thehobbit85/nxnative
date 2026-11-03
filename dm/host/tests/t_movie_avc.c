@@ -159,7 +159,7 @@ static void drain(int nout) {
     for (;;) {   // the client returns each output it takes, so the next one is always ready
         assert(!h_movie_AcqOut(self, &idx, &pts, &flags, &left));
         if (++got < 4) assert(d.out[idx].pic && pts == 0 && !(flags & 4));
-        else { assert(!d.out[idx].pic && pts == 777 && flags == 4 && !d.avc_drain && !mavc_queued(d.avc) && !left); break; }
+        else { assert(!d.out[idx].pic && pts == 777 && flags == 4 && !d.output_drain && !mavc_queued(d.avc) && !left); break; }
         assert(md_rel(&d, idx));
     }
     md_job(&d, MDJ_QUIT); pthread_join(d.wk, NULL);

@@ -7,8 +7,7 @@
 // SPS pic_order_cnt_type 2 has decode order equal to output order: even High profile needs no reorder queue in that case
 #include "hle.h"
 #ifdef __ANDROID__
-#include <media/NdkMediaCodec.h>
-#include <media/NdkMediaFormat.h>
+#include "movie_mediacodec.h"
 #else
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>
@@ -19,8 +18,8 @@
 struct mavc {
     uint8_t sps[512], pps[512]; int nsps, npps, dirty;
 #ifdef __ANDROID__
-    AMediaCodec *mc;
-    int coded_w, coded_h, eos_in, eos_out, nq, fed_picture;
+    media_stream stream;
+    int coded_w, coded_h, nq, fed_picture;
     int64_t max_pts;
     struct avc_frame *first, *last;
 #else
