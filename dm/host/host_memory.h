@@ -4,11 +4,13 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <unistd.h>
+static inline size_t dm_host_read_some(uintptr_t address, void *buf, size_t size);
+static inline int dm_host_read(uintptr_t address, void *buf, size_t size) { return dm_host_read_some(address, buf, size) == size; }
 #ifdef __APPLE__
 #include <mach/mach.h>
-static inline int dm_host_read(uintptr_t address, void *buf, size_t size) {
+static inline size_t dm_host_read_some(uintptr_t address, void *buf, size_t size) {
     vm_size_t got;
-    return vm_read_overwrite(mach_task_self(), address, size, (vm_address_t)buf, &got) == KERN_SUCCESS && got == size;
+    return vm_read_overwrite(mach_task_self(), address, size, (vm_address_t)buf, &got) == KERN_SUCCESS ? got : 0;
 }
 static inline int dm_host_write(uintptr_t address, const void *buf, size_t size) {
     return size <= UINT32_MAX && vm_write(mach_task_self(), address, (vm_offset_t)buf, (mach_msg_type_number_t)size) == KERN_SUCCESS;
@@ -22,9 +24,10 @@ static inline size_t dm_host_stack(uintptr_t *base) {
 #else
 #include <sys/uio.h>
 #include <errno.h>
-static inline int dm_host_read(uintptr_t address, void *buf, size_t size) {
+static inline size_t dm_host_read_some(uintptr_t address, void *buf, size_t size) {
     struct iovec local = {buf, size}, remote = {(void *)address, size};
-    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)size;
+    ssize_t n = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+    return n > 0 ? (size_t)n : 0;
 }
 static inline int dm_host_write(uintptr_t address, const void *buf, size_t size) {
     struct iovec local = {(void *)buf, size}, remote = {(void *)address, size};
