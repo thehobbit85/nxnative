@@ -621,6 +621,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Translation
 
+### Vulkan storage image writes without a format
+
+- **Symptom:** `spirv-val` reports `Capability StorageImageWriteWithoutFormat is required to write to storage image` during Vulkan export.
+- **Cause:** a translated shader loads an Unknown-format storage image and writes to it with `OpImageWrite`. Its original SPIR-V omits the capability required for that operation.
+- **Fix:** the Vulkan exporter declares the capability for such writes, preserves required optional capabilities, and validates the finished module against Vulkan 1.1 before publishing its descriptor bindings.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#found-on-this-game) on two shader stages requested during Android startup.
+
+For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/tools/spv_android.py <build>/shader/pkg <new-output-directory> --keys-file <keys.txt>`. List one 16-digit stage key per line. The build uses the existing locked translator and requires `spirv-val` on PATH. Each stage produces a `.spv` binary and a `.vk.txt` descriptor table for the Android Vulkan backend. The exporter publishes the output directory after every requested stage passes.
+
 ### Tested tools and compiler-specific shader caches
 
 - **Symptom:** a shader build accepts tools that differ from `dmsh_chain.lock`; after an override build, returning to the tested Metal compiler can still restore the override's libraries.
