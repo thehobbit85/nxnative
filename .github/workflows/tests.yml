@@ -80,6 +80,8 @@ jobs:
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE" build/t_fault_access build/t_lifecycle build/t_hid build/t_android_scheduler
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang" build/t_audio_android
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" android-fs-build
+          make -C dm/host/tests -j4 GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" \
+            CODEC_AR="$bin/llvm-ar" android-software-video
           make -C dm/gfx/nvn/vulkan GAME="$GAME" CC="$bin/aarch64-linux-android30-clang" \
             GLSLC="$ANDROID_NDK_HOME/shader-tools/linux-x86_64/glslc" LIBS="-lvulkan -landroid -lm" fixture android-recorder build/t_capture
 
@@ -90,6 +92,7 @@ jobs:
             dm/host/tests/build/t_memory_android*
             dm/host/tests/build/t_fault_access
             dm/host/tests/build/t_lifecycle
+            dm/host/tests/build/t_software_video
             dm/host/tests/build/t_hid
             dm/host/tests/build/t_android_scheduler
             dm/host/tests/build/android-fs/t_*
@@ -118,6 +121,10 @@ jobs:
         run: |
           chmod +x tests/t_hid
           tests/t_hid
+      - name: Decode synthetic VP8, VP9 and AV1 packets with static bionic
+        run: |
+          chmod +x tests/t_software_video
+          tests/t_software_video
       - name: Run guest threads, priority handoffs, waits and signal contexts on bionic
         run: |
           chmod +x tests/t_android_scheduler

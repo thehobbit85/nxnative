@@ -296,7 +296,15 @@ $(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_a
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 $(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox
-$(B)/t_codec_video: t_codec_video.c ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_av1.c ../hle_movie_av1.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a | $(B)
+# Pass the NDK compiler (CLANG) and llvm-ar (CODEC_AR) on any build host.
+.PHONY: android-software-video
+android-software-video: $(GAME_H) | $(B)
+	$(MAKE) -C .. -f codecs.mk CODEC_TARGET=android CODEC_CC="$(CLANG)" CODEC_AR="$(CODEC_AR)" codec-libs
+	$(CLANG) -O2 -D_GNU_SOURCE -UNDEBUG -I.. $(GINC) -I../../third_party/libvpx -I../../third_party/dav1d/include \
+	    t_software_video.c ../hle_movie_av1.c ../gen/android-arm64/vpx/libvpx.a ../gen/android-arm64/dav1d/libdav1d.a \
+	    -Wl,-z,max-page-size=16384 -lm -ldl -o $(B)/t_software_video
+
+$(B)/t_codec_video: t_codec_video.c video_packets.h ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_av1.c ../hle_movie_av1.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-tautological-compare -fsanitize=address,undefined $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/dav1d/include -I../../third_party/stb_vorbis -o $@ t_codec_video.c ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a \
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 ../gen/vpx/libvpx.a: FORCE
