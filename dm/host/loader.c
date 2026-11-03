@@ -254,6 +254,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "FILE_IMAGE_LEN")) m->file_image_len = v;
         else if (!strcmp(key, "BACK_OFF")) m->back_off = v;
         else if (!strcmp(key, "BACK_LEN")) m->back_len = v;
+        else if (!strcmp(key, "TP_SLOT") && v) die("%s: incompatible thread-slot layout TP_SLOT=%#lx; rewrite the modules for Apple", path, v);
         else if (!strcmp(key, "KEY_PAGE_OFF")) m->key_page_off = v;
         else if (!strcmp(key, "KEY_PAGE_SIZE")) m->key_page_size = v;
         else if (!strcmp(key, "TEXT_END")) m->text_end = v;
