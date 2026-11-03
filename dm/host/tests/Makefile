@@ -361,6 +361,6 @@ GATE_RUNNER ?=
 gate-test: $(GAME_H)
 	mkdir -p "$(B)/gate-$(GATE_ABI)"
 	DM_GAME=$(GAME) $(PYTHON) gate/fixture.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)" $(GATE_SEGMENT_ALIGN)
-	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) $(GATE_LOADER_FLAGS) gate/roundtrip.c ../thread.c ../entry.S ../hle.c ../loader.c ../crash.c -ldl -o "$(B)/gate-$(GATE_ABI)/roundtrip"
+	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) $(GATE_LOADER_FLAGS) gate/roundtrip.c ../thread.c ../entry.S ../hle.c ../hle_os.c ../hle_time.c ../loader.c ../crash.c -ldl -o "$(B)/gate-$(GATE_ABI)/roundtrip"
 	$(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip" "$(B)/gate-$(GATE_ABI)"
 	ulimit -c 0; $(PYTHON) gate/reject_foreign.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)" $(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip"
