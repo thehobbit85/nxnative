@@ -89,10 +89,15 @@ jobs:
           make -C dm/gfx/nvn/vulkan GAME="$GAME" CC="$bin/aarch64-linux-android30-clang" \
             GLSLC="$ANDROID_NDK_HOME/shader-tools/linux-x86_64/glslc" LIBS="-lvulkan -landroid -lm" fixture android-recorder build/t_capture
 
+      - name: Build the cheat VM and executable-text test with static bionic
+        run: |
+          cc="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang"
+          make -C dm/host/tests GAME="$GAME" CLANG="$cc -static -D_GNU_SOURCE" build/t_cheats
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: android-kernel-tests
           path: |
+            dm/host/tests/build/t_cheats
             dm/host/tests/build/t_memory_android*
             dm/host/tests/build/t_fault_access
             dm/host/tests/build/t_lifecycle
@@ -125,6 +130,8 @@ jobs:
           chmod +x tests/t_memory_android tests/t_memory_android_unlimited tests/t_fault_access tests/t_lifecycle
           tests/t_fault_access
           tests/t_lifecycle
+          chmod +x tests/t_cheats
+          TMPDIR="$RUNNER_TEMP" tests/t_cheats
           tests/t_memory_android
           tests/t_memory_android_unlimited
       - name: Check frame settings and engine heap alignment on bionic

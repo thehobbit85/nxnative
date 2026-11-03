@@ -48,6 +48,9 @@ typedef struct {
     char name[16];
     uint8_t *base;             // Start address of the image (including the patch area) in the host address space
     size_t size;
+#ifdef __ANDROID__
+    int text_fd_plus_one;       // main's retained memfd for an optional non-executable cheat writer
+#endif
     uint64_t text_end, ro_off, data_off, key_page_off, key_page_size;   // From the rewriter fixups header
     uint64_t ue_malloc_vt;     // Unreal's FMallocBinned3 vtable, found by the rewriter (patch_nso.py, ue_malloc.py; hle_uemalloc.c); 0 = none
     unsigned ue_malloc_slot;   // the slot of its name getter, which names the slot layout
