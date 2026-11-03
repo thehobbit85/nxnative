@@ -71,6 +71,8 @@ static void *worker(void *arg) {
     guest_thread_init();
     guest_thread_set_id(tag);
     __asm__ volatile("mov %0, x18" : "=r"(host_x18));
+    uint64_t (*callback)(uint64_t) = (uint64_t (*)(uint64_t))(image + GUEST_CALLBACK_PC);
+    assert(callback(37) == tag + 37 && (uintptr_t)dm_slot_get(g_key18) == 37);
     if (!setjmp(finished)) {
         guest_gate_stack(1);
         dm_thread_enter((uintptr_t)image, (uintptr_t)result, (uintptr_t)(guest_stack + stack_bytes));
@@ -106,6 +108,6 @@ int main(void) {
     assert(!pthread_create(&a, NULL, worker, (void *)101) && !pthread_create(&b, NULL, worker, (void *)202));
     assert(!pthread_join(a, NULL) && !pthread_join(b, NULL));
     assert(!munmap(image, sizeof guest_image));
-    puts("Rewritten guest: separate TLS and gate stacks, signal spill and SVC return on two threads: OK");
+    puts("Rewritten guest callback, separate TLS and gate stacks, signal spill and SVC return on two threads: OK");
     return 0;
 }
