@@ -1267,6 +1267,14 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
 static gw_t g_wb[16]; static int g_nwb;   // the storage buffers the last compute descriptor set bound (write_set), which its dispatch writes
 static VkDescriptorSet write_set(shader_t *s, int stage) {
     if (stage == 5) g_nwb = 0;
+    // Every statically used descriptor must be populated before submitting this pipeline.
+    for (int i = 0; i < s->nb; ++i) {
+        const sbind *b = &s->b[i];
+        if (b->count != 1 || (b->type != BT_UBO && b->type != BT_SSBO && b->type != BT_CIS)) {
+            RED_ONCE(22, "cannot populate descriptor %u type %d count %u (shader %s)", b->binding, b->type, b->count, s->key);
+            return VK_NULL_HANDLE;
+        }
+    }
     VkDescriptorSet ds; VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, C->dp, 1, &s->dsl};
     if (vkAllocateDescriptorSets(g_dev, &ai, &ds) != VK_SUCCESS) { RED_ONCE(20, "descriptor pool exhausted in one submission: draws are dropped"); return VK_NULL_HANDLE; }
     VkWriteDescriptorSet w[64]; VkDescriptorBufferInfo bi[64]; VkDescriptorImageInfo ii[64]; int nw = 0;
@@ -1316,7 +1324,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
             }
             ii[nw] = (VkDescriptorImageInfo){sm, view, VK_IMAGE_LAYOUT_GENERAL};
             x->descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; x->pImageInfo = &ii[nw];
-        } else { RED_ONCE(22, "descriptor type %d not implemented yet (shader %s)", b->type, s->key); continue; }
+        }
         nw++;
     }
     vkUpdateDescriptorSets(g_dev, (uint32_t)nw, w, 0, NULL);
@@ -1547,33 +1555,72 @@ static void copy_t2t(const p_copy_t2t *c) {
     } else { static int n; if (n++ < 8) LOG("[RED] vk: scaled texture copy between formats %d → %d that cannot be blitted: skipped", (int)s->f.f, (int)d->f.f); return; }
     barrier_all(C->cb);
 }
-static void copy_t2b(const p_copy_t2t *c) {   // src = the texture, dst field of the record = the destination buffer address (see nvn_obj.h)
+static void copy_t2b(const p_copy_b2t *c) {
     if (vk_skip() & SK_T2B) return;
-    if (g_plog) LOG("plog:  t2b %llu %dx%d", (unsigned long long)c->src->serial, c->sr.width, c->sr.height);
-    vtex *s = tex_get(c->src, 0); if (!s) return;
-    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(c->src->d.format, &bw, &bh); if (!bpb || s->f.dec) { RED_ONCE(51, "texture-to-buffer copy of format %#x not implemented", c->src->d.format); return; }
-    pass_end();
-    uint32_t w = (uint32_t)c->sr.width, h = (uint32_t)c->sr.height; size_t row = S.copy_stride ? (size_t)S.copy_stride : (size_t)((w + bw - 1) / bw) * bpb, n = row * ((h + bh - 1) / bh);
-    VkDeviceSize o = ring_alloc(n, 16); if (o == VK_WHOLE_SIZE) return;
-    uint32_t sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0;
-    if (!lvl_fits(s, sl, (uint32_t)c->sr.zoffset, 1, c->sr.xoffset, c->sr.yoffset, 0, w, h, 1)) { static int nn; if (nn++ < 8) LOG("[RED] vk: texture-to-buffer copy %ux%u outside the %ux%u texture: skipped", w, h, s->w, s->h); return; }
-    VkBufferImageCopy bc = {o, (uint32_t)(row / bpb * bw), 0, {s->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, sl, (uint32_t)c->sr.zoffset, 1},
-                            {c->sr.xoffset, c->sr.yoffset, 0}, {w, h, 1}};
-    vkCmdCopyImageToBuffer(C->cb, s->img, VK_IMAGE_LAYOUT_GENERAL, C->ring, 1, &bc);
+    pass_end();   // materialize pending attachment clears before reading
+    vtex *v = tex_get(c->tex, 0); if (!v) return;
+    int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
+    if (!bpb || v->f.dec || v->f.stencil) { RED_ONCE(51, "texture-to-buffer format %#x is unsupported", c->tex->d.format); return; }
+    const NVNcopyRegion *r = &c->r;
+    if (r->width <= 0 || r->height <= 0 || r->zoffset < 0 || r->depth < 0) return;
+    uint32_t lv = c->has_view && c->view.set_levels ? c->view.base_level : 0;
+    uint32_t base = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
+    uint32_t nz = r->depth ? (uint32_t)r->depth : 1, layer = base + (uint32_t)r->zoffset;
+    int is3d = v->target == NVN_TEXTURE_TARGET_3D;
+    if (layer < base || !lvl_fits(v, lv, is3d ? 0 : layer, is3d ? 1 : nz, r->xoffset, r->yoffset,
+                                 is3d ? r->zoffset : 0, r->width, r->height, is3d ? nz : 1)) {
+        RED_ONCE(51, "texture-to-buffer region outside texture"); return;
+    }
+    size_t width = ((size_t)r->width + bw - 1) / bw * bpb, rows = ((size_t)r->height + bh - 1) / bh;
+    size_t slice = width * rows, row = S.copy_stride ? (size_t)S.copy_stride : width;
+    if (row < width || row > SIZE_MAX / rows) { RED_ONCE(51, "invalid readback row stride"); return; }
+    size_t image = S.copy_img_stride ? (size_t)S.copy_img_stride : row * rows;
+    if (image < (rows - 1) * row + width || image > SIZE_MAX / nz || c->src > UINTPTR_MAX - image * nz) {
+        RED_ONCE(51, "invalid readback image stride or destination"); return;
+    }
+    VkDeviceSize off = ring_alloc(slice * nz, 16); if (off == VK_WHOLE_SIZE) return;
+    VkBufferImageCopy bc = {off, 0, 0, {v->aspect, lv, is3d ? 0 : layer, is3d ? 1 : nz},
+                            {r->xoffset, r->yoffset, is3d ? r->zoffset : 0}, {(uint32_t)r->width, (uint32_t)r->height, is3d ? nz : 1}};
+    vkCmdCopyImageToBuffer(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, C->ring, 1, &bc);
     barrier_all(C->cb);
-    post_add((post_t){3, (void *)c->dst, 0, 0, 0, 0, C->ringp + o, n});
+    // Only copied bytes may overwrite the guest buffer. Row/image padding belongs to the caller.
+    uint8_t *dst = (uint8_t *)(uintptr_t)c->src, *src = C->ringp + off;
+    if (width == row && image == slice) post_add((post_t){3, dst, 0, 0, 0, 0, src, slice * nz});
+    else for (uint32_t z = 0; z < nz; ++z) {
+        if (width == row) post_add((post_t){3, dst + z * image, 0, 0, 0, 0, src + z * slice, slice});
+        else for (size_t y = 0; y < rows; ++y)
+            post_add((post_t){3, dst + z * image + y * row, 0, 0, 0, 0, src + z * slice + y * width, width});
+    }
 }
 static void clear_tex(const p_clear_tex *c) {
-    if (vk_skip() & SK_CLEAR) return;
+    if (!c->tex || (vk_skip() & SK_CLEAR)) return;
+    if (c->has_view && c->view.set_format && c->view.format != c->tex->d.format) {
+        RED_ONCE(84, "texture clear with a reinterpreted view requires a render-target clear"); return;
+    }
     if (g_plog) LOG("plog:  clear tex %llu fmt %#x", (unsigned long long)c->tex->serial, c->tex->d.format);
-    vtex *v = tex_get(c->tex, 1); if (!v) return;
-    pass_end();
+    vtex *v = tex_get(c->tex, 0); if (!v) return;
     uint32_t lv = c->has_view && c->view.set_levels ? c->view.base_level : 0;
     if (lv >= v->levels) { static int n; if (n++ < 8) LOG("[RED] vk: clear of level %u of a %u-level texture: skipped", lv, v->levels); return; }
     VkClearColorValue cc; memcpy(&cc, &c->c, 16);
-    VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 1, 0, VK_REMAINING_ARRAY_LAYERS};
-    if (v->f.depth) { VkClearDepthStencilValue dv = {c->c.f[0], 0}; rr.aspectMask = v->aspect; vkCmdClearDepthStencilImage(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, &dv, 1, &rr); }
+    uint32_t w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
+    uint32_t z = v->d >> lv ? v->d >> lv : 1;
+    uint32_t base = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
+    uint32_t nz = c->r.depth > 0 ? (uint32_t)c->r.depth : 1;
+    if (c->r.xoffset || c->r.yoffset || (uint32_t)c->r.width != w || (uint32_t)c->r.height != h ||
+        c->r.zoffset < 0 || c->r.depth < 0 || (c->mask & 15) != 15 ||
+        (v->target == NVN_TEXTURE_TARGET_3D && (c->r.zoffset || nz != z))) {
+        RED_ONCE(84, "partial texture clear requires a rectangular or masked clear path"); return;
+    }
+    uint32_t layer = base + (uint32_t)c->r.zoffset;
+    if (layer < base || (v->target != NVN_TEXTURE_TARGET_3D && (uint64_t)layer + nz > v->layers)) {
+        RED_ONCE(84, "clear outside texture layers"); return;
+    }
+    VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 1, v->target == NVN_TEXTURE_TARGET_3D ? 0 : layer,
+                                   v->target == NVN_TEXTURE_TARGET_3D ? 1 : nz};
+    pass_end();
+    if (v->f.depth) { VkClearDepthStencilValue dv = {c->c.f[0], c->c.u[1]}; rr.aspectMask = v->aspect; vkCmdClearDepthStencilImage(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, &dv, 1, &rr); }
     else vkCmdClearColorImage(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, &cc, 1, &rr);
+    v->gpu = 1;
     barrier_all(C->cb);
 }
 
@@ -1629,7 +1676,7 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_DISPATCH: dispatch((const p_dispatch *)a); break;
             case OP_COPY_B2T: copy_b2t((const p_copy_b2t *)a); break;
             case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
-            case OP_COPY_T2B: copy_t2b((const p_copy_t2t *)a); break;
+            case OP_COPY_T2B: copy_t2b((const p_copy_b2t *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
             case OP_BARRIER: pass_end(); break;
             case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.has_sc = 1; break;

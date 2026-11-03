@@ -22,8 +22,8 @@ static void clear_and_readback(void) {
     uint8_t pixels[8 * 8 * 4] = {0};
     struct { op_hdr h; p_clear_tex p; } clear = {
         .h = {OP_CLEAR_TEX, sizeof clear}, .p = {.tex = &tex, .r = {.width = 8, .height = 8, .depth = 1}, .mask = 15, .c.f = {1, 0, 1, 1}}};
-    struct { op_hdr h; p_copy_t2t p; } copy = {
-        .h = {OP_COPY_T2B, sizeof copy}, .p = {.src = &tex, .dst = (const tex_t *)(void *)pixels, .sr = {.width = 8, .height = 8, .depth = 1}}};
+    struct { op_hdr h; p_copy_b2t p; } copy = {
+        .h = {OP_COPY_T2B, sizeof copy}, .p = {.tex = &tex, .src = (uintptr_t)pixels, .r = {.width = 8, .height = 8, .depth = 1}}};
     struct { op_hdr barrier; typeof(clear) clear; typeof(copy) copy; op_hdr end; } list = {
         .barrier = {OP_BARRIER, sizeof(op_hdr)}, .clear = clear, .copy = copy, .end = {OP_END, sizeof(op_hdr)}};
     mtl_sub_begin();
@@ -58,7 +58,7 @@ static void textured_draw(int compact) {
     float positions[] = {-1,-1, 3,-1, -1,3};
     float color[] = {compact ? 1.f : 0.f, compact ? 0.f : 1.f, 1.f, 1.f};
     uint8_t pixels[8 * 8 * 4] = {0};
-    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &faces, .mask = 15, .c.f = {1, 1, 0, 1});
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &faces, .r = {.width = 8, .height = 8, .depth = 6}, .mask = 15, .c.f = {1, 1, 0, 1});
     RECORD(OP_BARRIER, uint32_t, 0);
     RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
     RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &program, .stages = 3);
@@ -77,7 +77,7 @@ static void textured_draw(int compact) {
         RECORD(OP_BIND_TEX, p_bind_handles, .stage = 1, .first = 3, .n = 1, .h = {slot});
     }
     RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
-    RECORD(OP_COPY_T2B, p_copy_t2t, .src = &output, .dst = (const tex_t *)(void *)pixels, .sr = {.width = 8, .height = 8, .depth = 1});
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels, .r = {.width = 8, .height = 8, .depth = 1});
     put(&list, OP_END, NULL, 0);
     mtl_sub_begin(); mtl_exec(list.bytes);
     assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
@@ -90,9 +90,31 @@ static void textured_draw(int compact) {
     }
 }
 
+static void strided_layers(void) {
+    list_t list = {0};
+    tex_t tex = {.serial = 91, .d = {.width = 8, .height = 8, .depth = 3, .levels = 1,
+                                    .target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&tex.d, &tex.L);
+    uint8_t bytes[128], expected[sizeof bytes];
+    memset(bytes, 0xcc, sizeof bytes); memset(expected, 0xcc, sizeof expected);
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &tex, .r = {.width=8, .height=8, .depth=3}, .mask=15, .c.f={0,0,1,1});
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &tex, .r = {.zoffset=1, .width=8, .height=8, .depth=1}, .mask=15, .c.f={1,0,0,1});
+    RECORD(OP_COPY_STRIDE, p_copy_stride, .stride=16);
+    RECORD(OP_COPY_STRIDE, p_copy_stride, .stride=64, .image=1);
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&tex, .src=(uintptr_t)bytes, .has_view=1, .view={.set_layers=1, .min_layer=1, .nlayers=2},
+           .r={.xoffset=1, .yoffset=2, .width=2, .height=3, .depth=2});
+    put(&list, OP_END, NULL, 0);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    for (int layer = 0; layer < 2; ++layer) for (int y = 0; y < 3; ++y) for (int x = 0; x < 2; ++x) {
+        uint8_t color[4] = {layer ? 0 : 255, 0, layer ? 255 : 0, 255};
+        memcpy(expected + 64 * layer + 16 * y + 4 * x, color, 4);
+    }
+    assert(!memcmp(bytes, expected, sizeof bytes));
+}
 int main(void) {
     clear_and_readback();
     textured_draw(0);
     textured_draw(1);
+    strided_layers();
     puts("Textured NVN draw, cube view, full/compact bindings and fenced Vulkan readback passed");
 }
