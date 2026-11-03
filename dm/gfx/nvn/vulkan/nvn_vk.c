@@ -13,6 +13,7 @@
 #include "hle.h"
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
+#include "nvn_refl.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -453,23 +454,44 @@ static fmt_t fmt_of(int nvn) {
     return r;
 }
 // Vertex attribute formats (NVN format → Vulkan, *_UI2F / *_I2F → SCALED), 0 = none
-static VkFormat vfmt(int f) {
-    static const VkFormat T[0x6D] = {
-        [0x01] = VK_FORMAT_R8_UNORM, VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UINT, VK_FORMAT_R8_SINT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_UNORM, VK_FORMAT_R16_SNORM, VK_FORMAT_R16_UINT, VK_FORMAT_R16_SINT,
-        VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8_SINT,
-        VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_SNORM, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_SINT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT,
-        VK_FORMAT_R8G8B8_UNORM, VK_FORMAT_R8G8B8_SNORM, VK_FORMAT_R8G8B8_UINT, VK_FORMAT_R8G8B8_SINT, VK_FORMAT_R16G16B16_SFLOAT, VK_FORMAT_R16G16B16_UNORM, VK_FORMAT_R16G16B16_SNORM,
-        VK_FORMAT_R16G16B16_UINT, VK_FORMAT_R16G16B16_SINT, VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32_SINT,
-        VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SNORM, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_SINT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_UNORM,
-        VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT,
-        [0x3D] = VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2B10G10R10_UINT_PACK32, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
-        [0x51] = VK_FORMAT_R8_USCALED, VK_FORMAT_R8_SSCALED, VK_FORMAT_R16_USCALED, VK_FORMAT_R16_SSCALED, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT,
-        VK_FORMAT_R8G8_USCALED, VK_FORMAT_R8G8_SSCALED, VK_FORMAT_R16G16_USCALED, VK_FORMAT_R16G16_SSCALED, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT,
-        VK_FORMAT_R8G8B8_USCALED, VK_FORMAT_R8G8B8_SSCALED, VK_FORMAT_R16G16B16_USCALED, VK_FORMAT_R16G16B16_SSCALED, VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32_SINT,
-        VK_FORMAT_R8G8B8A8_USCALED, VK_FORMAT_R8G8B8A8_SSCALED, VK_FORMAT_R16G16B16A16_USCALED, VK_FORMAT_R16G16B16A16_SSCALED, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT,
-        [0x69] = VK_FORMAT_A2B10G10R10_SNORM_PACK32, VK_FORMAT_A2B10G10R10_SINT_PACK32, VK_FORMAT_A2B10G10R10_USCALED_PACK32, VK_FORMAT_A2B10G10R10_SSCALED_PACK32,
+// Maxwell fetches by the NVN format, then shaders read the resulting register bits.
+// Select only a Vulkan format that produces those bits in the reflected type. The
+// missing w is integer 1 or float 1.0 according to the *source* numeric class.
+static VkFormat vfmt(unsigned fmt, unsigned ct) {
+#define F(v) { [NVN_CT_FLOAT] = VK_FORMAT_##v }
+#define U(v) { [NVN_CT_UINT] = VK_FORMAT_##v }
+#define I(v) { [NVN_CT_INT] = VK_FORMAT_##v }
+#define INT32(v) { [NVN_CT_UINT] = VK_FORMAT_##v##_UINT, [NVN_CT_INT] = VK_FORMAT_##v##_SINT }
+#define FULL32 { VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT }
+    static const VkFormat formats[][3] = {
+        [NVN_FORMAT_R8] = F(R8_UNORM), F(R8_SNORM), U(R8_UINT), I(R8_SINT),
+        F(R16_SFLOAT), F(R16_UNORM), F(R16_SNORM), U(R16_UINT), I(R16_SINT),
+        F(R32_SFLOAT), INT32(R32), INT32(R32),
+        [NVN_FORMAT_RG8] = F(R8G8_UNORM), F(R8G8_SNORM), U(R8G8_UINT), I(R8G8_SINT),
+        F(R16G16_SFLOAT), F(R16G16_UNORM), F(R16G16_SNORM), U(R16G16_UINT), I(R16G16_SINT),
+        F(R32G32_SFLOAT), INT32(R32G32), INT32(R32G32),
+        [NVN_FORMAT_RGB8] = F(R8G8B8_UNORM), F(R8G8B8_SNORM), U(R8G8B8_UINT), I(R8G8B8_SINT),
+        F(R16G16B16_SFLOAT), F(R16G16B16_UNORM), F(R16G16B16_SNORM), U(R16G16B16_UINT), I(R16G16B16_SINT),
+        F(R32G32B32_SFLOAT), INT32(R32G32B32), INT32(R32G32B32),
+        [NVN_FORMAT_RGBA8] = F(R8G8B8A8_UNORM), F(R8G8B8A8_SNORM), U(R8G8B8A8_UINT), I(R8G8B8A8_SINT),
+        F(R16G16B16A16_SFLOAT), F(R16G16B16A16_UNORM), F(R16G16B16A16_SNORM), U(R16G16B16A16_UINT), I(R16G16B16A16_SINT),
+        FULL32, FULL32, FULL32,
+        [NVN_FORMAT_RGB10A2] = F(A2B10G10R10_UNORM_PACK32), U(A2B10G10R10_UINT_PACK32), F(B10G11R11_UFLOAT_PACK32),
+        // Vulkan has no 32-bit scaled vertex formats.
+        [NVN_FORMAT_R8_UI2F] = F(R8_USCALED), F(R8_SSCALED), F(R16_USCALED), F(R16_SSCALED),
+        [NVN_FORMAT_RG8_UI2F] = F(R8G8_USCALED), F(R8G8_SSCALED), F(R16G16_USCALED), F(R16G16_SSCALED),
+        [NVN_FORMAT_RGB8_UI2F] = F(R8G8B8_USCALED), F(R8G8B8_SSCALED), F(R16G16B16_USCALED), F(R16G16B16_SSCALED),
+        [NVN_FORMAT_RGBA8_UI2F] = F(R8G8B8A8_USCALED), F(R8G8B8A8_SSCALED), F(R16G16B16A16_USCALED), F(R16G16B16A16_SSCALED),
+        [NVN_FORMAT_RGB10A2SN] = F(A2B10G10R10_SNORM_PACK32), I(A2B10G10R10_SINT_PACK32),
+        F(A2B10G10R10_USCALED_PACK32), F(A2B10G10R10_SSCALED_PACK32),
+        [NVN_FORMAT_BGRA8] = F(B8G8R8A8_UNORM),
     };
-    return f > 0 && f < 0x6D ? T[f] : VK_FORMAT_UNDEFINED;
+#undef FULL32
+#undef INT32
+#undef I
+#undef U
+#undef F
+    return fmt < sizeof formats / sizeof *formats && ct <= NVN_CT_INT ? formats[fmt][ct] : VK_FORMAT_UNDEFINED;
 }
 
 // BC1 / BC2 / BC3 → RGBA8 (Mali has no BC sampling); BC4-7 by bcdec
@@ -1135,16 +1157,31 @@ static VkBlendFactor bfac(int f) {
 static VkBlendOp bop(int e) { switch (e) { case 2: return VK_BLEND_OP_SUBTRACT; case 3: return VK_BLEND_OP_REVERSE_SUBTRACT; case 4: return VK_BLEND_OP_MIN; case 5: return VK_BLEND_OP_MAX; } return VK_BLEND_OP_ADD; }
 static VkStencilOp sop(int o) { return o >= 1 && o <= 8 ? (VkStencilOp)(o - 1) : VK_STENCIL_OP_KEEP; }
 static VkCompareOp cop(int f) { return f >= 1 && f <= 8 ? (VkCompareOp)(f - 1) : VK_COMPARE_OP_ALWAYS; }
-static VkPipeline pso_get(const pso_key *k, VkPipelineLayout pl) {
-    uint64_t h = fnv(k, sizeof *k);
-    for (int i = 0; i < g_npso; i++) if (g_pso[i].h == h && !memcmp(&g_pso[i].k, k, sizeof *k)) return g_pso[i].p;
+static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, k->vs->mod, "main", NULL},
                                              {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, k->fs ? k->fs->mod : VK_NULL_HANDLE, "main", NULL}};
     VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[16]; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
-    for (int i = 0; i < k->nattr && i < 16; i++) {
+    for (int i = 0; i < 32; i++) {
         if (!(k->vs->vin_mask >> i & 1)) continue;
-        VkFormat f = vfmt(k->attr[i].fmt);
-        if (!f) { static int n; if (n++ < 8) LOG("[RED] vk: vertex attribute %d format %#x has no Vulkan format", i, k->attr[i].fmt); continue; }
+        if (i >= k->nattr || i >= 16 || k->attr[i].stream >= 16) {
+            LOG("[RED] vk: vertex shader %s input %d has no usable NVN attribute or stream", k->vs->key, i);
+            return VK_NULL_HANDLE;
+        }
+        unsigned ct = k->vs->vin[i];
+        VkFormat f = vfmt(k->attr[i].fmt, ct);
+        if (!f) {
+            const char *type = ct == NVN_CT_FLOAT ? "float" : ct == NVN_CT_INT ? "int" : ct == NVN_CT_UINT ? "uint" : "unknown";
+            LOG("[RED] vk: vertex shader %s input %d (%s), NVN format %#x: no Vulkan vertex format preserves the fetched register values",
+                k->vs->key, i, type, k->attr[i].fmt);
+            return VK_NULL_HANDLE;
+        }
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(g_pd, f, &fp);
+        if (!(fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)) {
+            LOG("[RED] vk: vertex shader %s input %d: device does not support Vulkan vertex format %d (NVN %#x)",
+                k->vs->key, i, f, k->attr[i].fmt);
+            return VK_NULL_HANDLE;
+        }
         va[nva++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr[i].stream, f, k->attr[i].offset};
         used |= 1u << k->attr[i].stream;
     }
@@ -1190,6 +1227,12 @@ static VkPipeline pso_get(const pso_key *k, VkPipelineLayout pl) {
     VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, g_dynrend ? &rinfo : NULL, 0, k->fs ? 2 : 1, st, &vi, &ia, NULL, &vp, &rs, &ms, &ds, &cb, &dy, pl, crp, 0, VK_NULL_HANDLE, -1};
     VkPipeline p; VkResult r = vkCreateGraphicsPipelines(g_dev, g_pcache, 1, &gi, NULL, &p);
     if (r != VK_SUCCESS) { LOG("[RED] vk: pipeline for %s / %s not created (%d)", k->vs->key, k->fs ? k->fs->key : "-", (int)r); p = VK_NULL_HANDLE; }
+    return p;
+}
+static VkPipeline pso_get(const pso_key *k, VkPipelineLayout pl) {
+    uint64_t h = fnv(k, sizeof *k);
+    for (int i = 0; i < g_npso; i++) if (g_pso[i].h == h && !memcmp(&g_pso[i].k, k, sizeof *k)) return g_pso[i].p;
+    VkPipeline p = pso_create(k, pl);
     if (g_npso == g_cpso) { g_cpso = g_cpso ? 2 * g_cpso : 256; g_pso = realloc(g_pso, g_cpso * sizeof *g_pso); }
     g_pso[g_npso++] = (pso_ent){*k, h, p};
     return p;
