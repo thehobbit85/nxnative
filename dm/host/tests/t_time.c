@@ -1,15 +1,17 @@
 // Clock snapshot arithmetic (hle_time.c, from PR #36): CalculateSpanBetween and CalculateStandardUserSystemClockDifferenceByUser looked up by their mangled names in the real swforce
 // registrations, run on both host snapshot entries and on edited copies
 #include "../hle_time.c"
-#include <mach-o/getsect.h>
 
-uint64_t guest_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+uint64_t guest_ns(void) {
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC, &t)) abort();
+    return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
 static int checks, fails;
-extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 static void *hook(const char *name) {
     unsigned long bytes = 0;
-    const hle_force_ent *e = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    const hle_force_ent *e = DM_SECTION_DATA(swforce, &bytes);
     void *fn = NULL; unsigned count = 0;
     for (size_t i = 0; e && i < bytes / sizeof *e; i++) if (!strcmp(e[i].name, name)) { count++; fn = (void *)e[i].fn; }
     CHECK(count == 1 && fn, name);

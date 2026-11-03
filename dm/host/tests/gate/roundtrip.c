@@ -16,20 +16,21 @@ extern uint64_t dm_gate_top[];
 typedef uint64_t (*guest_callback)(uint64_t);
 static guest_callback callback;
 static uintptr_t guest_entry;
+static uint32_t (*read_steady)(uint8_t *);
 static _Atomic unsigned in_gate;
 static __thread jmp_buf finished;
-static __thread uint64_t tag, result[4], host_x18;
+static __thread uint64_t tag, result[5], host_x18;
 static __thread volatile sig_atomic_t handled;
 
 struct dm_flags g_flag;
-uint64_t now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec; }
+// Clock reads use the production gate and host clock. This fixture has no GPU or deterministic frame source.
+__thread _Atomic int dm_host_work;
+void dm_guest_clock_advanced(void) { abort(); }
 int svc_nro_deactivate(module_t *m) { abort(); }
 void hlecount_seal(void) {}
 extern void loader_hash_log(void);
 HLE("test_sdk_call", uint64_t, sdk_call, uint64_t x) { return x + 13; }
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { return fn; }
-uint64_t guest_ticks(void) { abort(); }
-void guest_clock_read_wait(void) { abort(); }
 void dm_spin_wait(uint64_t pc, uint64_t orig) { abort(); }
 void thr_svc_enter(uint64_t *regs, uint64_t orig) {}
 void thr_svc_leave(void) {}
@@ -78,12 +79,23 @@ static void *worker(void *arg) {
     guest_thread_set_id(tag);
     __asm__ volatile("mov %0, x18" : "=r"(host_x18));
     assert(callback(37) == tag + 37 + 3 + 13 && (uintptr_t)dm_slot_get(g_key18) == 37);
+    struct timespec before, after;
+    uint8_t timepoint[24];
+    assert(clock_gettime(CLOCK_MONOTONIC, &before) == 0);
+    assert(read_steady(timepoint) == 0);
+    assert(clock_gettime(CLOCK_MONOTONIC, &after) == 0);
+    int64_t seconds;
+    memcpy(&seconds, timepoint, sizeof seconds);
+    assert(seconds >= before.tv_sec && seconds <= after.tv_sec);
+    assert(!memcmp(timepoint + 8, "dmhost-steady-01", 16));
+    uint64_t tick_before = now_ns() * 12 / 625;
     if (!setjmp(finished)) {
         guest_gate_stack(1);
         dm_thread_enter(guest_entry, (uintptr_t)result, (uintptr_t)(guest_stack + stack_bytes));
         abort();
     }
     assert(handled);
+    assert(result[4] >= tick_before && result[4] <= now_ns() * 12 / 625);
     assert(result[0] == tag + 1 && result[1] == tag && result[2] == tag && result[3] == tag + 2);
     free(guest_stack);
     return NULL;
@@ -92,17 +104,18 @@ static void *worker(void *arg) {
 int main(int argc, char **argv) {
     assert(argc == 2);
     alarm(15);
-    const char *names[] = {"main", "sdk"};
-    load_modules(argv[1], names, 2);
+    const char *names[] = {"main", "sdk", "clockprobe"};
+    load_modules(argv[1], names, 3);
     loader_hash_log();
     guest_entry = (uintptr_t)guest_sym("guest_entry");
     callback = (guest_callback)guest_sym("guest_callback");
-    assert(guest_entry && callback);
+    read_steady = guest_sym("read_steady");
+    assert(guest_entry && callback && read_steady && !dm_sdk_ounce());
     crash_install();
     crash_set_trap_hook(trap);
     pthread_t a, b;
     assert(!pthread_create(&a, NULL, worker, (void *)101) && !pthread_create(&b, NULL, worker, (void *)202));
     assert(!pthread_join(a, NULL) && !pthread_join(b, NULL));
-    puts("Two rewritten modules, cross-module imports, guest callback, separate TLS and gate stacks, signal spill and SVC return on two threads: OK");
+    puts("Guest timer counter, registered SDK steady clock, linked module callbacks, TLS, trap and SVC return on two threads: OK");
     return 0;
 }
