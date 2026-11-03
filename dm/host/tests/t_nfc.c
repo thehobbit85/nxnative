@@ -19,7 +19,9 @@ void hle_signal_system_event(void *ev) { (void)ev; }
 uint64_t hle_system_event_binding(void *ev) { (void)ev; abort(); }
 int hle_signal_system_event_binding(uint64_t binding) { (void)binding; abort(); }
 uint32_t hle_hid_connected_npad(void) { return 0; }
+#ifdef __APPLE__
 void dm_host_helper_qos(qos_class_t q) { (void)q; }
+#endif
 static void *forced(const hle_force_ent *e, const char *name) {
     // ASan places redzones between section globals; inspect the emitted registration
     // objects individually instead of treating the Mach-O section as a packed array.

@@ -2,7 +2,6 @@
 #include "../hle_sdk16.c"
 void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: the shop stand-ins hold the game out of focus
 void dm_applet_leave(void) {}
-#include <mach-o/getsect.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 
@@ -36,11 +35,12 @@ void hle_signal_system_event(void *ev) { (void)ev; }
 uint64_t hle_system_event_binding(void *ev) { (void)ev; return 1; }
 int hle_signal_system_event_binding(uint64_t binding) { (void)binding; return 1; }
 uint32_t hle_hid_connected_npad(void) { return 0; }
+#ifdef __APPLE__
 void dm_host_helper_qos(qos_class_t q) { (void)q; }
-extern const struct mach_header_64 _mh_execute_header;
+#endif
 int main(void) {
     unsigned long bytes = 0;
-    const hle_force_ent *e = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    const hle_force_ent *e = DM_SECTION_DATA(swforce, &bytes);
     uint32_t (*load)(void *, char *, const void *, unsigned, unsigned) = NULL;
     unsigned count = 0;
     for (size_t i = 0; e && i < bytes / sizeof *e; i++) {
