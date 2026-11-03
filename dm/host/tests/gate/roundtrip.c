@@ -1,5 +1,6 @@
 // Execute a synthetic rewritten module on two real pthreads through entry.S and thread.c.
 #include "../../hle.h"
+#include "../../dm_uc.h"
 #include <assert.h>
 #include <sched.h>
 #include <setjmp.h>
@@ -53,20 +54,17 @@ uint64_t svc_dispatch(int svc, uint64_t *regs, uint64_t orig) {
     return regs[0];
 }
 
-static void trap(int sig, siginfo_t *info, void *context) {
-    (void)sig; (void)info;
-    ucontext_t *uc = context;
-#ifdef __APPLE__
-    uint64_t pc = uc->uc_mcontext->__ss.__pc;
-    uc->uc_mcontext->__ss.__pc += 4;
-#else
-    uint64_t pc = uc->uc_mcontext.pc;
-    uc->uc_mcontext.pc += 4;
-#endif
+extern void crash_thread_init(void), crash_install(void);
+extern void crash_set_trap_hook(int (*fn)(ucontext_t *));
+static int trap(ucontext_t *uc) {
+    uint64_t pc = UC_PC(uc), v[32][2]; uint32_t fpcr, fpsr;
+    if (UC_X(uc, 0) != tag || !uc_fpsimd(uc, v, &fpcr, &fpsr) || v[31][0] != tag) _exit(4);
+    UC_PC(uc) += 4;
     if (*(uint32_t *)(uintptr_t)pc != 0xd42000e0) _exit(2);  // BRK #7, while the guest has a spill below SP
     stack_t active;
     if (sigaltstack(NULL, &active) || !(active.ss_flags & SS_ONSTACK)) _exit(3);
     handled = 1;
+    return 1;
 }
 
 static void *worker(void *arg) {
@@ -74,8 +72,8 @@ static void *worker(void *arg) {
     result[0] = tag;
     const size_t stack_bytes = 128 * 1024;
     uint8_t *guest_stack = malloc(stack_bytes);
-    stack_t alt = {.ss_sp = malloc(stack_bytes), .ss_size = stack_bytes};
-    assert(guest_stack && alt.ss_sp && !sigaltstack(&alt, NULL));
+    assert(guest_stack);
+    crash_thread_init();
     guest_thread_init();
     guest_thread_set_id(tag);
     __asm__ volatile("mov %0, x18" : "=r"(host_x18));
@@ -87,9 +85,6 @@ static void *worker(void *arg) {
     }
     assert(handled);
     assert(result[0] == tag + 1 && result[1] == tag && result[2] == tag && result[3] == tag + 2);
-    alt.ss_flags = SS_DISABLE;
-    assert(!sigaltstack(&alt, NULL));
-    free(alt.ss_sp);
     free(guest_stack);
     return NULL;
 }
@@ -103,9 +98,8 @@ int main(int argc, char **argv) {
     guest_entry = (uintptr_t)guest_sym("guest_entry");
     callback = (guest_callback)guest_sym("guest_callback");
     assert(guest_entry && callback);
-    struct sigaction sa = {.sa_sigaction = trap, .sa_flags = SA_SIGINFO | SA_ONSTACK};
-    sigemptyset(&sa.sa_mask);
-    assert(!sigaction(SIGTRAP, &sa, NULL));
+    crash_install();
+    crash_set_trap_hook(trap);
     pthread_t a, b;
     assert(!pthread_create(&a, NULL, worker, (void *)101) && !pthread_create(&b, NULL, worker, (void *)202));
     assert(!pthread_join(a, NULL) && !pthread_join(b, NULL));

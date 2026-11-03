@@ -55,26 +55,30 @@ jobs:
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -Wl,--gc-sections" build/t_bigstack
           qemu-aarch64 dm/host/tests/build/t_bigstack
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" android-memory-build
+          make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE" build/t_fault_access
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: android-memory-tests
-          path: dm/host/tests/build/t_memory_android*
+          name: android-kernel-tests
+          path: |
+            dm/host/tests/build/t_memory_android*
+            dm/host/tests/build/t_fault_access
           retention-days: 1
 
   android-memory:
-    name: Android bionic memory services (native ARM64 Linux kernel)
+    name: Android bionic memory and signals (native ARM64 Linux kernel)
     needs: android-gates
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          name: android-memory-tests
+          name: android-kernel-tests
           path: tests
       - name: Check the real kernel's page, stack and self-process read behavior
         run: |
-          chmod +x tests/t_memory_android tests/t_memory_android_unlimited
+          chmod +x tests/t_memory_android tests/t_memory_android_unlimited tests/t_fault_access
+          tests/t_fault_access
           tests/t_memory_android
           tests/t_memory_android_unlimited
 
