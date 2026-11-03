@@ -35,6 +35,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_audren_layout
 	$(B)/t_swkbd
 	$(B)/t_altstack
+	$(B)/t_fault_access
 	$(B)/t_bigstack
 	$(B)/t_condvar
 	$(B)/t_condvar_old
@@ -304,6 +305,10 @@ tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_hid_tsan
 
 MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
+# The same kernel signal test also runs on Apple Silicon in the host suite.
+run: $(B)/t_fault_access
+$(B)/t_fault_access: t_fault_access.c t_altstack_stub.c ../crash.c ../dm.h ../dm_uc.h ../host_memory.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -I.. $(GINC) -o $@ t_fault_access.c t_altstack_stub.c ../crash.c -ldl
 # Cross-build static bionic binaries for execution on a native ARM64 kernel.
 .PHONY: android-memory-build
 android-memory-build: | $(B)
@@ -403,12 +408,12 @@ coverage:
 GATE_ABI ?= apple
 GATE_SEGMENT_ALIGN ?= 16384
 GATE_CC ?= $(CLANG)
-GATE_LOADER_FLAGS = $(if $(filter android,$(GATE_ABI)),-I../../android/compat ../../android/compat/sha256.c,-Wno-deprecated-declarations)
+GATE_LOADER_FLAGS = $(if $(filter android,$(GATE_ABI)),-D_GNU_SOURCE -I../../android/compat ../../android/compat/sha256.c,-Wno-deprecated-declarations)
 GATE_RUNNER ?=
 .PHONY: gate-test
 gate-test: $(GAME_H)
 	mkdir -p "$(B)/gate-$(GATE_ABI)"
 	DM_GAME=$(GAME) $(PYTHON) gate/fixture.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)" $(GATE_SEGMENT_ALIGN)
-	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) $(GATE_LOADER_FLAGS) gate/roundtrip.c ../thread.c ../entry.S ../hle.c ../loader.c -ldl -o "$(B)/gate-$(GATE_ABI)/roundtrip"
+	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) $(GATE_LOADER_FLAGS) gate/roundtrip.c ../thread.c ../entry.S ../hle.c ../loader.c ../crash.c -ldl -o "$(B)/gate-$(GATE_ABI)/roundtrip"
 	$(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip" "$(B)/gate-$(GATE_ABI)"
 	ulimit -c 0; $(PYTHON) gate/reject_foreign.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)" $(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip"

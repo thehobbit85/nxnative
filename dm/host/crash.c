@@ -1,4 +1,6 @@
+#ifdef __APPLE__
 #include <TargetConditionals.h>
+#endif
 // Crash state: prints the faulting address, pc, lr (converted to module-relative offsets) and the registers; dispatches page fault hooks.
 // Only signal handling itself lives here: diagnostic features (probes / UI messages / sampling) are in diag.c, and this file does not depend on them (the graphics unit tests link only this file).
 #include "dm.h"
@@ -7,8 +9,8 @@
 #include <sys/ucontext.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <libkern/OSCacheControl.h>
-#include <mach/mach.h>
+#include "dm_uc.h"
+#include "host_memory.h"
 #include <stdatomic.h>
 #include <time.h>
 #if TARGET_OS_OSX
@@ -101,18 +103,18 @@ void crash_off(const char *tag, uint64_t a) {   // Also used by diag.c
 
     module_t *m = module_of((void *)a);
     Dl_info di;
-    if (m) fprintf(stderr, " %s%s%s+%#llx", tag, *tag ? "=" : "", m->name, a - (uint64_t)m->base);
+    if (m) fprintf(stderr, " %s%s%s+%#llx", tag, *tag ? "=" : "", m->name, (unsigned long long)(a - (uint64_t)m->base));
     else if (dladdr((void *)a, &di) && di.dli_sname) fprintf(stderr, " %s%s%s+%#lx", tag, *tag ? "=" : "", di.dli_sname, (unsigned long)(a - (uint64_t)di.dli_saddr));
-    else fprintf(stderr, " %s%s%#llx", tag, *tag ? "=" : "", a);
+    else fprintf(stderr, " %s%s%#llx", tag, *tag ? "=" : "", (unsigned long long)a);
 }
 // Frame pointer backtrace: x29 chain [fp]=previous frame's fp, [fp+8]=return address; only 8-byte aligned, monotonically increasing frames are walked.
-// Each frame is read with vm_read_overwrite, which fails instead of faulting: code built without frame pointers keeps data in x29 (STEINS;GATE RE:BOOT's main+0x38921c: x29 = 0x430),
+// Each frame is read with a checked memory read: code built without frame pointers keeps data in x29 (STEINS;GATE RE:BOOT's main+0x38921c: x29 = 0x430),
 // and a probe's backtrace there used to crash the host
 void dm_backtrace(uint64_t fp) {
     fprintf(stderr, "[dm] bt:");
     for (int i = 0; i < 32 && fp && !(fp & 7); i++) {
-        uint64_t w[2]; vm_size_t got = 0;
-        if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
+        uint64_t w[2];
+        if (!dm_host_read(fp, w, sizeof w)) break;
         uint64_t nfp = w[0], ra = w[1];
         off("", ra);
         if (nfp <= fp) break;
@@ -161,7 +163,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
     if (sig == SIGSEGV || sig == SIGBUS) {
-        int is_write = (int)((uc->uc_mcontext->__es.__esr >> 6) & 1);   // The WnR bit of ESR
+        int is_write = (int)((uc_esr(uc) >> 6) & 1);   // The WnR bit of ESR
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
     crash_gate(sig);
@@ -170,37 +172,42 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     for (int i = 0; ftrylockfile(stderr); i++) {
         if (i < 100) { usleep(10000); continue; }
         char b[256]; int n = snprintf(b, sizeof b, "[dm] CRASH sig=%d (stderr held for 1 s, no dump)", sig);
-        uint64_t at[2] = {uc->uc_mcontext->__ss.__pc, uc->uc_mcontext->__ss.__lr};
+        uint64_t at[2] = {UC_PC(uc), UC_LR(uc)};
         for (int k = 0; k < 2; k++) { module_t *m = module_of((void *)at[k]);
-            n += m ? snprintf(b + n, sizeof b - n, " %s=%s+%#llx", k ? "lr" : "pc", m->name, at[k] - (uint64_t)m->base) : snprintf(b + n, sizeof b - n, " %s=%#llx", k ? "lr" : "pc", at[k]); }
+            n += m ? snprintf(b + n, sizeof b - n, " %s=%s+%#llx", k ? "lr" : "pc", m->name, (unsigned long long)(at[k] - (uint64_t)m->base)) : snprintf(b + n, sizeof b - n, " %s=%#llx", k ? "lr" : "pc", (unsigned long long)at[k]); }
         n += snprintf(b + n, sizeof b - n, "\n");
         if (write(2, b, (size_t)n) < 0) {}
         _exit(128 + sig);
     }
     funlockfile(stderr);
     fprintf(stderr, "[dm] CRASH sig=%d", sig);
-    off("addr", (uint64_t)si->si_addr); off("pc", uc->uc_mcontext->__ss.__pc); off("lr", uc->uc_mcontext->__ss.__lr);
-    fprintf(stderr, " sp=%#llx\n", uc->uc_mcontext->__ss.__sp);
-    for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, uc->uc_mcontext->__ss.__x[i], i % 6 == 5 ? "\n" : " ");
+    off("addr", (uint64_t)si->si_addr); off("pc", UC_PC(uc)); off("lr", UC_LR(uc));
+    fprintf(stderr, " sp=%#llx\n", (unsigned long long)UC_SP(uc));
+    for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, (unsigned long long)UC_X(uc, i), i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
-    // What the registers point at: the first six words of each readable target (read with vm_read_overwrite, which fails instead of faulting); a word inside a module prints as a module offset, so an object's vtable names its class
+    // What the registers point at: the first six words of each readable target (read with a checked memory read); a word inside a module prints as a module offset, so an object's vtable names its class
     for (int i = 0; i < 29; i++) {
-        uint64_t a = uc->uc_mcontext->__ss.__x[i], w[6]; vm_size_t got = 0;
-        if (a < 0x100000000ull || (a & 7) || vm_read_overwrite(mach_task_self(), (vm_address_t)a, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) continue;
+        uint64_t a = UC_X(uc, i), w[6];
+        if (a < 0x100000000ull || (a & 7) || !dm_host_read(a, w, sizeof w)) continue;
         fprintf(stderr, "[dm] *x%d:", i);
         for (int k = 0; k < 6; k++) off("", w[k]);
         fputc('\n', stderr);
     }
-    dm_backtrace(uc->uc_mcontext->__ss.__fp);
+    dm_backtrace(UC_FP(uc));
     // Stack scan: when the frame chain is broken (a return address was overwritten, pc = lr lands on garbage) the backtrace prints nothing; scan 512 words up from sp and list everything that resolves to a module / host symbol (nearest callers first)
-    {   uint64_t sp = uc->uc_mcontext->__ss.__sp;   // The frame just popped (when a return address was overwritten, the bad value and the leftovers of whatever overwrote it sit below sp)
-        fprintf(stderr, "[dm] fp=%#llx  0x100 bytes below sp:", (unsigned long long)uc->uc_mcontext->__ss.__fp);
-        for (int i = -32; i < 0 && sp && !(sp & 7); i++) fprintf(stderr, "%s%llx", (i + 32) % 4 ? " " : "\n[dm]   ", (unsigned long long)((uint64_t *)sp)[i]);
+    {   uint64_t sp = UC_SP(uc);   // The frame just popped (when a return address was overwritten, the bad value and the leftovers of whatever overwrote it sit below sp)
+        fprintf(stderr, "[dm] fp=%#llx  0x100 bytes below sp:", (unsigned long long)UC_FP(uc));
+        for (int i = -32; i < 0 && sp && !(sp & 7); i++) {
+            uint64_t word;
+            if (dm_host_read(sp + i * 8, &word, sizeof word))
+                fprintf(stderr, "%s%llx", (i + 32) % 4 ? " " : "\n[dm]   ", (unsigned long long)word);
+        }
         fputc('\n', stderr); }
-    {   uint64_t sp = uc->uc_mcontext->__ss.__sp; int n = 0;
+    {   uint64_t sp = UC_SP(uc); int n = 0;
         fprintf(stderr, "[dm] stack scan sp=%#llx:", (unsigned long long)sp);
         for (int i = -32; i < 512 && n < 24 && sp && !(sp & 7); i++) {
-            uint64_t v = ((uint64_t *)sp)[i]; Dl_info di;
+            uint64_t v; Dl_info di;
+            if (!dm_host_read(sp + i * 8, &v, sizeof v)) continue;
             if (v < 0x100000000ull || (v & 3)) continue;
             int mod = -1; for (int k = 0; k < g_nmod; k++) { uint64_t b = (uint64_t)(uintptr_t)g_mod[k].base; if (v >= b && v < b + g_mod[k].size) mod = k; }
             if (mod >= 0) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, g_mod[mod].name, (unsigned long long)(v - (uint64_t)(uintptr_t)g_mod[mod].base)); n++; }
@@ -214,13 +221,30 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
 // The alternate stack is released when the thread exits: the pthread key destructor is called at thread exit (disable the alternate stack first, then free). The game frequently starts short-lived threads, and without releasing each one leaks 64 KiB.
 static pthread_key_t g_altstack_key;
 static pthread_once_t g_altstack_once = PTHREAD_ONCE_INIT;
-static void altstack_free(void *p) { stack_t off = {.ss_flags = SS_DISABLE}; sigaltstack(&off, 0); free(p); }
+enum { ALTSTACK_BYTES = 65536 };
+typedef struct { stack_t previous; _Alignas(16) unsigned char stack[ALTSTACK_BYTES]; } signal_stack;
+static void altstack_free(void *p) {
+    signal_stack *s = p;
+    stack_t active;
+    if (sigaltstack(NULL, &active)) die("query signal stack (errno %d)", errno);
+    if (active.ss_sp == s->stack && !(active.ss_flags & SS_DISABLE)) {
+        stack_t restore = s->previous;
+        if (restore.ss_flags & SS_DISABLE) { restore = active; restore.ss_flags = SS_DISABLE; }
+        if (sigaltstack(&restore, NULL)) die("restore signal stack (errno %d)", errno);
+    }
+    free(s);
+}
 static void altstack_key_init(void) { if (pthread_key_create(&g_altstack_key, altstack_free)) die("altstack key"); }
 void crash_thread_init(void) {
     pthread_once(&g_altstack_once, altstack_key_init);
-    if (pthread_getspecific(g_altstack_key)) return;                 // Repeated calls on the same thread do not allocate again
-    stack_t ss = {.ss_sp = malloc(65536), .ss_size = 65536}; sigaltstack(&ss, 0);
-    pthread_setspecific(g_altstack_key, ss.ss_sp);
+    if (pthread_getspecific(g_altstack_key)) return;
+    stack_t previous;
+    if (sigaltstack(NULL, &previous)) die("query signal stack (errno %d)", errno);
+    if (!(previous.ss_flags & SS_DISABLE) && previous.ss_size >= ALTSTACK_BYTES) return;
+    signal_stack *s = malloc(sizeof *s);
+    if (!s) die("allocating guest signal stack");
+    stack_t ss = {.ss_sp = s->stack, .ss_size = sizeof s->stack};
+    if (sigaltstack(&ss, &s->previous) || pthread_setspecific(g_altstack_key, s)) die("installing guest signal stack");
 }
 void crash_install(void) {
     crash_thread_init();
