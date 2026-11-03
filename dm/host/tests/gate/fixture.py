@@ -1,4 +1,4 @@
-"""Build two linked NSOs and rewrite them for the selected ARM64 host."""
+"""Build linked NSOs and rewrite them for the selected ARM64 host."""
 from pathlib import Path
 import os
 import struct
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
 from dm.tools.tests.test_nso import make_nso
 
-# void guest(uint64_t results[4]), with the thread tag in results[0]. The BRK delivers a signal while the guest has a spill below SP.
+# void guest(uint64_t results[5]), with the thread tag in results[0]. The BRK delivers a signal while the guest has a spill below SP.
 ENTRY = (
     0x14000002, 0,                  # b start; MOD0 in the read-only segment
     0xaa0003e1, 0xf9400020,              # mov x1,x0; ldr x0,[x1]
@@ -20,6 +20,7 @@ ENTRY = (
     0xd40003c1,                          # svc #0x1e
     0xf9000020, 0xf9000432,              # str x0,[x1]; str x18,[x1,#8]
     0xd53bd042, 0xf9000822, 0xf9000c31,  # mrs x2,tpidr_el0; str x2,[x1,#16]; str x17,[x1,#24]
+    0xd53be030, 0xf9001030,              # mrs x16,cntpct_el0; str x16,[x1,#32]
     0xd65f03c0,                          # ret
 )
 CALLBACK = (
@@ -75,6 +76,9 @@ def main():
     # main.callback -> sdk.adjust (+3) -> registered host import test_sdk_call (+13).
     module(dest, target, 'main', ENTRY + CALLBACK, {'guest_entry': 8, 'guest_callback': 4 * len(ENTRY)}, 'adjust', align)
     module(dest, target, 'sdk', (0x14000002, 0, 0x91000c00), {'adjust': 8}, 'test_sdk_call', align)
+    # A guest import resolved from the production service registry.
+    module(dest, target, 'clockprobe', (0x14000002, 0), {'read_steady': 8},
+           '_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE', align)
 
 
 if __name__ == '__main__':

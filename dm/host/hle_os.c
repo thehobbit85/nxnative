@@ -2,7 +2,11 @@
 // (The former 136 HLE entries for nn::os/mem/lmem/C++ ABI have been deleted: the SDK brings its own nn::os, and at load time not one of these entries was resolved and used.)
 #include <pthread.h>
 #include "hle.h"
+#ifdef __APPLE__
 #include <mach/mach_time.h>
+#else
+#include <time.h>
+#endif
 #include <stdatomic.h>
 
 // ---------- Side table ----------
@@ -37,9 +41,16 @@ void *objmap_del(const void *k) {
     return r;
 }
 uint64_t now_ns(void) {
+#ifdef __APPLE__
     static mach_timebase_info_data_t tb;
     if (!tb.denom) mach_timebase_info(&tb);
     return mach_absolute_time() * tb.numer / tb.denom;
+#else
+    // Like mach_absolute_time, Linux CLOCK_MONOTONIC excludes system suspend.
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC, &t)) die("reading the monotonic clock: %s", strerror(errno));
+    return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+#endif
 }
 // Guest clock: the system counters the guest can read (mrs cntpct gate, svc GetSystemTick) all go through here. Default = now_ns().
 // Freeze (only for the test driver DM_TICK_HOLD): while frozen the guest clock does not advance ⇒ the game's next tick never comes due; after unfreezing the frozen duration is subtracted, the guest clock is continuous with no jump
