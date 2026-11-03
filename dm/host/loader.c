@@ -659,10 +659,16 @@ static int seal_code(uint8_t *address, size_t size) {
     return mprotect(address, size, PROT_READ | PROT_EXEC);
 }
 
-// Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
+// Seal the code area immediately after copying into anonymous pages: [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.patched.bin", dir, m->name);
+    size_t pg = (size_t)getpagesize();
+    uint64_t rx = dm_text_seal_end(m, pg);
+#ifdef __ANDROID__
+    if (m->data_off && rx > m->data_off)
+        die("%s: writable data at %#llx shares a %zu-byte host page with executable text", path, (unsigned long long)m->data_off, pg);
+#endif
     size_t sz; uint8_t *raw = slurp(path, &sz);
     if (m->patch_off < 0) {
         // Patch area before the base: file = the first part of the image (text + ro + data) + patch area; bss and the key page are anonymous zero pages. The gap from the patch area's end to the base is left inaccessible (PROT_NONE)
@@ -677,7 +683,6 @@ static void map_image(module_t *m, const char *dir) {
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
         free(raw); install_key_page(m);
         if (bl && seal_code(m->base + m->back_off, bl)) die("%s mprotect back patch", m->name);
-        uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (seal_code(m->base, rx)) die("%s mprotect text", m->name);
         if (seal_code(a, m->patch_len)) die("%s mprotect patch", m->name);
         if (pre > m->patch_len && mprotect(a + m->patch_len, pre - m->patch_len, PROT_NONE)) die("%s mprotect gap", m->name);
@@ -687,7 +692,6 @@ static void map_image(module_t *m, const char *dir) {
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
-    uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (seal_code(m->base, rx)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
     if (seal_code(m->base + po, m->size - po)) die("%s mprotect patch", m->name);
