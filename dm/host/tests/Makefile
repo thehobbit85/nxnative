@@ -232,6 +232,13 @@ $(B)/t_time: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_time.c
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
+# Run a synthetic worker through thread_main, the guest stack switch, the SVC gate and bionic signals.
+ANDROID_SCHED_SRC = t_android_scheduler.c ../hle_thread.c ../thread.c ../entry.S ../crash.c ../hle_os.c ../loader.c ../hle.c ../hle_svc.c
+$(B)/t_android_scheduler: $(ANDROID_SCHED_SRC) ../dm.h ../dm_uc.h ../host_memory.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -UNDEBUG -fPIC -fvisibility=hidden \
+	    -ffunction-sections -fdata-sections -I.. -I../../android/compat $(GINC) $(ANDROID_SCHED_SRC) \
+	    -Wl,--gc-sections -Wl,--no-undefined -Wl,-z,max-page-size=16384 -ldl -o $@
+
 $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -DDM_TEST_HOOKS -I.. $(GINC) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
 $(B)/t_condvar_old: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
