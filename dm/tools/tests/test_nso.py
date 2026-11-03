@@ -59,9 +59,10 @@ def flags(d, set_=0, clear=0):
 
 class Load(unittest.TestCase):
     def test_rewrite_thread_slots(self):
-        # A MOD0 with one unwind entry and five sites: guest TLS read, thread-local region
-        # read, TLS write, x18 read, SVC. The patch must use the host ABI at every site.
-        words = (0x14000002, 0x1000, 0xd53bd042, 0xd53bd063, 0xd51bd044, 0xaa1203e5, 0xd4000021, 0xd65f03c0)
+        # A MOD0 with one unwind entry. Cover ordinary slot accesses and TLS operands
+        # that name the virtual x18 or the architectural zero register.
+        words = (0x14000002, 0x1000, 0xd53bd042, 0xd53bd063, 0xd51bd044, 0xaa1203e5, 0xd4000021,
+                 0xd53bd052, 0xd53bd072, 0xd51bd052, 0xd53bd05f, 0xd53bd07f, 0xd65f03c0)
         ro = bytearray(128)
         ro[:4] = b'MOD0'
         struct.pack_into('<i', ro, 16, 48)
@@ -69,7 +70,7 @@ class Load(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / 'module'
-            source.write_bytes(make_nso((struct.pack('<8I', *words), ro, bytes(64)), compress=(0, 0, 0)))
+            source.write_bytes(make_nso((struct.pack(f'<{len(words)}I', *words), ro, bytes(64)), compress=(0, 0, 0)))
             env = dict(os.environ, DM_GAME='0100633007D48000', DM_REWRITE_J='1')
             for target in ('apple', 'android'):
                 out = root / target
@@ -81,7 +82,14 @@ class Load(unittest.TestCase):
                 start = int(header['PATCH_OFF'], 0)
                 patch = [w for w, in struct.iter_unpack('<I', (out / 'fixture.patched.bin').read_bytes()[start:])]
                 reads = [(i, w) for i, w in enumerate(patch) if w & 0xffffffe0 in (0xd53bd040, 0xd53bd060)]
-                self.assertEqual(len(reads), 5)
+                # x18 TLS operands copy between two virtual slots; reads to xzr do not visit a slot.
+                keys = []
+                for i, w in reads:
+                    self.assertNotIn(w & 31, (18, 31))
+                    key_load = patch[i + (2 if target == 'apple' else 3)]
+                    self.assertEqual(key_load & 0xffc00000, 0xf9400000)
+                    keys.append((key_load >> 10) & 0xfff)
+                self.assertEqual(keys, [1, 2, 1, 0, 3, 1, 0, 2, 0, 0, 1])
                 if target == 'apple':
                     self.assertNotIn('TP_SLOT', header)
                     self.assertTrue(all(w & 0xffffffe0 == 0xd53bd060 for _, w in reads))
