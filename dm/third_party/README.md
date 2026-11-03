@@ -2,6 +2,9 @@
 
 This is code written by others, shipped with the repository so there is nothing to download. Each component keeps its original license, and the license file sits in its own directory.
 
+The portable NVN capture reader and writer use the reference LZFSE codec on Linux and Android. The library sources in `lzfse/` are from commit `e634ca58b4821d9f3d560cdc6df5dec02ffc93fd` and carry its BSD 3-Clause license. Apple builds use the system Compression framework. [Reference implementation](https://github.com/lzfse/lzfse/tree/e634ca58b4821d9f3d560cdc6df5dec02ffc93fd)
+
+
 | Directory | What it is | Version and changes | Where it is used | License file |
 |---|---|---|---|---|
 | `flip/` | NVIDIA FLIP, an image difference metric that models human viewing. `FLIP.h` plus the source of the command-line tool in `tool/` | Not recorded in the directory | Verification: the image quality measurements in `dm/verify/gfxq/`; build `flip` first with `make -C dm/third_party/flip` | `flip/LICENSE` (BSD 3-Clause) |
