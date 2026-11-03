@@ -140,6 +140,32 @@ static void host_memory(void) {
     assert(dm_host_read(address, &value, sizeof value) && value == local);
     assert(!dm_host_read(1, &value, sizeof value));   // unwinding an invalid guest frame must not fault
 }
+#ifdef __ANDROID__
+static void *check_worker_stack(void *custom) {
+    pthread_attr_t attr;
+    assert(!pthread_getattr_np(pthread_self(), &attr));
+    void *raw; size_t size, guard;
+    assert(!pthread_attr_getstack(&attr, &raw, &size) && !pthread_attr_getguardsize(&attr, &guard));
+    assert(!pthread_attr_destroy(&attr));
+    uintptr_t base = (uintptr_t)raw, first = custom ? base : base + guard;
+    memory_info stack_info = query(first);
+    assert(stack_info.state == 0xb && stack_info.perm == 3 && stack_info.base == first);
+    assert(stack_info.size == size - (custom ? 0 : guard));
+    if (!custom) { assert(guard == 2u * getpagesize()); assert(query(first - 1).perm == 0); }
+    return NULL;
+}
+static void worker_stacks(void) {
+    const size_t size = 1 << 20;
+    void *custom = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    assert(custom != MAP_FAILED);
+    pthread_t thread; pthread_attr_t attr;
+    assert(!pthread_attr_init(&attr) && !pthread_attr_setguardsize(&attr, 2u * getpagesize()));
+    assert(!pthread_create(&thread, &attr, check_worker_stack, NULL) && !pthread_join(thread, NULL));
+    assert(!pthread_attr_setstack(&attr, custom, size));
+    assert(!pthread_create(&thread, &attr, check_worker_stack, custom) && !pthread_join(thread, NULL));
+    assert(!pthread_attr_destroy(&attr) && !munmap(custom, size));
+}
+#endif
 static void fatal(unsigned svc, uint64_t x0, uint64_t x1, uint64_t x2) {
     fflush(NULL); pid_t pid = fork(); assert(pid >= 0);
     if (!pid) {
@@ -589,6 +615,9 @@ int main(int argc, char **argv) {
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
     layout_order();
+#ifdef __ANDROID__
+    worker_stacks();
+#endif
     host_memory(); lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
