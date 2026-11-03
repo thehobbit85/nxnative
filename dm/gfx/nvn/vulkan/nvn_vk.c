@@ -798,7 +798,7 @@ enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID };
 typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg, off; } sbind;
 typedef struct vin_module {
-    uint32_t mask;
+    uint64_t mask;
     VkShaderModule module;
     struct vin_module *next;
 } vin_module;
@@ -965,7 +965,7 @@ static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
 
 // Reuse one module across PSOs that fetch the same locations in the same classes.
 // Only a new class combination reopens the vertex artifact; its bytes live for this call.
-static VkShaderModule vertex_variant(shader_t *s, uint32_t mask) {
+static VkShaderModule vertex_variant(shader_t *s, uint64_t mask) {
     for (vin_module *v = s->vertex_variants; v; v = v->next) if (v->mask == mask) return v->module;
     char path[1024]; size_t ns = 0, words = 0;
     snprintf(path, sizeof path, "%s/%s.spv", g_vkdir, s->key);
@@ -982,10 +982,10 @@ static VkShaderModule vertex_variant(shader_t *s, uint32_t mask) {
         free(variant);
         if (r != VK_SUCCESS) {
             module = VK_NULL_HANDLE;
-            LOG("[RED] vk: vertex shader %s fetch variant %#x rejected (%d)", s->key, mask, (int)r);
+            LOG("[RED] vk: vertex shader %s fetch variant %#llx rejected (%d)", s->key, (unsigned long long)mask, (int)r);
         }
     } else {
-        LOG("[RED] vk: vertex shader %s cannot convert input classes %#x: %s", s->key, mask, reason);
+        LOG("[RED] vk: vertex shader %s cannot convert input classes %#llx: %s", s->key, (unsigned long long)mask, reason);
     }
     vin_module *v = malloc(sizeof *v);
     if (!v) { if (module) vkDestroyShaderModule(g_dev, module, NULL); return VK_NULL_HANDLE; }
@@ -1209,7 +1209,7 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, k->vs->mod, "main", NULL},
                                              {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, k->fs ? k->fs->mod : VK_NULL_HANDLE, "main", NULL}};
     VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[16]; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
-    uint32_t fetch_mask = 0;
+    uint64_t fetch_mask = 0;
     for (int i = 0; i < 32; i++) {
         if (!(k->vs->vin_mask >> i & 1)) continue;
         if (i >= k->nattr || i >= 16 || k->attr[i].stream >= 16) {
@@ -1218,12 +1218,21 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
         }
         unsigned ct = k->vs->vin[i];
         VkFormat f = vfmt(k->attr[i].fmt, ct);
-        if (!f && ct <= NVN_CT_INT) {
+        unsigned fmt = k->attr[i].fmt;
+        // R, RG, RGB, RGBA each list the 8/16/32-bit scaled formats in unsigned/signed pairs.
+        // The shader converts raw unsigned words for either sign, including the fetch's integer w=1.
+        if (ct <= NVN_CT_INT && fmt >= NVN_FORMAT_R32_UI2F && fmt <= NVN_FORMAT_RGBA32_I2F &&
+            (fmt - NVN_FORMAT_R32_UI2F) % 6 < 2) {
+            static const VkFormat raw[] = {VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32A32_UINT};
+            unsigned index = fmt - NVN_FORMAT_R32_UI2F;
+            f = raw[index / 6];
+            fetch_mask |= (uint64_t)(4 + index % 2) << (4 * i);
+        } else if (!f && ct <= NVN_CT_INT) {
             // Fetch using the source class for widening, normalization and w padding.
             // The shader variant bitcasts that result back to the declared input type.
             for (unsigned c = NVN_CT_FLOAT; c <= NVN_CT_INT; c++) {
                 f = vfmt(k->attr[i].fmt, c);
-                if (f) { fetch_mask |= (c + 1) << (2 * i); break; }
+                if (f) { fetch_mask |= (uint64_t)(c + 1) << (4 * i); break; }
             }
         }
         if (!f) {
