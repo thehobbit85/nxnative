@@ -7,9 +7,9 @@
 
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 uint64_t guest_ns(void) { return now_ns(); }
-static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, compute = {.nstage = 1};
+static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
-    if (p == &compute) { assert(stage == 0); memset(key, 0, 8); key[7] = 3; return 1; }
+    if (p == &compute || p == &groups) { assert(stage == 0); memset(key, 0, 8); key[7] = p == &groups ? 4 : 3; return 1; }
     assert((p == &program || p == &numeric_program) && stage < 2);
     memset(key, 0, 8); key[7] = (uint8_t)((p == &numeric_program ? 0x21 : 1) + stage); return 1;
 }
@@ -46,9 +46,9 @@ static void put(list_t *list, unsigned op, const void *payload, size_t bytes) {
 }
 #define RECORD(op, type, ...) put(&list, op, &(type){__VA_ARGS__}, sizeof(type))
 
-static void textured_draw(int compact) {
+static void textured_draw(int compact, int split_submit) {
     list_t list = {0};
-    tex_t faces = {.serial = 10 + 2 * compact, .d = {.width = 8, .height = 8, .depth = 6, .levels = 1,
+    tex_t faces = {.serial = 10 + 2 * compact + 100 * split_submit, .d = {.width = 8, .height = 8, .depth = 6, .levels = 1,
                    .target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8, .flags = NVN_TEXTURE_FLAGS_IMAGE}};
     tex_t output = {.serial = faces.serial + 1, .d = {.width = 8, .height = 8, .depth = 1, .levels = 1,
                     .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
@@ -63,9 +63,25 @@ static void textured_draw(int compact) {
     float color[] = {compact ? 1.f : 0.f, compact ? 0.f : 1.f, 1.f, 1.f};
     uint8_t pixels[8 * 8 * 4] = {0}, second[sizeof pixels] = {0};
     RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &faces, .r = {.width = 8, .height = 8, .depth = 6}, .mask = 15, .c.f = {0, 0, 1, 1});
+    // The first dispatch reads CPU counts. It writes either all three counts for the
+    // next dispatch, or only X, leaving Y and Z in guest memory. Both execute before the fence.
+    uint32_t count_command[] = {compact ? 1u : 3u, 1, 1};
+    uint32_t image_groups[] = {0, compact ? 8u : 0u, compact ? 6u : 0u};
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &groups, .stages = 0x20);
+    RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)image_groups,
+           .size = count_command[0] * sizeof(uint32_t));
+    if (compact) RECORD(OP_DISPATCH, p_dispatch, .x = 1, .y = 1, .z = 1);
+    else RECORD(OP_DISPATCH, p_dispatch, .ind = (uintptr_t)count_command);
+    if (split_submit) {
+        put(&list, OP_END, NULL, 0);
+        mtl_sub_begin();
+        mtl_exec(list.bytes);
+        mtl_sub_commit();
+        list.length = 0;
+    }
     RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &compute, .stages = 0x20);
     RECORD(OP_BIND_IMG, p_bind_handles, .stage = 5, .first = 1, .n = 2, .h = {slot + 16, slot + 17});
-    RECORD(OP_DISPATCH, p_dispatch, .x = 8, .y = 8, .z = 6);
+    RECORD(OP_DISPATCH, p_dispatch, .ind = (uintptr_t)image_groups);
     RECORD(OP_BARRIER, uint32_t, 0);
     RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
     RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &program, .stages = 3);
@@ -89,6 +105,7 @@ static void textured_draw(int compact) {
     put(&list, OP_END, NULL, 0);
     mtl_sub_begin(); mtl_exec(list.bytes);
     assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    assert(image_groups[0] == 8 && image_groups[1] == 8 && image_groups[2] == 6);
     const uint8_t expected[] = {compact ? 255 : 0, compact ? 0 : 255, 0, 255};
     for (size_t i = 0; i < sizeof pixels; i += 4) {
         const uint8_t cyan[] = {0, 255, 255, 255};
@@ -174,8 +191,9 @@ static void vertex_fetch(void) {
 
 int main(void) {
     clear_and_readback();
-    textured_draw(0);
-    textured_draw(1);
+    textured_draw(0, 0);  // CPU argument block, followed by a fully GPU-generated block
+    textured_draw(1, 0);  // X is GPU-generated, Y and Z are CPU-written
+    textured_draw(0, 1);  // argument producer and consumer in successive submissions
     vertex_fetch();
     strided_layers();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
