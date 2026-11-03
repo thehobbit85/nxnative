@@ -83,6 +83,7 @@ jobs:
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE -Wno-error=format -ldl" build/t_system_event
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang" build/t_audio_android
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" android-fs-build
+          make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang" build/t_android_avc
           make -C dm/host/tests -j4 GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" \
             CODEC_AR="$bin/llvm-ar" android-software-video
           make -C dm/gfx/nvn/vulkan GAME="$GAME" CC="$bin/aarch64-linux-android30-clang" \
