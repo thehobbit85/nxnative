@@ -8,7 +8,21 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
 #include <mach/mach_time.h>
+static mach_timebase_info_data_t g_tb;
+#define dirty_ticks mach_absolute_time
+static void init_timebase(void) { mach_timebase_info(&g_tb); }
+static uint64_t ticks_to_ns(uint64_t ticks) { return ticks ? ticks * g_tb.numer / g_tb.denom : 0; }
+#else
+#include <time.h>
+static uint64_t dirty_ticks(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+static void init_timebase(void) {}
+static uint64_t ticks_to_ns(uint64_t ticks) { return ticks; }
+#endif
 #include <sched.h>
 
 // Order of page state and mprotect: the side changing protection first sets the state to BUSY and sets the final state only after mprotect has landed; other threads wait when they see BUSY.
@@ -41,19 +55,18 @@ static _Atomic int g_overflow_logged;
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // Pool creation, retirement and protection serialize descriptor lifetime; the page-fault path does not touch this mutex
 static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
 static void mp(uintptr_t a, size_t len, int prot) {
-    uint64_t t = mach_absolute_time(); mprotect((void *)a, len, prot);
-    atomic_fetch_add(&g_mp_ticks, mach_absolute_time() - t); atomic_fetch_add(&g_mp_calls, 1); atomic_fetch_add(&g_mp_pages, len >> g_shift);
+    uint64_t t = dirty_ticks(); mprotect((void *)a, len, prot);
+    atomic_fetch_add(&g_mp_ticks, dirty_ticks() - t); atomic_fetch_add(&g_mp_calls, 1); atomic_fetch_add(&g_mp_pages, len >> g_shift);
 }
 
-static mach_timebase_info_data_t g_tb;   // obtained when the first pool is registered (the fault path only multiplies and divides)
 static _Atomic int g_busy_red;
 // Wait for this page to leave BUSY. Returns 1 = it has left; 0 = waited past the limit (reported red once). Usable in a signal handler: only atomic reads, mach_absolute_time and sched_yield
 static int busy_wait(range_t *r, uintptr_t p) {
     uint64_t t0 = 0;
     for (unsigned n = 1; atomic_load(&r->state[p]) == PG_BUSY; n++) {
         if (n & 0x3ff) continue;
-        uint64_t now = mach_absolute_time(); if (!t0) t0 = now;
-        if ((now - t0) * g_tb.numer / g_tb.denom > (uint64_t)BUSY_WAIT_MS * 1000000ull) {
+        uint64_t now = dirty_ticks(); if (!t0) t0 = now;
+        if (ticks_to_ns(now - t0) > (uint64_t)BUSY_WAIT_MS * 1000000ull) {
             if (!atomic_exchange(&g_busy_red, 1)) LOG("[RED] dirty-page tracking: page %p stuck 'busy' for over %d ms (the thread changing its protection has not finished), no longer waiting", (void *)(r->base + (p << g_shift)), BUSY_WAIT_MS);
             return 0; }
         sched_yield();
@@ -129,7 +142,7 @@ static void prep_write(void *addr, size_t len) {
 
 void nvn_dirty_add_range(const void *mem, size_t size) {
     static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
+    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); init_timebase(); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);
@@ -248,6 +261,5 @@ void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
 }
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps) { *faults = atomic_load(&g_faults); *preps = atomic_load(&g_preps); }
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
-    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
-    *calls = atomic_load(&g_mp_calls); *pages = atomic_load(&g_mp_pages); *ns = atomic_load(&g_mp_ticks) * tb.numer / tb.denom;
+    *calls = atomic_load(&g_mp_calls); *pages = atomic_load(&g_mp_pages); *ns = ticks_to_ns(atomic_load(&g_mp_ticks));
 }

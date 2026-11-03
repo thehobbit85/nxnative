@@ -576,6 +576,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Rendering
 
+- Vulkan rejects a cube view because the underlying image lacks `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT`. → [Vulkan cube views of two-dimensional arrays](../reference/rendering.md#vulkan-cube-views-of-two-dimensional-arrays)
 - clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`. → [Null textures in diagnostic logs](../reference/rendering.md#null-textures-in-diagnostic-logs)
 - Metal aborts on a texture descriptor with an absurd size (`height (1869367126) greater than … 16384`). → [Texture objects copied into command records](../reference/rendering.md#texture-objects-copied-into-command-records)
 - a decoded movie stays black even though its YUV textures contain the picture; disabling its depth test makes it visible. → [New textures start as zero](../reference/rendering.md#new-textures-start-as-zero)
