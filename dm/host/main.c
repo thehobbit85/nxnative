@@ -2,24 +2,22 @@
 #include "dm.h"
 #include "front.h"
 #include "../gfx/nvn/dmsh_chain.h"
+#ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
+#include <sys/sysctl.h>
+#endif
 #include <stdatomic.h>
 #include <sys/resource.h>
-#include <sys/sysctl.h>
 #include <sys/time.h>
 #include <unistd.h>
 void probe_install(void); void hid_keys_init(void); void stubs_report(void); void crash_install(void); void guest_thread_init(void); void guest_gate_stack(int own_stack); uint32_t svc_thread_main_init(void);
-typedef void (*fn0)(void); typedef void (*fn2)(uint64_t, uint64_t); typedef void (*fnp)(void *);
+typedef void (*fn0)(void); typedef void (*fn2)(uint64_t, uint64_t);
 static void *req(const char *n){ void *p=guest_sym(n); if(!p) die("missing symbol %s", n); return p; }
 
 // Game arguments: argv[0] is fixed to "game", and whatever follows "--" is appended as is (on a real device nn::init takes them from the process argument area and hands them to the SDK through SetHostArgc/Argv)
 static char *g_argv[64] = {"game"}; static int g_argc = 1;
 
-static void guest_main(void) {
-    guest_thread_init();
-    guest_gate_stack(0);   // the guest code runs on this thread's own stack: its SVCs get a stack of their own
-    { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(0); }   // DM_OODLE_SERVE tool mode: the game's own Oodle decoder over stdin / stdout (hle_oodle.c, exits when the input ends)
-    uint32_t hmain = svc_thread_main_init();   // Main thread handle: x0 of nnosInitialize (stored in an sdk global, used by ThreadManagerImplByHorizon); x1 = pointer to the argument area
+static void sdk_init(uint32_t hmain, int argc, char **argv) {
     // Copy Start step by step: _init_libc1 = __nnmusl_init_locks (initializes the stdio etc. locks as recursive locks; skipping it self-deadlocks on nested locking in putc) + __init_ssp.
     // The three callbacks passed in by rtld: A only sets an rtld flag (skipped), B = each module's DT_INIT (before nnMain), C = destructors (not done)
     ((fn0)req("_init_libc0"))();
@@ -28,16 +26,28 @@ static void guest_main(void) {
     LOG(">>> nninitInitializeSdkModule"); ((fn0)req("nninitInitializeSdkModule"))();
     // The game arguments are in place before nninitStartup, as on hardware (nn::os takes them from the process argument area in nnosInitialize): Unreal Engine's nninitStartup
     // (Octopath Traveler 0, main+0x12afc) reads -SwitchVirtualAddressSpaceSize= and its other memory options there
-    ((fnp)req("_ZN2nn2os11SetHostArgcEi"))((void *)(uint64_t)g_argc);
-    ((fnp)req("_ZN2nn2os11SetHostArgvEPPc"))(g_argv);
+    ((void (*)(int))req("_ZN2nn2os11SetHostArgcEi"))(argc);
+    ((void (*)(char **))req("_ZN2nn2os11SetHostArgvEPPc"))(argv);
     LOG(">>> nninitStartup"); ((fn0)req("nninitStartup"))();
     ((fn0)req("_init_libc2"))();
     run_module_inits();   // rtld callback B: each module's DT_INIT (global constructors)
+}
+
+static void run_nnmain(void) {
+    LOG(">>> nnMain"); ((fn0)req("nnMain"))();
+    LOG("nnMain returned");
+}
+
+static void guest_main(void) {
+    guest_thread_init();
+    guest_gate_stack(0);   // the guest code runs on this thread's own stack: its SVCs get a stack of their own
+    { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(0); }   // DM_OODLE_SERVE tool mode: the game's own Oodle decoder over stdin / stdout (hle_oodle.c, exits when the input ends)
+    uint32_t hmain = svc_thread_main_init();   // Main thread handle: x0 of nnosInitialize (stored in an sdk global, used by ThreadManagerImplByHorizon); x1 = pointer to the argument area
+    sdk_init(hmain, g_argc, g_argv);
     { void dm_guest_spawn_selftest(void); dm_guest_spawn_selftest(); }   // DM_GUEST_SPAWN_TEST self-test of host-created guest threads (hle_guestthread.c)
     { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(1); }   // DM_OODLE_SERVE with a decoder that needs the game's malloc (LZ5, hle_oodle.c)
     { void dm_oodle_job_maybe(void); dm_oodle_job_maybe(); }   // DM_OODLE_JOB: decode a job file with the game's own Oodle and exit (hle_oodle.c, for the offline shader tools)
-    LOG(">>> nnMain"); ((fn0)req("nnMain"))();
-    LOG("nnMain returned");
+    run_nnmain();
 }
 
 struct dm_flags g_flag;
@@ -48,13 +58,49 @@ static void flags_init(void) {
     g_flag.bootprof = !!getenv("DM_BOOTPROF");
 }
 
-// Zero point of the boot timeline = process creation time (p_starttime from sysctl KERN_PROC_PID, wall clock) converted to the now_ns monotonic time base; same definition on Mac / iOS
+// Convert process creation time to the monotonic clock used by the boot timeline.
 static uint64_t proc_start_mono_ns(void) {
+#ifdef __APPLE__
     struct kinfo_proc kp; size_t n = sizeof kp; int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
     uint64_t mono = now_ns(); struct timeval tv; gettimeofday(&tv, NULL);
     if (sysctl(mib, 4, &kp, &n, NULL, 0) || !n) return mono;
     int64_t age = (int64_t)(tv.tv_sec - kp.kp_proc.p_starttime.tv_sec) * 1000000000ll + (tv.tv_usec - kp.kp_proc.p_starttime.tv_usec) * 1000ll;
     return age > 0 ? mono - (uint64_t)age : mono;
+#else
+    uint64_t mono = now_ns();
+    FILE *f = fopen("/proc/self/stat", "r");
+    if (!f) return mono;
+    char buf[4096]; size_t n = fread(buf, 1, sizeof buf - 1, f); fclose(f); buf[n] = 0;
+    // comm (field 2) is parenthesized and may itself contain spaces and parentheses.
+    char *p = strrchr(buf, ')');
+    for (int field = 2; p && field < 22; field++) {
+        p = strchr(p, ' ');
+        if (p) p++;
+    }
+    if (!p) return mono;
+    char *end; uint64_t ticks = strtoull(p, &end, 10);
+    long hz = sysconf(_SC_CLK_TCK);
+    struct timespec bt;
+    if (end == p || *end != ' ' || hz <= 0 || clock_gettime(CLOCK_BOOTTIME, &bt)) return mono;
+    uint64_t start = ticks / hz * 1000000000ull + ticks % hz * 1000000000ull / hz;
+    uint64_t boot = (uint64_t)bt.tv_sec * 1000000000ull + bt.tv_nsec;
+    return start <= boot && boot - start <= mono ? mono - (boot - start) : mono;
+#endif
+}
+
+// Explicit module names precede "--"; the remainder goes to the guest SDK.
+static int host_arguments(int argc, char **argv, const char **names) {
+    int n = 0;
+    int i = 2;
+    for (; i < argc && strcmp(argv[i], "--"); i++) names[n++] = argv[i];
+    if (i < argc && !strcmp(argv[i], "--")) for (i++; i < argc && g_argc < 63; i++) g_argv[g_argc++] = argv[i];
+    else if (*DM_GAME_ARGS) {   // no "--" on the command line (the iOS app, the NSP script's Mac runs): the game profile's game_args, split at spaces
+        char *s = strdup(DM_GAME_ARGS);
+        for (char *t = strtok(s, " "); t && g_argc < 63; t = strtok(NULL, " ")) g_argv[g_argc++] = t;
+        LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
+    }
+    if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = def[k]; }   // default module list from the game profile's modules (Mario: main sdk)
+    return n;
 }
 
 // Host loading (independent of UIKit / Metal): read the NSO, relocate, forced take-over, probes / tick gate / keys, start prefetch. By default it runs synchronously in main;
@@ -77,8 +123,11 @@ static void host_preload(int argc, char **argv) {
     }
     crash_install();
     {   // Which build this is: the commit the packer stamped into the app (DMCommit; a run outside an app has none), the shader chain the host loads, the profile
-        CFBundleRef b = CFBundleGetMainBundle(); CFTypeRef c = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMCommit")) : NULL; char cs[64] = "not recorded";
+        char cs[64] = "not recorded";
+#ifdef __APPLE__
+        CFBundleRef b = CFBundleGetMainBundle(); CFTypeRef c = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMCommit")) : NULL;
         if (c && CFGetTypeID(c) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)c, cs, sizeof cs, kCFStringEncodingUTF8);
+#endif
         LOG("build: commit %s, shader chain %s, profile %s", cs, DMSH_CHAIN, DM_GAME_ID);
     }
     const char *race = getenv("DM_TEST_KEYRACE");
@@ -91,16 +140,8 @@ static void host_preload(int argc, char **argv) {
     }
     { void dm_term_install(void); dm_term_install(); }   // SIGTERM graceful exit (hle_lifecycle.c)
     { void crash_set_dump_hook(void (*)(void)); void svc_thread_dump(void); crash_set_dump_hook(svc_thread_dump); }   // Dump guest thread state on a crash
-    const char *names[argc + DM_GAME_NMOD]; int n = 0;
-    int i = 2;
-    for (; i < argc && strcmp(argv[i], "--"); i++) names[n++] = argv[i];
-    if (i < argc && !strcmp(argv[i], "--")) for (i++; i < argc && g_argc < 63; i++) g_argv[g_argc++] = argv[i];
-    else if (*DM_GAME_ARGS) {   // no "--" on the command line (the iOS app, the NSP script's Mac runs): the game profile's game_args, split at spaces
-        char *s = strdup(DM_GAME_ARGS);
-        for (char *t = strtok(s, " "); t && g_argc < 63; t = strtok(NULL, " ")) g_argv[g_argc++] = t;
-        LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
-    }
-    if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = def[k]; }   // default module list from the game profile's modules (Mario: main sdk)
+    const char *names[argc + DM_GAME_NMOD];
+    int n = host_arguments(argc, argv, names);
     load_modules(argv[1], names, n);
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
@@ -131,7 +172,9 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+#ifdef __APPLE__
     { int mtl_pso_prebuild_tool(void); if (mtl_pso_prebuild_tool()) return 0; }   // DM_PSO_PREBUILD=tool: the pipeline archive's prebuild alone, no game (nvn_mtl.m)
+#endif
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Exercise the early-start path on Mac (on iOS it is called from the App's main())
     if (atomic_load(&g_pre.started)) {
         pthread_join(g_pre.th, NULL);

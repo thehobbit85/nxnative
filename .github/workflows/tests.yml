@@ -66,6 +66,10 @@ jobs:
           "$bin/ld.lld" -shared -z text -z noexecstack "$RUNNER_TEMP/gates.o" -o "$RUNNER_TEMP/gates.so"
           make -C dm/host/tests GAME="$GAME" GATE_ABI=android GATE_SEGMENT_ALIGN=4096 \
             GATE_CC="$bin/aarch64-linux-android30-clang -static -ffunction-sections -fdata-sections -Wl,--gc-sections" GATE_RUNNER=qemu-aarch64 gate-test
+          # Android command-line programs use the system dynamic linker. Cross-link
+          # that configuration in addition to the static bionic run above.
+          make -C dm/host/tests GAME="$GAME" GATE_ABI=android GATE_SEGMENT_ALIGN=4096 B=build-dynamic \
+            GATE_CC="$bin/aarch64-linux-android30-clang -fPIE -pie -fvisibility=hidden -Wl,-z,text,-z,noexecstack,-z,max-page-size=16384" gate-build
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE" build/t_time
           qemu-aarch64 dm/host/tests/build/t_time
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -Wl,--gc-sections" build/t_bigstack
