@@ -58,6 +58,40 @@ def flags(d, set_=0, clear=0):
 
 
 class Load(unittest.TestCase):
+    def test_rewrite_thread_slots(self):
+        # A MOD0 with one unwind entry and five sites: guest TLS read, thread-local region
+        # read, TLS write, x18 read, SVC. The patch must use the host ABI at every site.
+        words = (0x14000002, 0x1000, 0xd53bd042, 0xd53bd063, 0xd51bd044, 0xaa1203e5, 0xd4000021, 0xd65f03c0)
+        ro = bytearray(128)
+        ro[:4] = b'MOD0'
+        struct.pack_into('<i', ro, 16, 48)
+        struct.pack_into('<4BIIII', ro, 48, 1, 3, 3, 3, 0, 1, 8, 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'module'
+            source.write_bytes(make_nso((struct.pack('<8I', *words), ro, bytes(64)), compress=(0, 0, 0)))
+            env = dict(os.environ, DM_GAME='0100633007D48000', DM_REWRITE_J='1')
+            for target in ('apple', 'android'):
+                out = root / target
+                out.mkdir()
+                cmd = [sys.executable, str(REPO / 'dm/tools/patch_nso.py'), str(source), str(out), 'fixture']
+                if target == 'android': cmd.extend(['--thread-slots', target])
+                subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
+                header = dict(line[2:].split('\t') for line in (out / 'fixture.fixups.tsv').read_text().splitlines())
+                start = int(header['PATCH_OFF'], 0)
+                patch = [w for w, in struct.iter_unpack('<I', (out / 'fixture.patched.bin').read_bytes()[start:])]
+                reads = [(i, w) for i, w in enumerate(patch) if w & 0xffffffe0 in (0xd53bd040, 0xd53bd060)]
+                self.assertEqual(len(reads), 5)
+                if target == 'apple':
+                    self.assertNotIn('TP_SLOT', header)
+                    self.assertTrue(all(w & 0xffffffe0 == 0xd53bd060 for _, w in reads))
+                else:
+                    self.assertEqual(header.get('TP_SLOT'), '2')
+                    for i, w in reads:
+                        self.assertEqual(w & 0xffffffe0, 0xd53bd040)
+                        reg = w & 31
+                        self.assertEqual(patch[i + 1], 0xf9400800 | reg << 5 | reg)  # ldr xN, [xN, #16]
+
     def test_nso(self):
         m = nso.load(make_nso())
         ro, data = page(len(TEXT)), page(page(len(TEXT)) + len(RO))
