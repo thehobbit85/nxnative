@@ -271,10 +271,14 @@ static void module_sources(void) {
     g_mod[0] = (module_t){.base=b, .size=0x20000, .text_end=0x2800, .ro_off=0x2800,
         .data_off=0x3000, .patch_off=0x1e000, .key_page_off=0x8000, .key_page_size=0x4000, .loaded=1};
     g_nmod = 1;
-    assert(!mprotect(b, 0x4000, PROT_READ));
+    size_t text_seal = dm_text_seal_end(&g_mod[0], memory_getpagesize());
+    assert(!mprotect(b, text_seal, PROT_READ));
     assert(!mprotect(b + 0x8000, 0x4000, PROT_READ));
     assert(!mprotect(b + 0x1c000, 0x4000, PROT_READ));
-    assert(map(stack, (uintptr_t)b + 0x3000, P) == BAD);
+    if (text_seal == 0x3000) {
+        assert(!map(stack, (uintptr_t)b + 0x3000, P));
+        assert(!unmap(stack, (uintptr_t)b + 0x3000, P));
+    } else assert(map(stack, (uintptr_t)b + 0x3000, P) == BAD);
     assert(map(stack, (uintptr_t)b + 0x7000, 2 * P) == BAD);
     assert(map(stack, (uintptr_t)b + 0x1b000, 2 * P) == BAD);
     assert(!map(stack, (uintptr_t)b + 0x4000, P));
