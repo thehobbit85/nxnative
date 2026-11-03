@@ -4,6 +4,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Textures and formats
 
+### Vulkan cube views of two-dimensional arrays
+
+- **Symptom:** Vulkan rejects a cube view because the underlying image lacks `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT`.
+- **Cause:** NVN lets the game choose a cube view for a square 2D array with six faces. Vulkan requires the image to allow that view when the image is created.
+- **Fix:** enable cube-compatible views for eligible single-sample square 2D arrays with at least six layers. The Vulkan replay test clears a six-layer array, samples it through a cube view, draws with both NVN binding encodings, and checks the fenced pixel readback.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#found-on-this-game), using the Android reference renderer.
+
+
 ### Null textures in diagnostic logs
 
 - **Symptom:** clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`.

@@ -98,6 +98,8 @@ Each item was found from a red line or a pass dump on the way through the langua
 
 ## Found on this game
 
+- **Android Vulkan startup (cube creation resolved):** a 64×64 single-sample 2D array with six layers is sampled as one cube. After the fix, the reference fork recorded the first frame with 53 draws and no dropped draws. Visual accuracy and gameplay remain open. [Vulkan cube views of two-dimensional arrays](../../../docs/reference/rendering.md#vulkan-cube-views-of-two-dimensional-arrays).
+
 - **Android Vulkan startup (shader export resolved):** stages `5b107ddfd06551fc` and `f51daa8e1e262606` write to storage images whose formats are supplied at runtime. [Vulkan storage image writes without a format](../../../docs/reference/shaders.md#vulkan-storage-image-writes-without-a-format).
 
 General host changes first needed here; each applies to every game:
