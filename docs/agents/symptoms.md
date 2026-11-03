@@ -102,6 +102,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `KeyError` at `site_br` for a `br x18` that is an ordinary byte jump table. → [Disassembly goes on after undecodable words](../reference/rewriter.md#disassembly-goes-on-after-undecodable-words)
 - `RuntimeError: 788 ldr x18, #0xd1eb0` in `patch_nso.py`, or any rewrite site in data. → [Data blocks at the start of the text](../reference/rewriter.md#data-blocks-at-the-start-of-the-text)
 - `RuntimeError: 44 ldr x18, #0xfffffffffff40370` while rewriting an NRO. → [NRO metadata inside the text segment](../reference/rewriter.md#nro-metadata-inside-the-text-segment)
+- `incompatible thread-slot layout TP_SLOT=0x2` at module load. → [Rewritten modules for another thread-slot layout](../reference/rewriter.md#rewritten-modules-for-another-thread-slot-layout)
 - `jump table <addr>` assertion in `patch_nso.py`, in a Unity / IL2CPP `main`, at an `alloca` (`mov sp, x18`). → [Stack pointer writes through x18](../reference/rewriter.md#stack-pointer-writes-through-x18)
 - `CRASH sig=10 addr=0` on an `stp` relative to `sp`, with `sp` not a multiple of 16 (`main+0x2bbba4`, `sub sp, sp, #0xc0` then `stp d15, d14, [sp, #0x60]` with sp ending in `…9dc`). → [Stack arguments reserved with sub sp, sp, xN](../reference/rewriter.md#stack-arguments-reserved-with-sub-sp-sp-xn)
 - SIGILL / trap on a system register read. → [System register reads that macOS traps](../reference/rewriter.md#system-register-reads-that-macos-traps)

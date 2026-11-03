@@ -372,6 +372,13 @@ To enroll a cut for any game's own module:
 
 ## Stack and system registers
 
+### Rewritten modules for another thread-slot layout
+
+- **Symptom:** `incompatible thread-slot layout TP_SLOT=0x2` at module load.
+- **Cause:** the Android rewriter records bionic’s thread-pointer slot in the fixups header. Its instructions read the slot through `TPIDR_EL0`. Apple rewrites read pthread slots through `TPIDRRO_EL0`.
+- **Fix:** regenerate the modules for the target host. The Apple loader accepts historical headers without `TP_SLOT` and rejects a nonzero slot before mapping the module.
+- **Found on:** a synthetic loader test using the header format of the [Android port](https://github.com/seedds/nxnative/issues/733).
+
 ### Stack pointer writes through x18
 
 - **Symptom:** `jump table <addr>` assertion in `patch_nso.py`, in a Unity / IL2CPP `main`, at an `alloca` (`mov sp, x18`).
