@@ -16,7 +16,8 @@ class VulkanParityTests(unittest.TestCase):
     def test_inventory_tracks_production_records(self):
         header = (NVN / 'nvn_obj.h').read_text()
         enum = re.search(r'enum\s*\{\s*(OP_END\b.*?OP_COUNT_)\s*\}', header, re.S)
-        self.assertIsNotNone(enum)
+        if enum is None:
+            self.fail("NVN record enum missing")
         names = re.findall(r'\bOP_\w+', re.sub(r'//[^\n]*', '', enum[1]))
         active = set(names) - {'OP_BEGIN', 'OP_COUNT_'}
         matrix = (ROOT / 'docs/nvn-vulkan-parity.md').read_text()
