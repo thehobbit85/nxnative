@@ -1,21 +1,39 @@
 // Wwise finds its span header by masking an interior pointer returned from Unreal's heap (#996).
 #include "../hle_uemalloc.c"
 #include <assert.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 module_t *g_mod;
 int g_nmod;
-int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
+static uintptr_t reserved;
+int dm_guest_as_contains(uintptr_t address) { return reserved && address == reserved; }
 int gate_obs_present(int id) { (void)id; return 0; }
 void gate_obs_set(int id, void (*callback)(uint64_t *, int)) { (void)id; (void)callback; }
 
 int main(void) {
     enum { span = 65536, count = 16 };
     uint8_t *blocks[count];
-    g_zone = malloc_create_zone(0, 0);
-    assert(g_zone);
+    void *original[NSLOT] = {0};
+    assert(!dm_ue_heap_owns((uintptr_t)original, 1));
+    fill((const uint8_t *)original, UE5, "synthetic heap");
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    uint8_t *region = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    assert(region != MAP_FAILED && !mprotect(region + page, page, PROT_NONE));
+    assert(dm_ue_heap_owns((uintptr_t)region + 3, page - 3));
+    reserved = (uintptr_t)region + 3;
+    assert(!dm_ue_heap_owns(reserved, 32));
+#ifdef __ANDROID__
+    assert(!dm_ue_heap_owns(reserved | UINT64_C(0xb400000000000000), 32));
+#endif
+    reserved = 0;
+    assert(!dm_ue_heap_owns((uintptr_t)region + 3, page) && !dm_ue_heap_owns(UINT64_MAX - 1, 8));
+    assert(!mprotect(region, page, PROT_READ) && !dm_ue_heap_owns((uintptr_t)region, 1));
+    munmap(region, 2 * page);
     for (unsigned i = 0; i < count; ++i) {
         blocks[i] = m_Malloc(NULL, span + (i % 2) * 4096, (i % 4 < 2) ? 4096 : 0);
         assert(((uintptr_t)(blocks[i] + 0x2a0) & ~(uintptr_t)(span - 1)) == (uintptr_t)blocks[i]);
+        assert(dm_ue_heap_owns((uintptr_t)blocks[i] + 32, 1024));
         blocks[i][0x2a0] = (uint8_t)(i + 1);
     }
     for (unsigned i = 0; i < count; ++i) {
@@ -27,6 +45,9 @@ int main(void) {
     }
     uint8_t *small = m_Malloc(NULL, 48, 0);
     small[47] = 0x5a;
+#ifdef __ANDROID__
+    assert(!m_TryRealloc(NULL, small, span, span + 1) && small[47] == 0x5a);
+#endif
     uint8_t *span_block = m_Realloc(NULL, small, span + 4096, 0);
     assert(((uintptr_t)span_block & (span - 1)) == 0 && span_block[47] == 0x5a);
     m_Free(NULL, span_block);
@@ -45,11 +66,13 @@ int main(void) {
         large[kept - 1] = 0x77;
         uint8_t *less = m_Realloc(NULL, large, kept, alignment);
         assert(((uintptr_t)less & (span - 1)) == 0 && less[kept - 1] == 0x77);
-        assert(malloc_size(less) < big);
+        assert(block_size(less) < big);
         m_Free(NULL, less);
     }
     assert(atomic_load(&g_used) == 0);
+#ifdef __APPLE__
     malloc_destroy_zone(g_zone);
+#endif
     puts("Unreal virtual-span alignment and realloc contents passed");
     return 0;
 }
