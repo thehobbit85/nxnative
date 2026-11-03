@@ -18,7 +18,7 @@
 #include <sys/time.h>
 
 struct dm_flags g_flag; uint64_t g_t0_ns;
-uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }
 
 static int fails, checks;
@@ -30,7 +30,7 @@ static int same(const char *p, const char *s) {
 }
 static void mkd(const char *p) { char c[1200]; snprintf(c, sizeof c, "%s", p); for (char *s = c + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(c, 0755); *s = '/'; } mkdir(c, 0755); }
 static void set_mtime(const char *p, time_t t) { struct timeval tv[2] = {{t, 0}, {t, 0}}; utimes(p, tv); }
-static time_t mtime_of(const char *p) { struct stat st; return stat(p, &st) ? 0 : st.st_mtimespec.tv_sec; }
+static time_t mtime_of(const char *p) { struct stat st; return stat(p, &st) ? 0 : st.st_mtime; }
 static int exists(const char *p) { return !access(p, F_OK); }
 
 // The newest backup of a save whose name ends in " <side>", "" when there is none
@@ -82,7 +82,7 @@ int main(void) {
     char P[1200]; snprintf(P, sizeof P, "%s/pack/save", root);
     snprintf(p, sizeof p, "%s/sub", P); mkd(p); snprintf(p, sizeof p, "%s/empty", P); mkd(p); snprintf(p, sizeof p, "%s_device", P); mkd(p);
     snprintf(p, sizeof p, "%s/a", P); put(p, "hello"); set_mtime(p, 1000000000);
-    snprintf(p, sizeof p, "%s/sub/b", P); put(p, "xy"); setxattr(p, FS_GUEST_NAME, "B", 1, 0, XATTR_NOFOLLOW); set_mtime(p, 1000000100);
+    snprintf(p, sizeof p, "%s/sub/b", P); put(p, "xy"); fs_set_name(p, "B", 1); set_mtime(p, 1000000100);
     snprintf(p, sizeof p, "%s_device/d", P); put(p, "dev"); set_mtime(p, 1000000050);
     CHECK(!ss_scan(P, &m) && m.files == 3 && strlen(m.hash) == SS_HASH && m.saved == 1000000100, "scan: 3 files, a 32-digit hash, saved = the newest file's date (%d files, saved %lld)", m.files, (long long)m.saved);
     snprintf(bundle, sizeof bundle, "%s/pack/save.dmsync", root);
@@ -91,7 +91,7 @@ int main(void) {
     snprintf(u, sizeof u, "%s/pack/out", root); mkd(u);
     CHECK(!ss_read(bundle, u, &m2), "unpack");
     snprintf(p, sizeof p, "%s/save/a", u); snprintf(q, sizeof q, "%s/save/sub/b", u);
-    char g[8] = {0}; ssize_t gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    char g[8] = {0}; ssize_t gl = fs_get_name(q, g, sizeof g - 1);
     CHECK(same(p, "hello") && same(q, "xy") && gl == 1 && g[0] == 'B', "files and the guest name (hle_fs.c's FS_GUEST_NAME) come back");
     CHECK(mtime_of(p) == 1000000000, "a file's date comes back (%lld)", (long long)mtime_of(p));
     snprintf(p, sizeof p, "%s/save/empty", u); snprintf(q, sizeof q, "%s/save_device/d", u);
@@ -218,6 +218,6 @@ int main(void) {
     unsetenv("DM_SAVE_SYNC");
 
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
-    if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }
+    if (!fails) rm_tree(root);
     return fails != 0;
 }
