@@ -340,6 +340,8 @@ To enroll a cut for any game's own module:
 - **Fix:** regenerate the modules for the target host. The Apple loader accepts historical headers without `TP_SLOT` and rejects a nonzero slot before mapping the module.
 - **Found on:** a synthetic loader test using the header format of the [Android port](https://github.com/seedds/nxnative/issues/733).
 
+For the Android host, run `DM_GAME=<id> python3 dm/tools/patch_nso.py <input> <android-output-dir> <module> --thread-slots android` for each NSO or NRO. This emits the bionic slot ABI introduced by the Android port. Use a separate output directory for each ABI. The existing Apple pipeline selects the default. This switch only changes thread-slot access. An Android host must also supply the slot block and gate on each guest thread and protect the rewriter’s temporary spills below the guest stack pointer from asynchronous signal frames.
+
 ### Stack pointer writes through x18
 
 - **Symptom:** `jump table <addr>` assertion in `patch_nso.py`, in a Unity / IL2CPP `main`, at an `alloca` (`mov sp, x18`).
