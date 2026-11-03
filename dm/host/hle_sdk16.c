@@ -3,7 +3,9 @@
 #include "hle.h"
 #include <fcntl.h>
 #include <pthread.h>
+#ifdef __APPLE__
 #include <pthread/qos.h>
+#endif
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -242,7 +244,9 @@ HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_
 // One thread per binding lifetime: repeated requests must not double its rate.
 // A destroyed binding retires its worker even if another service reuses the same
 // guest storage and handle number before the next tick (MacNativeGames dab728a).
+#ifdef __APPLE__
 void dm_host_helper_qos(qos_class_t q);   // hle_thread.c
+#endif
 typedef struct vsync_event { void *ev; uint64_t binding; struct vsync_event *next; } vsync_event_t;
 static pthread_mutex_t g_vs_mu = PTHREAD_MUTEX_INITIALIZER;
 static vsync_event_t *g_vs_events;
@@ -258,7 +262,9 @@ static int vsync_tick(vsync_event_t *v) {   // 0: the event is gone and this thr
 __attribute__((weak)) int mtl_link_wait_vsync(uint64_t *seen, uint64_t timeout_ns) { (void)seen; (void)timeout_ns; return 0; }   // nvn_mtl.m
 static void *vsync_thread(void *arg) {
     vsync_event_t *v = arg;
+#ifdef __APPLE__
     dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // the game paces frames on this event
+#endif
     const char *e = getenv("DM_VSYNC_HZ"); double hz = e ? atof(e) : 60.0; if (hz <= 0) hz = 60.0;
     uint64_t period = (uint64_t)(1e9 / hz), next = now_ns() + period, seen = 0;
     for (;;) {

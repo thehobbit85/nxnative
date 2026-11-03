@@ -208,8 +208,9 @@ $(B)/t_nfc: t_nfc.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
 .PHONY: nfc
 nfc: $(B)/t_nfc
 	$(B)/t_nfc
+LANGUAGE_SAN ?= -fsanitize=address,undefined
 $(B)/t_language: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -fsanitize=address,undefined -I.. $(GINC) -o $@ t_language.c
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address $(LANGUAGE_SAN) -I.. $(GINC) -o $@ t_language.c
 $(B)/t_motion: t_motion.c ../motion_fusion.h | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -o $@ t_motion.c -lm
 run: $(B)/t_motion_apple
