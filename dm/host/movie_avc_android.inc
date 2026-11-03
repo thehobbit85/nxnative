@@ -7,8 +7,7 @@ typedef struct avc_frame {
     uint8_t nv12[];
 } avc_frame;
 static void close_session(mavc *a) {
-    if (a->mc) { AMediaCodec_stop(a->mc); AMediaCodec_delete(a->mc); a->mc = NULL; }
-    a->eos_in = a->eos_out = a->fed_picture = 0;
+    media_close(&a->stream); a->fed_picture = 0;
 }
 void mavc_drop(mavc *a) {
     close_session(a); // start the next stream with fresh CSD even when flushed before the first output
@@ -17,6 +16,8 @@ void mavc_drop(mavc *a) {
 }
 void mavc_free(mavc *a) { if (a) { mavc_drop(a); free(a->au); free(a); } }
 void mavc_set_rgba(mavc *a) { a->rgba = 1; }
+static int avc_ready(const void *);
+static int copy_picture(void *, AMediaFormat *, const uint8_t *, size_t, int64_t);
 static int open_session(mavc *a) {
     if (!a->coded_w || !a->coded_h || !a->npps) return 0;
     AMediaFormat *f = AMediaFormat_new();
@@ -28,20 +29,19 @@ static int open_session(mavc *a) {
     AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, a->coded_h);
     AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 19); // OMX_COLOR_FormatYUV420Planar
     AMediaFormat_setBuffer(f, "csd-0", c0, a->nsps + 4); AMediaFormat_setBuffer(f, "csd-1", c1, a->npps + 4);
-    a->mc = AMediaCodec_createDecoderByType("video/avc");
-    int ok = a->mc && AMediaCodec_configure(a->mc, f, NULL, NULL, 0) == AMEDIA_OK && AMediaCodec_start(a->mc) == AMEDIA_OK;
+    a->stream = (media_stream){.codec=AMediaCodec_createDecoderByType("video/avc"), .owner=a, .copy=copy_picture, .ready=avc_ready};
+    int ok = a->stream.codec && AMediaCodec_configure(a->stream.codec, f, NULL, NULL, 0) == AMEDIA_OK && AMediaCodec_start(a->stream.codec) == AMEDIA_OK;
     AMediaFormat_delete(f);
     if (!ok) { close_session(a); return 0; }
     a->dirty = 0; return 1;
 }
-static int format_int(AMediaFormat *f, const char *key, int fallback) {
-    int32_t v; return AMediaFormat_getInt32(f, key, &v) ? v : fallback;
-}
-static int copy_picture(mavc *a, AMediaFormat *f, const uint8_t *src, size_t bytes, int64_t pts) {
-    int cw = format_int(f, "width", 0), ch = format_int(f, "height", 0);
-    int stride = format_int(f, "stride", cw), slice = format_int(f, "slice-height", ch);
+static int avc_ready(const void *owner) { return ((const mavc *)owner)->first != NULL; }
+static int copy_picture(void *owner, AMediaFormat *f, const uint8_t *src, size_t bytes, int64_t pts) {
+    mavc *a = owner;
+    int cw = media_format_int(f, "width", 0), ch = media_format_int(f, "height", 0);
+    int stride = media_format_int(f, "stride", cw), slice = media_format_int(f, "slice-height", ch);
     if (slice == 0) slice = ch;  // an unspecified slice height uses the picture's height
-    int cf = format_int(f, "color-format", 0);
+    int cf = media_format_int(f, "color-format", 0);
     if (cf != 19 && cf != 21) {
         if (!a->red++) LOG("[RED] movie: MediaCodec AVC output colour format %#x has no explicit I420 or NV12 layout", cf);
         return 0;
@@ -58,7 +58,7 @@ static int copy_picture(mavc *a, AMediaFormat *f, const uint8_t *src, size_t byt
     if ((size_t)b * stride + r >= bytes || vbase + (uvh-1)*cs + (uvw-1)*step >= bytes) return 0;
     avc_frame *fr = malloc(sizeof *fr + (size_t)w*h + (size_t)uvw*2*uvh);
     if (!fr) return 0;
-    *fr = (avc_frame){.w=w,.h=h,.pts=pts,.standard=format_int(f,"color-standard",h >= 720 ? 1 : 4),.full=format_int(f,"color-range",2)==1};
+    *fr = (avc_frame){.w=w,.h=h,.pts=pts,.standard=media_format_int(f,"color-standard",h >= 720 ? 1 : 4),.full=media_format_int(f,"color-range",2)==1};
     for (int y = 0; y < h; y++) memcpy(fr->nv12 + (size_t)y*w, src + (size_t)(t+y)*stride + l, w);
     uint8_t *uv = fr->nv12 + (size_t)w*h;
     for (int y = 0; y < uvh; y++) for (int x = 0; x < uvw; x++) {
@@ -67,59 +67,6 @@ static int copy_picture(mavc *a, AMediaFormat *f, const uint8_t *src, size_t byt
     }
     if (a->last) a->last->next = fr; else a->first = fr;
     a->last = fr; a->nq++; return 1;
-}
-// One output, format change or EOS. The negative result signals a codec/layout failure.
-static int drain(mavc *a, int64_t wait_us) {
-    AMediaCodecBufferInfo bi;
-    ssize_t i = AMediaCodec_dequeueOutputBuffer(a->mc, &bi, wait_us);
-    if (i == AMEDIACODEC_INFO_TRY_AGAIN_LATER) return 0;
-    if (i == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED || i == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) return 1;
-    if (i < 0) return -1;
-    int ok = 1;
-    if (bi.size > 0 && !(bi.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG)) {
-        size_t cap = 0; uint8_t *src = AMediaCodec_getOutputBuffer(a->mc, (size_t)i, &cap);
-        AMediaFormat *f = AMediaCodec_getBufferFormat(a->mc, (size_t)i);
-        ok = src && f && bi.offset >= 0 && (size_t)bi.offset <= cap && (size_t)bi.size <= cap-bi.offset &&
-             copy_picture(a, f, src+bi.offset, bi.size, bi.presentationTimeUs);
-        if (f) AMediaFormat_delete(f);
-    }
-    if (bi.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) a->eos_out = 1;
-    if (AMediaCodec_releaseOutputBuffer(a->mc, i, false) != AMEDIA_OK) ok = 0;
-    return ok ? 1 : -1;
-}
-// The guest may be holding its movie lock while waiting for a decode. Fail a nonresponsive
-// codec instead of leaving the worker and every thread waiting on that lock parked forever.
-static int64_t codec_now_ms(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
-}
-static int feed(mavc *a, const uint8_t *p, size_t n, int64_t pts, uint32_t flags) {
-    int64_t deadline = codec_now_ms() + 5000;
-    do {
-        ssize_t i = AMediaCodec_dequeueInputBuffer(a->mc, 10000);
-        if (i >= 0) {
-            size_t cap = 0; uint8_t *dst = AMediaCodec_getInputBuffer(a->mc, i, &cap);
-            if (n && (!dst || n > cap)) return 0;
-            if (n) memcpy(dst, p, n);
-            return AMediaCodec_queueInputBuffer(a->mc, i, 0, n, pts, flags) == AMEDIA_OK;
-        }
-        if (i != AMEDIACODEC_INFO_TRY_AGAIN_LATER || drain(a, 0) < 0) return 0;
-    } while (codec_now_ms() < deadline);
-    return 0;
-}
-static int finish(mavc *a, int all) {
-    if (!a->eos_in) {
-        if (!feed(a, NULL, 0, 0, AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)) return 0;
-        a->eos_in = 1;
-    }
-    int64_t deadline = codec_now_ms() + 5000;
-    while (!a->eos_out && (all || !a->first)) {
-        int r = drain(a, 10000);
-        if (r < 0 || (!r && codec_now_ms() >= deadline)) return 0;
-        if (r) deadline = codec_now_ms() + 5000;
-    }
-    return 1;
 }
 static int codec_error(mavc *a) {
     if (!a->red++) LOG("[RED] movie: MediaCodec AVC configuration, input or decoded picture failed");
@@ -133,22 +80,22 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts) {
     // A demuxer can loop a closed GOP without an EOS/flush. MediaCodec may discard the
     // previous GOP's reordered tail when the new IDR repeats its timestamps. Drain first.
     int restart = c.idr && a->fed_picture && pts <= a->max_pts;
-    if (a->mc && (a->dirty || a->eos_in || restart)) {
-        if (!finish(a, 1)) return codec_error(a);
+    if (a->stream.codec && (a->dirty || a->stream.eos_in || restart)) {
+        if (!media_finish(&a->stream, 1)) return codec_error(a);
         close_session(a);
     }
-    if (!a->mc && !open_session(a)) return codec_error(a);
-    if (!feed(a, a->au, c.len, pts, 0)) return codec_error(a);
+    if (!a->stream.codec && !open_session(a)) return codec_error(a);
+    if (!media_feed(&a->stream, a->au, c.len, pts, 0)) return codec_error(a);
     if (!a->fed_picture || pts > a->max_pts) a->max_pts = pts;
     a->fed_picture = 1;
     return 0;
 }
 static uint8_t color8(int x) { return x < 0 ? 0 : x > 255 ? 255 : (uint8_t)x; }
 int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts) {
-    if (!a->first && a->mc) {
+    if (!a->first && a->stream.codec) {
         int ok = 1;
-        if (flush) ok = finish(a, 0);
-        else while (!a->first && !a->eos_out) { int r = drain(a, 0); if (r <= 0) { ok = r == 0; break; } }
+        if (flush) ok = media_finish(&a->stream, 0);
+        else while (!a->first && !a->stream.eos_out) { int r = media_drain(&a->stream, 0); if (r <= 0) { ok = r == 0; break; } }
         if (!ok) codec_error(a);
     }
     avc_frame *f = a->first;

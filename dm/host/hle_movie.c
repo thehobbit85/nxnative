@@ -3,7 +3,7 @@
 // The host takes over Decoder (below; VP8 / VP9 are decoded with libvpx, H.264 with VideoToolbox in hle_movie_avc.c, Vorbis audio with stb_vorbis): Engage's movies are 103 VP9 WebM files under RomFS/Data/StreamingAssets/Movie (2.7 GB, no audio track), and the game does not go on until the opening movie S01F has played.
 #include "hle.h"
 #include <arm_neon.h>
-#include <mach/mach.h>
+#include "host_memory.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>
@@ -11,7 +11,11 @@
 #include "vpx/vp8dx.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
 #include "hle_movie_yuv.h"   // md_nv12 / md_rgba, shared with hle_codec_video.c
+#ifdef __ANDROID__
+#include "movie_mediacodec.h"
+#else
 #include <AudioToolbox/AudioToolbox.h>   // AAC
+#endif
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
 #define STB_VORBIS_NO_PULLDATA_API
@@ -84,16 +88,20 @@ typedef struct {
     pthread_mutex_t dmu, wmu; pthread_cond_t wcv; pthread_t wk;
     pthread_mutex_t pkm; pthread_cond_t pkc; pthread_t pk; int pk_go, pk_quit, pk_on;   // the decoder's own thread: the SDK decodes on a codec thread, not on the caller's
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
-    mavc *avc; int avc_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
+    mavc *avc; int output_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); output_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
                                                  // end-of-stream flag and the packet's time (drain_pts)
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
     int vpx_cs, vpx_full;   // the colour matrix (vpx_color_space_t) and range of the last VP8 / VP9 picture, for md_format
     uint8_t *bgra; size_t bgra_cap;              // native-texture mode: the picture with red and blue swapped, for a BGRA8 / BGRX8 client texture (md_out_tex)
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
-    uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
+    uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; _Atomic int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
     int16_t *hold; size_t hold_n, hold_cap; int vb_prev;   // decoded samples (interleaved values) not handed out yet, and the last packet's blocksize, 0 at a stream's start (md_vorbis)
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
+#ifdef __ANDROID__
+    media_stream aac; struct pcm_chunk *pcm_first, *pcm_last;
+#else
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
+#endif
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
     unsigned long ncall[24];
 } mdec_t;
@@ -141,18 +149,18 @@ static void md_syms(void) {
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
 }
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
-// An EventType pointer that can be signalled: 8-byte aligned and readable (vm_read_overwrite fails instead of faulting)
+// An EventType pointer that can be signalled: 8-byte aligned and readable without faulting the host.
 static int ev_ok(const void *p) {
-    uint64_t w; vm_size_t got = 0; uintptr_t a = (uintptr_t)p;
-    return a >= 0x100000000ull && !(a & 7) && vm_read_overwrite(mach_task_self(), (vm_address_t)a, sizeof w, (vm_address_t)&w, &got) == KERN_SUCCESS && got == sizeof w;
+    uint64_t w; uintptr_t a = (uintptr_t)p;
+    return a >= 0x100000000ull && !(a & 7) && dm_host_read(a, &w, sizeof w);
 }
 // The SDK keeps only the pointer to the client's struct (DecoderImpl::RegisterClientEvents: str x1, [x0, #0xd0]) and reads the entry each time it signals, skipping a null one
 // (SendOutputBufferEventAvailableToClient and the others, subsdk0+0x1feb0 in DRAGON QUEST XI S). That game's movie player registers its struct before it fills it (main+0x39edab0, right after
 // the Decoder constructor: leftover values such as 0xe00000010, sometimes 0 or a stray pointer), so the entry is read at signal time; when it is not an event (any longer), the event it held
 // at registration is used, if any
 static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
-    void *p = NULL; vm_size_t got = 0;
-    if (d->evc && (vm_read_overwrite(mach_task_self(), (vm_address_t)&d->evc[i], sizeof p, (vm_address_t)&p, &got) != KERN_SUCCESS || got != sizeof p)) p = NULL;
+    void *p = NULL;
+    if (d->evc && !dm_host_read((uintptr_t)&d->evc[i], &p, sizeof p)) p = NULL;
     void *live = p;
     if (!p || !ev_ok(p)) p = d->ev[i];
     if (p) G.signal(p);
@@ -197,7 +205,14 @@ static void md_defer_body(void *arg) {
             continue;
         }
         if (!next) pthread_cond_wait(&g_dfcv, &g_dfmu);
+#ifdef __ANDROID__
+        else {
+            struct timespec ts = {(time_t)(next / 1000000000u), (long)(next % 1000000000u)};
+            pthread_cond_timedwait_monotonic_np(&g_dfcv, &g_dfmu, &ts);
+        }
+#else
         else { uint64_t w = next - now; struct timespec ts = { (time_t)(w / 1000000000u), (long)(w % 1000000000u) }; pthread_cond_timedwait_relative_np(&g_dfcv, &g_dfmu, &ts); }
+#endif
     }
 }
 // log the first 12 calls one by one, then every 2^k-th (DM_MOVIE_TRACE=1: every call, with the calling thread and the decoder: Unity drives a movie's audio and video decoders from one thread)
@@ -374,6 +389,7 @@ static int md_vorbis(mdec_t *d, const uint8_t *p, int n, int slot) {
 // ---------- AAC ----------
 // The demuxer hands over raw AAC frames (1024 samples each) and the AudioSpecificConfig in csd-0. AudioToolbox takes the configuration as an MPEG-4 ES descriptor (the magic cookie built
 // here as FFmpeg's AudioToolbox decoder builds it); without csd-0 an AAC-LC configuration is made from the sample rate and channel count
+#ifndef __ANDROID__
 static uint8_t *esds_descr(uint8_t *p, int tag, unsigned n) { *p++ = (uint8_t)tag; for (int i = 3; i > 0; i--) *p++ = (uint8_t)(n >> (7 * i) | 0x80); *p++ = (uint8_t)(n & 0x7f); return p; }
 static OSStatus aac_feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, AudioStreamPacketDescription **pd, void *ud) {
     (void)c; mdec_t *d = ud;
@@ -382,9 +398,10 @@ static OSStatus aac_feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, A
     d->aac_desc = (AudioStreamPacketDescription){0, 0, d->aac_pkt_n}; if (pd) *pd = &d->aac_desc;
     *np = 1; d->aac_pkt = NULL; return 0;
 }
-static int md_aac_open(mdec_t *d) {
+#endif
+static int md_asc(mdec_t *d, uint8_t asc[64]) {
     static const int rates[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350};
-    uint8_t asc[64]; int an = d->vhdr_n[0] > 0 && d->vhdr_n[0] <= (int)sizeof asc ? d->vhdr_n[0] : 0;
+    int an = d->vhdr_n[0] > 0 && d->vhdr_n[0] <= 64 ? d->vhdr_n[0] : 0;
     if (an) memcpy(asc, d->vhdr[0], (size_t)an);
     if (an >= 2) {   // sampling frequency index and channel configuration from the configuration itself
         int fi = (asc[0] & 7) << 1 | asc[1] >> 7, cc = asc[1] >> 3 & 15;
@@ -392,6 +409,14 @@ static int md_aac_open(mdec_t *d) {
     }
     if (d->rate <= 0) d->rate = 48000; if (d->ch <= 0) d->ch = 2;
     if (!an) { int fi = 3; for (int i = 0; i < 13; i++) if (rates[i] == d->rate) fi = i; asc[0] = (uint8_t)(2 << 3 | fi >> 1); asc[1] = (uint8_t)((fi & 1) << 7 | (d->ch & 15) << 3); an = 2; }
+    return an;
+}
+#ifdef __ANDROID__
+#include "movie_aac_android.inc"
+#else
+static int md_aac_open(mdec_t *d) {
+    uint8_t asc[64];
+    int an = md_asc(d, asc);
     AudioStreamBasicDescription in = {.mSampleRate = d->rate, .mFormatID = kAudioFormatMPEG4AAC, .mFramesPerPacket = 1024, .mChannelsPerFrame = (UInt32)d->ch};
     AudioStreamBasicDescription out = {.mSampleRate = d->rate, .mFormatID = kAudioFormatLinearPCM, .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
                                        .mBytesPerPacket = 2u * d->ch, .mFramesPerPacket = 1, .mBytesPerFrame = 2u * d->ch, .mChannelsPerFrame = (UInt32)d->ch, .mBitsPerChannel = 16};
@@ -420,6 +445,10 @@ static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
     d->out[slot].bytes = (size_t)frames * 2 * d->ch;
     return frames > 0;
 }
+static void md_aac_close(mdec_t *d) {
+    if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; }
+}
+#endif
 // The H.264 decoder, made by Configure (when the stream's parameter sets come with it) or by the first packet; RGBA pictures in the native texture mode either way.
 // Absolum's movies bring csd-0 / csd-1 to Configure, and a decoder made there used to stay NV12: the frames' bytes went into the RGBA texture as they were
 static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
@@ -432,12 +461,18 @@ static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
     return mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
 }
-static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
+static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } md_aac_close(d); if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
+#ifndef __ANDROID__
 void dm_host_helper_qos(qos_class_t q);   // hle_thread.c
+#endif
 static void *md_worker(void *arg) {
     mdec_t *d = arg;
+#ifdef __ANDROID__
+    pthread_setname_np(pthread_self(), "dm movie decode");
+#else
     pthread_setname_np("dm movie decoder");
     dm_host_helper_qos(QOS_CLASS_USER_INITIATED);   // under DM_QOS_MAP: decodes ahead of playback, not on the frame's critical path
+#endif
     dm_host_mutex_lock(&d->wmu);
     for (;;) {
         while (d->job == MDJ_NONE) pthread_cond_wait(&d->wcv, &d->wmu);
@@ -446,7 +481,7 @@ static void *md_worker(void *arg) {
         if (job == MDJ_DECODE || job == MDJ_TAKE) {
             uint64_t t0 = now_ns();
             d->jgot = d->type == MD_TYPE_AVC ? md_avc(d, d->jp, d->jn, d->jslot, job == MDJ_TAKE) : d->type == MD_TYPE_VORBIS ? md_vorbis(d, d->jp, d->jn, d->jslot) :
-                      d->type == MD_TYPE_AAC ? md_aac(d, d->jp, d->jn, d->jslot) : md_vpx(d, d->jp, d->jn, d->jslot);
+                      d->type == MD_TYPE_AAC ? md_aac(d, job == MDJ_TAKE ? NULL : d->jp, job == MDJ_TAKE ? 0 : d->jn, d->jslot) : md_vpx(d, d->jp, d->jn, d->jslot);
             uint64_t dt = now_ns() - t0; d->dec_n++; d->dec_ns += dt; if (dt > d->dec_max) d->dec_max = dt;
         }
         else md_close(d);
@@ -498,14 +533,14 @@ static void md_pump(mdec_t *d) {
     dm_host_lock(&d->dmu);
     for (;;) {
         dm_host_mutex_lock(&d->mu);
-        if (d->avc_drain) {   // H.264 end of stream: the pictures still queued leave one per free slot, then an output without a picture carries the end-of-stream flag
+        if (d->output_drain) {   // H.264 end of stream: the pictures still queued leave one per free slot, then an output without a picture carries the end-of-stream flag
             int s = -1; for (int k = 0; k < d->nout; k++) if (!d->out[k].used) { s = k; break; }
             if (s < 0) { pthread_mutex_unlock(&d->mu); break; }
             d->out[s].used = 1; pthread_mutex_unlock(&d->mu);
             d->jslot = s; d->jflush = 1; md_job(d, MDJ_TAKE); int got = d->jgot;
             dm_host_mutex_lock(&d->mu);
             d->out[s].pic = got; d->out[s].pts = got ? d->jpts_out : d->drain_pts; d->out[s].flags = got ? 0 : 4; d->outq[d->noutq++] = s;
-            if (!got) d->avc_drain = 0;
+            if (!got) d->output_drain = 0;
             pthread_mutex_unlock(&d->mu);
             md_pump_ev(d, 1);
             continue;
@@ -517,21 +552,24 @@ static void md_pump(mdec_t *d) {
         memmove(d->pend, d->pend + 1, --d->npend * sizeof *d->pend);
         d->out[slot].used = 1;
         pthread_mutex_unlock(&d->mu);
-        int got = 0, avc = d->type == MD_TYPE_AVC;
+        int got = 0, reordered = d->type == MD_TYPE_AVC;
+#ifdef __ANDROID__
+        reordered |= d->type == MD_TYPE_AAC;   // MediaCodec can return PCM after a later input
+#endif
         int eos = (pk.flags & 4) != 0;   // MediaCodec BUFFER_FLAG_END_OF_STREAM
         if (eos && (pk.pts < 0 || (uint32_t)pk.size >= MD_INCAP)) pk.size = 0;   // Monster Hunter Rise ends a stream with time -1 and the whole input buffer (4 MB) as its length: no data (decoding it gave VideoToolbox -12909 and AudioToolbox -50); an end-of-stream packet as long as the whole buffer is the same, with a real time (from PR #36)
         // H.264 end of stream: this packet's output takes the first queued picture (jflush). Taking none put a black picture without the flag ahead of the last
         // `depth` pictures, a black flash before the movie's last frames. No picture carries the flag: CRI Sofdec2 (Catherine: Full Body) drops a picture flagged end-of-stream and then
         // waits for it for good, so every picture leaves as a frame of the movie and an output without one ends it, as for VP9 and Baseline streams whose end-of-stream packet has no data
-        if ((pk.size > 0 && (MD_VPX(d) || MD_AUDIO(d) || avc)) || (avc && eos)) {
-            d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; d->jflush = avc && eos; md_job(d, MDJ_DECODE); got = d->jgot; }
-        int more = avc && eos && got;   // a picture in this output: the queued ones follow it, then the end-of-stream output (the drain)
+        if ((pk.size > 0 && (MD_VPX(d) || MD_AUDIO(d) || reordered)) || (reordered && eos)) {
+            d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; d->jflush = reordered && eos; md_job(d, MDJ_DECODE); got = d->jgot; }
+        int more = reordered && eos && got;   // a picture in this output: the queued ones follow it, then the end-of-stream output (the drain)
         dm_host_mutex_lock(&d->mu);
         d->infree[d->ninfree++] = pk.in;
         int ready = got || eos;   // an end-of-stream packet without a picture still yields an output to carry the flag back
-        if (ready) { d->out[slot].pic = got; d->out[slot].pts = got && avc ? d->jpts_out : pk.pts; d->out[slot].flags = more ? pk.flags & ~4u : pk.flags; d->outq[d->noutq++] = slot; }
+        if (ready) { d->out[slot].pic = got; d->out[slot].pts = got && reordered ? d->jpts_out : pk.pts; d->out[slot].flags = more ? pk.flags & ~4u : pk.flags; d->outq[d->noutq++] = slot; }
         else d->out[slot].used = 0;
-        if (more) { d->avc_drain = 1; d->drain_pts = pk.pts; }
+        if (more) { d->output_drain = 1; d->drain_pts = pk.pts; }
         int ineos = d->in_eos;
         pthread_mutex_unlock(&d->mu);
         if (!ineos) md_pump_ev(d, 0);   // no input is announced after an end-of-stream packet (h_movie_AcqIn)
@@ -540,7 +578,7 @@ static void md_pump(mdec_t *d) {
     pthread_mutex_unlock(&d->dmu);
 }
 
-HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", "movie decoder: host implementation (no NVIDIA hardware decoder; VP8 / VP9 with libvpx, AVC with VideoToolbox)",
+HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", "movie decoder: host implementation (no NVIDIA hardware decoder; VP8 / VP9 with libvpx, AVC with the platform decoder)",
           void, h_movie_Decoder, void **self, int type, int fmt, int mode, int prio) {
     static void *vt; if (!vt) { uint8_t *t = guest_sym("_ZTVN5movie7DecoderE"); if (!t) die("movie: missing the vtable of movie::Decoder"); vt = t + 0x10; }
     md_syms();
@@ -667,13 +705,16 @@ HLE_FORCE("_ZN5movie7Decoder5StartEv", "movie decoder start: all inputs empty, n
 static void md_reset(mdec_t *d, int close) {
     dm_host_lock(&d->dmu);   // wait for the packet being decoded
     if (close) md_job(d, MDJ_CLOSE);
+#ifdef __ANDROID__
+    if (!close && d->type == MD_TYPE_AAC) md_aac_close(d);   // pending PCM belongs to the old stream
+#endif
     if (d->avc) mavc_drop(d->avc);   // H.264 pictures waiting for their turn belong to the old position
     dm_host_mutex_lock(&d->mu);
     // Every input goes back to the free list, as with MediaCodec, but one the client holds may still be sent: Big Brain Academy: Brain vs. Brain's event thread acquires inputs while its
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
     uint64_t now = now_ns();
     for (int i = 0; i < MD_NIN; i++) { d->infree[i] = i; d->instale[i] = d->inown[i] ? now : 0; d->inown[i] = 0; }
-    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0; d->hold_n = 0; d->vb_prev = 0;
+    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->output_drain = 0; d->in_eos = 0; d->hold_n = 0; d->vb_prev = 0;
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; d->out[i].cli = 0; d->out[i].rnd = 0; if (close) d->out[i].pic = 0; }
     pthread_mutex_unlock(&d->mu);
@@ -733,7 +774,7 @@ HLE_FORCE("_ZN5movie7Decoder14GetInputBufferEiPNS_6BufferE", "movie decoder: han
     G.set_data(buf, d->in[i], MD_INCAP); G.set_range(buf, 0, (int)MD_INCAP);
     return 0;
 }
-HLE_FORCE("_ZN5movie7Decoder24SendInputBufferForDecodeEiiilj", "movie decoder: send a packet for decoding (VP8 / VP9 with libvpx, AVC with VideoToolbox)", int, h_movie_SendIn,
+HLE_FORCE("_ZN5movie7Decoder24SendInputBufferForDecodeEiiilj", "movie decoder: send a packet for decoding (VP8 / VP9 with libvpx, AVC with the platform decoder)", int, h_movie_SendIn,
           void **self, int i, int off, int size, int64_t pts, uint32_t flags) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (i < 0 || i >= MD_NIN || off < 0 || size < 0 || (uint32_t)off + (uint32_t)size > MD_INCAP) return 0x100b;
@@ -873,7 +914,7 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     // so a client never has to release it. Super Mario Party Jamboree's player (SDK 17.5.9) never calls ReleaseOutputBufferIndex: holding all 16 video slots, the decoder stopped and
     // the opening movie froze on its 16th picture. Metroid Dread (SDK 11.4.3, which does the same) still releases each index. The host returns the slot later (md_rendered)
     dm_host_mutex_lock(&d->mu);
-    int n = md_rendered(d, i), queued = d->npend, drain = d->avc_drain;
+    int n = md_rendered(d, i), queued = d->npend, drain = d->output_drain;
     pthread_mutex_unlock(&d->mu);
     if (n) MD_TRACE(d, 13, "GetOutputBuffer index %d: %d earlier rendered output%s returned (%d packets queued%s)", i, n, n > 1 ? "s" : "", queued, drain ? ", H.264 pictures draining" : "");
     if (n && (queued || drain)) md_pump_async(d);
@@ -918,7 +959,7 @@ static int md_rel(mdec_t *d, int i) {
     int held = d->out[i].cli;
     if (held && d->out[i].rnd) d->tex_rel = 1;   // this client releases what it rendered: md_rendered leaves its slots to it
     if (held) { d->out[i].used = 0; d->out[i].pic = 0; d->out[i].cli = 0; d->out[i].rnd = 0; }
-    int queued = d->npend, drain = d->avc_drain;
+    int queued = d->npend, drain = d->output_drain;
     pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 13, "release output index %d%s (%d packets queued%s)", i, held ? "" : ": not held by the client, nothing to release", queued, drain ? ", H.264 pictures draining" : "");
     // An H.264 drain waits for a free slot too: AI: THE SOMNIUM FILES (Unity 2017.4) held all 16 video slots when its logo movie's end-of-stream packet came, the drain stopped
