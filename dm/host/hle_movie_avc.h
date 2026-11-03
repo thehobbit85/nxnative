@@ -1,4 +1,4 @@
-// H.264 (AVC) decoding for the movie decoder (hle_movie.c), on Apple's VideoToolbox; see hle_movie_avc.c
+// H.264 (AVC) decoding for the movie decoder (hle_movie.c), on VideoToolbox or Android MediaCodec; see hle_movie_avc.c
 #pragma once
 #include <stdint.h>
 #include <stddef.h>

@@ -6,27 +6,41 @@
 // once their sequence is complete, or all at the end of the stream.
 // SPS pic_order_cnt_type 2 has decode order equal to output order: even High profile needs no reorder queue in that case
 #include "hle.h"
+#ifdef __ANDROID__
+#include <media/NdkMediaCodec.h>
+#include <media/NdkMediaFormat.h>
+#else
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>
+#endif
 #include "hle_movie_avc.h"
 
 #define QMAX 16
 struct mavc {
     uint8_t sps[512], pps[512]; int nsps, npps, dirty;
+#ifdef __ANDROID__
+    AMediaCodec *mc;
+    int coded_w, coded_h, eos_in, eos_out, nq, fed_picture;
+    int64_t max_pts;
+    struct avc_frame *first, *last;
+#else
     CMVideoFormatDescriptionRef fd; VTDecompressionSessionRef vs;
     struct { CVPixelBufferRef pb; int64_t pts; uint64_t sequence; } q[QMAX]; int nq, depth;
     uint64_t sequence; int saw_picture;
+#endif
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
 };
 
 mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
+#ifndef __ANDROID__
 static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
 }
 void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; }
 void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a->au); free(a); }
+#endif
 int mavc_queued(const mavc *a) { return a->nq; }
 
 // Read only the SPS prefix through pic_order_cnt_type (H.264 7.4.2.1.1, 8.2.1.3).
@@ -45,7 +59,7 @@ static unsigned avc_ue(avc_bits *b) {
     while (!b->bad && !avc_u(b, 1)) if (++z > 30) { b->bad = 1; return 0; }
     return b->bad ? 0 : ((1u << z) - 1) + avc_u(b, z);
 }
-static int avc_reorder_depth(const uint8_t *nal, size_t n) {
+static int avc_sps(const uint8_t *nal, size_t n, int *width, int *height) {
     int fallback = n > 1 && nal[1] == 66 ? 0 : 4;
     if (n < 4 || n > 512 || (nal[0] & 31) != 7) return fallback;
     avc_bits b = {0};
@@ -77,7 +91,21 @@ static int avc_reorder_depth(const uint8_t *nal, size_t n) {
     }
     if (avc_ue(&b) > 12) return fallback; // log2_max_frame_num_minus4
     unsigned poc = avc_ue(&b);
-    return !b.bad && poc == 2 ? 0 : fallback;
+    int depth = !b.bad && poc == 2 ? 0 : fallback;
+    if (!width || !height || poc > 2) return depth;
+    if (!poc) avc_ue(&b);
+    if (poc == 1) {
+        avc_u(&b, 1); avc_ue(&b); avc_ue(&b); // signed Exp-Golomb offsets have the same length
+        unsigned cycle = avc_ue(&b);
+        if (cycle > 255) return depth;
+        for (unsigned i = 0; i < cycle; i++) avc_ue(&b);
+    }
+    avc_ue(&b); avc_u(&b, 1);
+    unsigned wm = avc_ue(&b), hm = avc_ue(&b), frame_only = avc_u(&b, 1);
+    if (!b.bad && wm < 1024 && hm < 1024) {
+        *width = 16 * (wm + 1); *height = 16 * (hm + 1) * (2 - frame_only);
+    }
+    return depth;
 }
 
 static void keep_ps(mavc *a, const uint8_t *nal, size_t n) {   // a parameter set NAL unit (without start code)
@@ -85,7 +113,14 @@ static void keep_ps(mavc *a, const uint8_t *nal, size_t n) {   // a parameter se
     if (n > sizeof a->sps) { if (!a->red++) LOG("[RED] movie: AVC parameter set of %zu bytes, too long", n); return; }
     if ((size_t)*dn == n && !memcmp(dst, nal, n)) return;
     memcpy(dst, nal, n); *dn = (int)n; a->dirty = 1;
-    if (t == 7) a->depth = avc_reorder_depth(nal, n);
+    if (t == 7) {
+#ifdef __ANDROID__
+        a->coded_w = a->coded_h = 0;
+        avc_sps(nal, n, &a->coded_w, &a->coded_h);
+#else
+        a->depth = avc_sps(nal, n, NULL, NULL);
+#endif
+    }
 }
 // walk the NAL units of p (Annex B start codes, or else 4-byte lengths); fn gets each unit without its prefix. Zero bytes before a start code (the first byte of a 4-byte
 // start code, trailing_zero_8bits) are not part of the unit
@@ -106,7 +141,10 @@ static void each_nal(const uint8_t *p, size_t n, void (*fn)(void *, const uint8_
     }
 }
 static void ps_only(void *ctx, const uint8_t *nal, size_t n) { int t = nal[0] & 31; if (t == 7 || t == 8) keep_ps(ctx, nal, n); }
-void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) { each_nal(p, n, ps_only, a); }
+void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) {
+    if (n && ((p[0] & 31) == 7 || (p[0] & 31) == 8)) keep_ps(a, p, n);
+    else each_nal(p, n, ps_only, a);
+}
 // AVCDecoderConfigurationRecord: version, profile, compatibility, level, NAL length size - 1, SPS count (low 5 bits) and 16-bit-length SPS, PPS count and 16-bit-length PPS
 void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
     if (n < 7 || p[0] != 1) { if (!a->red++) LOG("[RED] movie: unrecognized avcC record (%zu bytes, version %d)", n, n ? p[0] : -1); return; }
@@ -117,6 +155,7 @@ void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
     }
 }
 
+#ifndef __ANDROID__
 static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CVImageBufferRef img, CMTime pts, CMTime dur) {
     (void)fl; (void)dur; mavc *a = ref;
     if (st || !img) { if (!a->red++) LOG("[RED] movie: AVC decode error (VideoToolbox %d, first case)", (int)st); return; }
@@ -145,6 +184,7 @@ static int open_session(mavc *a) {
     LOG("[movie] AVC: VideoToolbox decoding %d×%d, profile %d, reorder depth %d", dm.width, dm.height, a->nsps > 1 ? a->sps[1] : 0, a->depth);
     a->dirty = 0; return 1;
 }
+#endif
 typedef struct { mavc *a; size_t len; int idr, picture; } au_ctx;
 static void au_add(void *ctx, const uint8_t *nal, size_t n) {
     au_ctx *c = ctx; mavc *a = c->a; int t = nal[0] & 31;
@@ -153,9 +193,15 @@ static void au_add(void *ctx, const uint8_t *nal, size_t n) {
     if (t >= 1 && t <= 5) c->picture = 1;
     if (t == 5) c->idr = 1;
     if (c->len + 4 + n > a->aucap) { a->aucap = (c->len + 4 + n) * 2; a->au = realloc(a->au, a->aucap); if (!a->au) die("movie: AVC buffer allocation failed"); }
-    uint8_t *o = a->au + c->len; o[0] = (uint8_t)(n >> 24); o[1] = (uint8_t)(n >> 16); o[2] = (uint8_t)(n >> 8); o[3] = (uint8_t)n;
+    uint8_t *o = a->au + c->len;
+#ifdef __ANDROID__
+    o[0] = o[1] = o[2] = 0; o[3] = 1; // NDK expects Annex B access units
+#else
+    o[0] = (uint8_t)(n >> 24); o[1] = (uint8_t)(n >> 16); o[2] = (uint8_t)(n >> 8); o[3] = (uint8_t)n;
+#endif
     memcpy(o + 4, nal, n); c->len += 4 + n;
 }
+#ifndef __ANDROID__
 // PTS may restart when an MP4 loops without a Flush or EOS. Sorting all pictures
 // by that time strands the previous loop's last `depth` pictures forever, so
 // the next loop effectively has no reorder lookahead. An IDR starts a new coded
@@ -210,3 +256,6 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     CVPixelBufferRelease(pb);
     return 1;
 }
+#else
+#include "movie_avc_android.inc"
+#endif
