@@ -69,7 +69,7 @@ jobs:
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -Wl,--gc-sections" build/t_bigstack
           qemu-aarch64 dm/host/tests/build/t_bigstack
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" android-memory-build
-          make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE" build/t_fault_access
+          make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE" build/t_fault_access build/t_lifecycle
           make -C dm/gfx/nvn/vulkan GAME="$GAME" CC="$bin/aarch64-linux-android30-clang" \
             GLSLC="$ANDROID_NDK_HOME/shader-tools/linux-x86_64/glslc" LIBS="-lvulkan -landroid -lm" fixture
 
@@ -79,6 +79,7 @@ jobs:
           path: |
             dm/host/tests/build/t_memory_android*
             dm/host/tests/build/t_fault_access
+            dm/host/tests/build/t_lifecycle
           retention-days: 1
 
   android-memory:
@@ -91,10 +92,11 @@ jobs:
         with:
           name: android-kernel-tests
           path: tests
-      - name: Check the real kernel's page, stack and self-process read behavior
+      - name: Check native pages, stacks, self-process reads, faults and graceful shutdown
         run: |
-          chmod +x tests/t_memory_android tests/t_memory_android_unlimited tests/t_fault_access
+          chmod +x tests/t_memory_android tests/t_memory_android_unlimited tests/t_fault_access tests/t_lifecycle
           tests/t_fault_access
+          tests/t_lifecycle
           tests/t_memory_android
           tests/t_memory_android_unlimited
 
