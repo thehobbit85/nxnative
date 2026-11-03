@@ -778,6 +778,13 @@ static void map_image(module_t *m, const char *dir) {
     m->base = (uint8_t *)base; install_key_page(m);
 }
 #else
+#ifdef __ANDROID__
+#include "android_text.h"
+#else
+static void dm_copy_image(module_t *m, const uint8_t *src, size_t bytes, size_t rx) {
+    (void)rx; memcpy(m->base, src, bytes);
+}
+#endif
 static uint8_t *slurp(const char *path, size_t *n) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) die("open %s", path);
@@ -816,7 +823,7 @@ static void map_image(module_t *m, const char *dir) {
         uint8_t *a = mmap(slot ? slot - pre : NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
-        memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
+        dm_copy_image(m, raw, fl, rx); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
         free(raw); install_key_page(m);
         if (bl && seal_code(m->base + m->back_off, bl)) die("%s mprotect back patch", m->name);
         if (seal_code(m->base, rx)) die("%s mprotect text", m->name);
@@ -828,7 +835,7 @@ static void map_image(module_t *m, const char *dir) {
     uint8_t *slot = jit_slot(m, m->size, 0);
     m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    memcpy(m->base, raw, sz); free(raw); install_key_page(m);
+    dm_copy_image(m, raw, sz, rx); free(raw); install_key_page(m);
     if (seal_code(m->base, rx)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
     if (seal_code(m->base + po, m->size - po)) die("%s mprotect patch", m->name);

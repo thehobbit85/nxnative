@@ -112,7 +112,7 @@ $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 nro: $(B)/t_nro
 	$(B)/t_nro
 # the cheat engine (hle_cheats.c, compiled into the test with stubs for the loader, the heap and the keys)
-$(B)/t_cheats: t_cheats.c ../hle_cheats.c ../dm.h ../dm_input.h $(GAME_H) | $(B)
+$(B)/t_cheats: t_cheats.c ../hle_cheats.c ../dm.h ../dm_input.h ../host_memory.h ../android_text.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_cheats.c
 .PHONY: cheats
 cheats: $(B)/t_cheats
@@ -286,7 +286,7 @@ $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
 # Run a synthetic worker through thread_main, the guest stack switch, the SVC gate and bionic signals.
 ANDROID_SCHED_SRC = t_android_scheduler.c ../hle_thread.c ../thread.c ../entry.S ../crash.c ../hle_os.c ../loader.c ../hle.c ../hle_svc.c
-$(B)/t_android_scheduler: $(ANDROID_SCHED_SRC) ../dm.h ../dm_uc.h ../host_memory.h $(GAME_H) | $(B)
+$(B)/t_android_scheduler: $(ANDROID_SCHED_SRC) ../dm.h ../dm_uc.h ../host_memory.h ../android_text.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -UNDEBUG -fPIC -fvisibility=hidden \
 	    -ffunction-sections -fdata-sections -I.. -I../../android/compat $(GINC) $(ANDROID_SCHED_SRC) \
 	    -Wl,--gc-sections -Wl,--no-undefined -Wl,-z,max-page-size=16384 -ldl -o $@

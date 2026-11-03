@@ -10,6 +10,9 @@ static inline int dm_host_read(uintptr_t address, void *buf, size_t size) {
     vm_size_t got;
     return vm_read_overwrite(mach_task_self(), address, size, (vm_address_t)buf, &got) == KERN_SUCCESS && got == size;
 }
+static inline int dm_host_write(uintptr_t address, const void *buf, size_t size) {
+    return size <= UINT32_MAX && vm_write(mach_task_self(), address, (vm_offset_t)buf, (mach_msg_type_number_t)size) == KERN_SUCCESS;
+}
 static inline size_t dm_host_stack(uintptr_t *base) {
     pthread_t self = pthread_self();
     size_t size = pthread_get_stacksize_np(self);
@@ -22,6 +25,10 @@ static inline size_t dm_host_stack(uintptr_t *base) {
 static inline int dm_host_read(uintptr_t address, void *buf, size_t size) {
     struct iovec local = {buf, size}, remote = {(void *)address, size};
     return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)size;
+}
+static inline int dm_host_write(uintptr_t address, const void *buf, size_t size) {
+    struct iovec local = {(void *)buf, size}, remote = {(void *)address, size};
+    return process_vm_writev(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)size;
 }
 static inline size_t dm_host_stack(uintptr_t *base) {
     pthread_attr_t attr;
