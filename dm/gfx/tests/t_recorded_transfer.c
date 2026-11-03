@@ -46,6 +46,10 @@ int main(void) {
     assert(API(nvnCommandBufferInitialize)(&cb, &device));
     API(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, cmd_size);
     API(nvnCommandBufferBeginRecording)(&cb);
+    // Compare the units and epoch of a recorded timestamp with the public device clock.
+    const size_t report_offset = dst_offset + 4096;
+    NVNcounterData *reports = (NVNcounterData *)(storage + report_offset);
+    API(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP_TOP, addr + report_offset);
     NVNcopyRegion all = {0, 0, 0, 8, 8, 3}, middle = {0, 0, 1, 8, 8, 1};
     float blue[4] = {0, 0, 1, 1}, red[4] = {1, 0, 0, 1};
     API(nvnCommandBufferClearTexture)(&cb, &tex, NULL, &all, blue, 15);
@@ -57,6 +61,7 @@ int main(void) {
     API(nvnTextureViewSetLayers)(&view, 1, 2);
     NVNcopyRegion sub = {2, 1, 0, 3, 3, 2};
     API(nvnCommandBufferCopyTextureToBuffer)(&cb, &tex, &view, &sub, addr + dst_offset + guard, 0);
+    API(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP, addr + report_offset + sizeof *reports);
     NVNsync sync;
     assert(API(nvnSyncInitialize)(&sync, &device));
     API(nvnCommandBufferFenceSync)(&cb, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
@@ -74,11 +79,19 @@ int main(void) {
     }
 
     assert(API(nvnSyncWait)(&sync, 0) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+    uint64_t before = API(nvnDeviceGetCurrentTimestampInNanoseconds)(&device);
     mtl_sub_begin();
     mtl_exec((const uint8_t *)(uintptr_t)handle);
     mtl_sub_commit();
     NVNsyncWaitResult waited = API(nvnSyncWait)(&sync, 5000000000ull);
     assert(waited == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED || waited == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+    uint64_t after = API(nvnDeviceGetCurrentTimestampInNanoseconds)(&device);
+    for (int i = 0; i < 2; ++i) {
+        uint64_t ns = API(nvnDeviceGetTimestampInNanoseconds)(&device, &reports[i]);
+        assert(ns + 2 >= before && ns <= after + 2);
+        assert(reports[i].counter == (DM_GAME_RENDER_COND ? 0 : reports[i].timestamp));
+    }
+    assert(reports[1].timestamp >= reports[0].timestamp);
     for (size_t i = 0; i < sizeof expected; i++) {
         if (storage[dst_offset + i] != expected[i])
             die("recorded transfer at byte %zu: got %#x, expected %#x", i, storage[dst_offset + i], expected[i]);
@@ -88,5 +101,5 @@ int main(void) {
     API(nvnTextureFinalize)(&tex);
     API(nvnMemoryPoolFinalize)(&pool);
     API(nvnDeviceFinalize)(&device);
-    puts("Public NVN recorder returned both colored layers and preserved every guard and padding byte");
+    puts("Public NVN recorder returned both layers, preserved guards and padding, and reported timestamps on the guest clock");
 }

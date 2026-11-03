@@ -13,6 +13,7 @@
 #include "hle.h"
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
+#include "nvn_timestamp.h"
 #include "spv_vertex_fetch.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
@@ -142,7 +143,10 @@ static VkDeviceSize ring_put(const void *src, VkDeviceSize n, VkDeviceSize align
     return o;
 }
 static void post_add(post_t p) { if (C->npost == C->cpost) { C->cpost = C->cpost ? 2 * C->cpost : 256; C->post = realloc(C->post, C->cpost * sizeof *C->post); } C->post[C->npost++] = p; }
-static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) g = now_ns(); return g * 12 / 625; }   // the GPU's 19.2 MHz timer, as nvn_mtl.m reports it
+static uint64_t gpu_ticks(void) {
+    uint64_t ns = guest_ns();
+    return nvn_timestamp_from_ns(ns ? ns : now_ns());
+}
 // ---------- What the GPU writes: storage buffers of compute dispatches ----------
 // Draws and dispatches read guest memory through copies made when they are recorded, so what a dispatch writes into its storage buffers (particles simulated on the GPU,
 // the exposure an auto-exposure pass computes) lives only in the ring until its submission completes and the copy goes back to guest memory (post kind 3). Until then
@@ -194,7 +198,12 @@ static void ctx_complete(ctx_t *c) {
     for (int i = 0; i < c->npost; i++) {
         post_t *p = &c->post[i];
         if (p->kind == 1) { volatile uint32_t *v = p->dst; if (p->mode == 1) *v += p->v; else *v = p->v; }
-        else if (p->kind == 2) { uint64_t t = gpu_ticks(), rec[2] = {p->type == 0 || p->type == 0x10 ? t : 0, t}; memcpy((void *)p->addr, rec, sizeof rec); }
+        else if (p->kind == 2) {
+            uint64_t t = gpu_ticks();
+            int timestamp = p->type == NVN_COUNTER_TYPE_TIMESTAMP || p->type == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
+            uint64_t rec[2] = {timestamp && !DM_GAME_RENDER_COND ? t : 0, t};
+            memcpy((void *)p->addr, rec, sizeof rec);
+        }
         else if (p->kind == 3) memcpy(p->dst, p->src, p->n);
     }
     c->npost = 0;

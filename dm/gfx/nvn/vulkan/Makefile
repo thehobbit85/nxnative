@@ -15,7 +15,7 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/0000000000000003.spv $(B)/shaders/0000000000000004.spv $(B)/shaders/0000000000000021.spv $(B)/shaders/0000000000000022.spv
 profile:
 	$(MAKE) -C $(HOST) GAME=$(GAME) game_profile
-$(B)/t_replay: $(SRC) spv_vertex_fetch.h spv_scaled32.h ../nvn_obj.h ../nvn_mtl.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
+$(B)/t_replay: $(SRC) spv_vertex_fetch.h spv_scaled32.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile
@@ -58,6 +58,6 @@ recorded-transfer-test: $(B)/t_recorded_transfer
 	$(B)/t_recorded_transfer
 recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
-$(B)/t_recorded_transfer: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_refl.h spv_vertex_fetch.h $(RECORDER_SRC) $(GAME_H) | profile
+$(B)/t_recorded_transfer: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h $(RECORDER_SRC) $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) -framework CoreFoundation $(RECORDER_LDFLAGS) -o $@ $(LIBS)
