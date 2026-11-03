@@ -65,7 +65,35 @@ static void walk(seg *s, uint8_t *bytes, const cap_ops *ops, const uint8_t *orig
         CHECK(cap_rec_fields(h.op, bytes + o + 8, h.size, ops, NULL), "every op of the synthetic segments is walked"); o += h.size; }
 }
 
-int main(void) {
+// Exchange a deterministic compressed chunk with the same fixture on a different host.
+static int codec_fixture(const char *action, const char *path) {
+    const uint32_t tag = CAP_TAG('T', 'E', 'S', 'T');
+    uint8_t bytes[8192];
+    for (size_t i = 0; i < sizeof bytes; ++i) bytes[i] = (uint8_t)(i % 31);
+    if (!strcmp(action, "--write")) {
+        cap_writer w;
+        if (!cap_open(&w, path)) return 1;
+        cap_put(&w, tag, 5, bytes, sizeof bytes, 1);
+        return !cap_close(&w);
+    }
+    if (strcmp(action, "--read")) return 1;
+    cap_reader r;
+    if (!cap_load(&r, path)) return 1;
+    uint8_t *data = NULL;
+    cap_chunk c;
+    int ok = cap_next(&r, &c, &data) == 1 && c.tag == tag && c.submit == 5 &&
+             c.codec == CAP_LZFSE && c.raw == sizeof bytes && !memcmp(data, bytes, sizeof bytes);
+    free(data);
+    data = NULL;
+    int eof = cap_next(&r, &c, &data) == 0;
+    free(data);
+    cap_unload(&r);
+    ok = ok && eof;
+    return !ok;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1) return argc == 3 ? codec_fixture(argv[1], argv[2]) : 1;
     char path[1024]; const char *tmp = getenv("TMPDIR"); snprintf(path, sizeof path, "%s/t_capture_XXXXXX", tmp && *tmp ? tmp : "/tmp");
     int fd = mkstemp(path); CHECK(fd >= 0, "temporary file"); close(fd);
     pool_a = calloc(1, 65536); pool_b = calloc(1, 16384);

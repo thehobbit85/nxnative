@@ -71,3 +71,12 @@ android-recorder: CFLAGS += -fPIC -fvisibility=hidden -Wno-format -ffunction-sec
 android-recorder: RECORDER_LDFLAGS = -Wl,--gc-sections -Wl,--no-undefined -Wl,-z,max-page-size=16384
 android-recorder: LIBS = -lvulkan -landroid -lm -ldl
 android-recorder: $(B)/t_recorded_transfer_android
+
+# Portable capture-file support, shared by the Linux and bionic builds.
+LZFSE = ../../../third_party/lzfse
+$(B)/t_capture: ../../tests/t_capture.c ../nvn_capture.c ../nvn_capture.h ../nvn_obj.h $(wildcard $(LZFSE)/*.[ch]) | profile
+	mkdir -p $(B)
+	$(CC) $(CPPFLAGS) -O2 -o $@ ../../tests/t_capture.c ../nvn_capture.c $(wildcard $(LZFSE)/*.c)
+.PHONY: portable-capture-test
+portable-capture-test: $(B)/t_capture
+	$(B)/t_capture
