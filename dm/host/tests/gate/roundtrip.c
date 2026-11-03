@@ -1,32 +1,30 @@
 // Execute a synthetic rewritten module on two real pthreads through entry.S and thread.c.
 #include "../../hle.h"
-#include "guest_image.h"
 #include <assert.h>
 #include <sched.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdatomic.h>
-#include <sys/mman.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
 
-#ifndef __ANDROID__
-pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
-#endif
 extern void guest_thread_init(void), guest_thread_set_id(uint64_t), guest_gate_stack(int);
 extern void dm_thread_enter(uint64_t entry, uint64_t arg, uint64_t sp);
 extern const uint8_t dm_gate_stubs[];
 extern uint64_t dm_gate_top[];
-static uint8_t *image;
+typedef uint64_t (*guest_callback)(uint64_t);
+static guest_callback callback;
+static uintptr_t guest_entry;
 static _Atomic unsigned in_gate;
 static __thread jmp_buf finished;
 static __thread uint64_t tag, result[4], host_x18;
 static __thread volatile sig_atomic_t handled;
 
 struct dm_flags g_flag;
-extern void gate_register(uint64_t pc, const char *kind, int arg, uint64_t orig);
-extern uint64_t resolve_import(module_t *m, const char *name);
-static uint64_t host_import;
+uint64_t now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec; }
+int svc_nro_deactivate(module_t *m) { abort(); }
+void hlecount_seal(void) {}
+extern void loader_hash_log(void);
 HLE("test_sdk_call", uint64_t, sdk_call, uint64_t x) { return x + 13; }
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { return fn; }
 uint64_t guest_ticks(void) { abort(); }
@@ -37,7 +35,7 @@ void thr_svc_leave(void) {}
 void dm_thread_returned(void) { longjmp(finished, 1); }
 
 uint64_t svc_dispatch(int svc, uint64_t *regs, uint64_t orig) {
-    assert(svc == 0x1e && orig == (uintptr_t)image + GUEST_SVC_PC);
+    assert(svc == 0x1e && orig < g_mod[0].text_end);
     uintptr_t entry = (uintptr_t)dm_slot_get(g_keygate);
     size_t slot = (entry - (uintptr_t)dm_gate_stubs) / 16;
     assert(slot < 1024 && dm_gate_top[slot] == (uintptr_t)regs + 800);
@@ -81,12 +79,10 @@ static void *worker(void *arg) {
     guest_thread_init();
     guest_thread_set_id(tag);
     __asm__ volatile("mov %0, x18" : "=r"(host_x18));
-    typedef uint64_t (*guest_callback)(uint64_t, uint64_t, uint64_t);
-    guest_callback callback = (guest_callback)(image + GUEST_CALLBACK_PC);
-    assert(callback(37, 0, host_import) == tag + 37 + 13 && (uintptr_t)dm_slot_get(g_key18) == 37);
+    assert(callback(37) == tag + 37 + 3 + 13 && (uintptr_t)dm_slot_get(g_key18) == 37);
     if (!setjmp(finished)) {
         guest_gate_stack(1);
-        dm_thread_enter((uintptr_t)image, (uintptr_t)result, (uintptr_t)(guest_stack + stack_bytes));
+        dm_thread_enter(guest_entry, (uintptr_t)result, (uintptr_t)(guest_stack + stack_bytes));
         abort();
     }
     assert(handled);
@@ -98,30 +94,21 @@ static void *worker(void *arg) {
     return NULL;
 }
 
-int main(void) {
-    alarm(15);  // a failed two-thread rendezvous must fail the test
-#ifndef __ANDROID__
-    assert(!pthread_key_create(&g_key18, NULL) && !pthread_key_create(&g_keytls, NULL));
-    assert(!pthread_key_create(&g_keytlr, NULL) && !pthread_key_create(&g_keygate, NULL));
-#endif
-    image = mmap(NULL, sizeof guest_image, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
-    assert(image != MAP_FAILED);
-    memcpy(image, guest_image, sizeof guest_image);
-    uint64_t *page = (uint64_t *)(image + GUEST_KEY_PAGE);
-    page[GUEST_K18] = g_key18 * 8; page[GUEST_KTLS] = g_keytls * 8;
-    page[GUEST_KTLR] = g_keytlr * 8; page[GUEST_KGATE] = g_keygate * 8;
-    __builtin___clear_cache((char *)image, (char *)image + sizeof guest_image);
-    assert(!mprotect(image, sizeof guest_image, PROT_READ | PROT_EXEC));
-    host_import = resolve_import(NULL, "test_sdk_call");
-    assert(host_import == (uintptr_t)sdk_call);
-    gate_register((uintptr_t)image + GUEST_GATE_PC, "svc", 0x1e, (uintptr_t)image + GUEST_SVC_PC);
+int main(int argc, char **argv) {
+    assert(argc == 2);
+    alarm(15);
+    const char *names[] = {"main", "sdk"};
+    load_modules(argv[1], names, 2);
+    loader_hash_log();
+    guest_entry = (uintptr_t)guest_sym("guest_entry");
+    callback = (guest_callback)guest_sym("guest_callback");
+    assert(guest_entry && callback);
     struct sigaction sa = {.sa_sigaction = trap, .sa_flags = SA_SIGINFO | SA_ONSTACK};
     sigemptyset(&sa.sa_mask);
     assert(!sigaction(SIGTRAP, &sa, NULL));
     pthread_t a, b;
     assert(!pthread_create(&a, NULL, worker, (void *)101) && !pthread_create(&b, NULL, worker, (void *)202));
     assert(!pthread_join(a, NULL) && !pthread_join(b, NULL));
-    assert(!munmap(image, sizeof guest_image));
-    puts("Rewritten guest callback, separate TLS and gate stacks, signal spill and SVC return on two threads: OK");
+    puts("Two rewritten modules, cross-module imports, guest callback, separate TLS and gate stacks, signal spill and SVC return on two threads: OK");
     return 0;
 }

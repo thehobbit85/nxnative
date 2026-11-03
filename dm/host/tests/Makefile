@@ -340,10 +340,12 @@ coverage:
 # Android CI uses an NDK compiler, static bionic and qemu-aarch64. The same binary runs directly on an arm64 Android device.
 GATE_ABI ?= apple
 GATE_CC ?= $(CLANG)
+GATE_LOADER_FLAGS = $(if $(filter android,$(GATE_ABI)),-I../../android/compat ../../android/compat/sha256.c,-Wno-deprecated-declarations)
 GATE_RUNNER ?=
 .PHONY: gate-test
 gate-test: $(GAME_H)
 	mkdir -p "$(B)/gate-$(GATE_ABI)"
-	DM_GAME=$(GAME) $(PYTHON) gate/fixture.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)/guest_image.h"
-	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) -I"$(B)/gate-$(GATE_ABI)" gate/roundtrip.c ../thread.c ../entry.S ../hle.c -ldl -o "$(B)/gate-$(GATE_ABI)/roundtrip"
-	$(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip"
+	DM_GAME=$(GAME) $(PYTHON) gate/fixture.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)"
+	$(GATE_CC) -O1 -Wall -Werror -pthread $(GINC) $(GATE_LOADER_FLAGS) gate/roundtrip.c ../thread.c ../entry.S ../hle.c ../loader.c -ldl -o "$(B)/gate-$(GATE_ABI)/roundtrip"
+	$(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip" "$(B)/gate-$(GATE_ABI)"
+	ulimit -c 0; $(PYTHON) gate/reject_foreign.py $(GATE_ABI) "$(B)/gate-$(GATE_ABI)" $(GATE_RUNNER) "$(B)/gate-$(GATE_ABI)/roundtrip"
