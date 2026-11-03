@@ -98,6 +98,8 @@ Each item was found from a red line or a pass dump on the way through the langua
 
 ## Found on this game
 
+- **Android Vulkan startup (shader export resolved):** stages `5b107ddfd06551fc` and `f51daa8e1e262606` write to storage images whose formats are supplied at runtime. [Vulkan storage image writes without a format](../../../docs/reference/shaders.md#vulkan-storage-image-writes-without-a-format).
+
 General host changes first needed here; each applies to every game:
 
 - **Shader extraction reuse after translation-only updates:** [Shader extraction reruns after translation-only updates](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates).
