@@ -96,6 +96,12 @@ int main(void) {
         if (storage[dst_offset + i] != expected[i])
             die("recorded transfer at byte %zu: got %#x, expected %#x", i, storage[dst_offset + i], expected[i]);
     }
+    NVNtexturePool descriptors;
+    assert(API(nvnTexturePoolInitialize)(&descriptors, &pool, 0xc000, 257));
+    API(nvnTexturePoolRegisterImage)(&descriptors, 256, &tex, &view);
+    API(nvnTexturePoolRegisterImage)(&descriptors, 256, NULL, NULL);
+    API(nvnTexturePoolRegisterTexture)(&descriptors, 256, &tex, NULL);
+    API(nvnTexturePoolFinalize)(&descriptors);
     API(nvnSyncFinalize)(&sync);
     API(nvnCommandBufferFinalize)(&cb);
     API(nvnTextureFinalize)(&tex);
