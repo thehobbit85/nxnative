@@ -6,7 +6,14 @@
 // The hash runs over each entry's first 16 header bytes (not the date), its path, its guest name and its contents, in the order walk() visits them.
 #include "save_sync.h"
 #include <CommonCrypto/CommonDigest.h>
+#ifdef __APPLE__
 #include <TargetConditionals.h>
+#include <sys/sysctl.h>
+#elif defined(__ANDROID__)
+#include <sys/system_properties.h>
+#else
+#include <sys/utsname.h>
+#endif
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -18,21 +25,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/clonefile.h>
+#include "save_fs.h"
 #include <sys/stat.h>
-#include <sys/sysctl.h>
-#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
 #define SLOG(...) do { fprintf(stderr, "[dm] save sync: " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define SRED(...) do { fprintf(stderr, "[dm] [RED] save sync: " __VA_ARGS__); fputc('\n', stderr); } while (0)
-#define GUEST_NAME "org.d2rmobile.guest-name"   // hle_fs.c FS_GUEST_NAME: a file's guest name when its host name had to differ (a case collision); part of the save
 #define QUIET_MS 3000    // a game often commits several times in a row: the sender waits until it has been quiet this long
 #define FETCH_MS 10000   // the longest the game waits at its first save mount for the cloud's copy (a download); then it plays on with this device's save
 #define KEEP_BACKUPS 10  // backups kept of each side (local, cloud); older ones are removed when a new one is made
 enum { HDR = 8 + 4 + 4 + SS_HASH + 8 + 24 + 64, ENT = 24, CHUNK = 1 << 16 };   // header bytes, entry header bytes, the copy buffer
-static const char MAGIC[8] __attribute__((nonstring)) = "DMSYNC1\n", END[8] __attribute__((nonstring)) = "DMSYNCE\n";
+static const char MAGIC[] = "DMSYNC1\n", END[] = "DMSYNCE\n";
 static const char *const FOLDERS[2] = {"save", "save_device"};   // their names in a packed save; on disk DM_SAVE and DM_SAVE_device (hle_fs.c h_fs_MountDeviceSave)
 
 // ---------- files ----------
@@ -115,8 +119,16 @@ static void when(int64_t t, char *out, size_t n) {   // a save's time in the log
 }
 
 static void device_name(char *out, size_t n) {   // the model ("Mac16,1", "iPhone17,1"): which device a save came from, for the log
+#ifdef __APPLE__
     char model[64] = ""; size_t len = sizeof model;
     if (sysctlbyname(TARGET_OS_OSX ? "hw.model" : "hw.machine", model, &len, NULL, 0)) model[0] = 0;
+#elif defined(__ANDROID__)
+    char model[PROP_VALUE_MAX] = "";
+    __system_property_get("ro.product.model", model);
+#else
+    struct utsname info;
+    const char *model = uname(&info) ? "" : info.machine;
+#endif
     snprintf(out, n, "%s", model[0] ? model : "unknown");
 }
 
@@ -130,12 +142,13 @@ typedef struct { CC_SHA256_CTX sha; FILE *out; ss_meta *m; uint32_t entries; uin
 
 static int pack_entry(void *c, const char *abs, const char *rel, const struct stat *st) {
     packer *k = c;
-    char guest[1024]; ssize_t gl = getxattr(abs, GUEST_NAME, guest, sizeof guest, 0, XATTR_NOFOLLOW);
+    char guest[1024]; ssize_t gl = fs_get_name(abs, guest, sizeof guest);
+    if (gl < 0 && errno != FS_NO_ATTR && errno != ENOTSUP) return -1;
     if (gl < 0) gl = 0;   // ENOATTR: the host name is the guest's
     size_t pl = strlen(rel); int file = S_ISREG(st->st_mode);
     if (pl > UINT16_MAX) return -1;
     uint8_t h[ENT] = {(uint8_t)(file ? 2 : 1)}; uint16_t pl16 = (uint16_t)pl, gl16 = (uint16_t)gl;
-    uint64_t size = file ? (uint64_t)st->st_size : 0; int64_t mt = st->st_mtimespec.tv_sec;
+    uint64_t size = file ? (uint64_t)st->st_size : 0; int64_t mt = st->st_mtime;
     memcpy(h + 2, &pl16, 2); memcpy(h + 4, &gl16, 2); memcpy(h + 8, &size, 8); memcpy(h + 16, &mt, 8);
     CC_SHA256_Update(&k->sha, h, 16); CC_SHA256_Update(&k->sha, rel, (CC_LONG)pl); CC_SHA256_Update(&k->sha, guest, (CC_LONG)gl);
     if (k->out && (fwrite(h, 1, ENT, k->out) != ENT || fwrite(rel, 1, pl, k->out) != pl || fwrite(guest, 1, (size_t)gl, k->out) != (size_t)gl)) return -1;
@@ -180,7 +193,7 @@ int ss_pack(const char *save, const char *title, const char *out, ss_meta *m) {
     packer *k = calloc(1, sizeof *k); if (!k) return -1;
     k->m = m; int r = -1;
     uint8_t hdr[HDR] = {0}; uint32_t version = 1;
-    if (!(k->out = fopen(out, "wb")) || fwrite(hdr, 1, HDR, k->out) != HDR || pack_save(save, k) || fwrite(END, 1, sizeof END, k->out) != sizeof END) goto done;
+    if (!(k->out = fopen(out, "wb")) || fwrite(hdr, 1, HDR, k->out) != HDR || pack_save(save, k) || fwrite(END, 1, sizeof END - 1, k->out) != sizeof END - 1) goto done;
     memcpy(hdr, MAGIC, 8); memcpy(hdr + 8, &version, 4); memcpy(hdr + 12, &k->entries, 4); memcpy(hdr + 16, m->hash, strlen(m->hash));
     memcpy(hdr + 48, &m->saved, 8); memcpy(hdr + 56, m->title, strlen(m->title)); memcpy(hdr + 80, m->device, strlen(m->device));
     if (fseeko(k->out, 0, SEEK_SET) || fwrite(hdr, 1, HDR, k->out) != HDR || fflush(k->out) || fsync(fileno(k->out))) goto done;
@@ -205,7 +218,7 @@ static int path_ok(const char *p) {
 int ss_read(const char *bundle, const char *into, ss_meta *m) {
     memset(m, 0, sizeof *m);
     FILE *f = fopen(bundle, "rb"); if (!f) return -1;
-    uint8_t *buf = malloc(CHUNK), hdr[HDR], h[ENT], end[sizeof END], d[CC_SHA256_DIGEST_LENGTH];
+    uint8_t *buf = malloc(CHUNK), hdr[HDR], h[ENT], end[sizeof END - 1], d[CC_SHA256_DIGEST_LENGTH];
     char want[SS_HASH + 1] = "", path[PATH_MAX], guest[1024], out[PATH_MAX];
     uint32_t version, n; int r = -1, fd = -1;
     CC_SHA256_CTX sha; CC_SHA256_Init(&sha);
@@ -229,7 +242,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
                 *strrchr(out, '/') = 0; int made = mkdirs(out); out[strlen(out)] = '/';
                 if (made || (fd = open(out, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0) goto done;
             }
-            if (gl && setxattr(out, GUEST_NAME, guest, gl, 0, XATTR_NOFOLLOW)) goto done;
+            if (gl && fs_set_name(out, guest, gl)) goto done;
         }
         for (uint64_t left = size; left; ) {
             size_t k = left < CHUNK ? (size_t)left : CHUNK;
@@ -401,7 +414,7 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
         if (had && !*kept && backup_dir(save, "local", kept, kn)) return -1;
         snprintf(old, sizeof old, "%s/%s", kept, FOLDERS[i]);
         if (fresh && !access(here, F_OK)) {   // swapped: here holds the cloud's, incoming this device's
-            if (renamex_np(incoming, here, RENAME_SWAP) || (had ? rename(incoming, old) : rm_tree(incoming))) return -1;
+            if (fs_swap_tree(incoming, here) || (had ? rename(incoming, old) : rm_tree(incoming))) return -1;
         } else if (fresh) { if (rename(incoming, here)) return -1; }
         else if (had && rename(here, old)) return -1;   // a folder the cloud's save does not have: this device's goes, so both hold the same
     }
@@ -565,4 +578,4 @@ __attribute__((weak)) int front_save_sync_store(const char *local, const char *c
     return !r;
 }
 
-__attribute__((weak)) int dm_fs_clone_committed(const char *dir, const char *to) { return clonefile(dir, to, 0) ? -1 : 0; }
+__attribute__((weak)) int dm_fs_clone_committed(const char *dir, const char *to) { return fs_clone_tree(dir, to) ? -1 : 0; }
