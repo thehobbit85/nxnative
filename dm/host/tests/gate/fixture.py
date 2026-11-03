@@ -1,10 +1,9 @@
-"""Write a C fixture containing the real rewriter's image, key-page layout and SVC return PC."""
+"""Build two linked NSOs and rewrite them for the selected ARM64 host."""
 from pathlib import Path
 import os
 import struct
 import subprocess
 import sys
-import tempfile
 
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
@@ -12,7 +11,7 @@ from dm.tools.tests.test_nso import make_nso
 
 # void guest(uint64_t results[4]), with the thread tag in results[0]. The BRK delivers a signal while the guest has a spill below SP.
 ENTRY = (
-    0x14000002, 0x1000,                  # b start; MOD0 in the read-only segment
+    0x14000002, 0x4000,                  # b start; MOD0 in the read-only segment
     0xaa0003e1, 0xf9400020,              # mov x1,x0; ldr x0,[x1]
     0xd51bd040, 0xaa0003f2,              # msr tpidr_el0,x0; mov x18,x0
     0xd53bd042, 0xd53bd063,              # mrs x2,tpidr_el0; mrs x3,tpidrro_el0
@@ -24,35 +23,53 @@ ENTRY = (
 )
 CALLBACK = (
     0xaa0003f2, 0xd53bd061,              # mov x18,x0; mrs x1,tpidrro_el0
-    0xb9411021, 0x8b010240, 0xd61f0040,  # ldr w1,[x1,#0x110]; add x0,x18,x1; br x2 (resolved host import)
+    0xb9411021, 0x8b010240,              # ldr w1,[x1,#0x110]; add x0,x18,x1
 )
+RO_OFF, DATA_OFF = 0x4000, 0x8000
+
+
+def module(dest, target, name, code, exports, imported):
+    """The last two instructions load a relocated GOT entry and tail-call it."""
+    load_pc = 4 * len(code)
+    code += (0x58000010 | ((DATA_OFF - load_pc) // 4 << 5), 0xd61f0200)  # ldr x16,got; br x16
+    ro = bytearray(512)
+    ro[:4] = b'MOD0'
+    struct.pack_into('<i', ro, 4, 0x80)   # MOD0-relative dynamic table
+    struct.pack_into('<i', ro, 16, 0x30)  # MOD0-relative EH header
+    starts = sorted({8, *exports.values()})
+    struct.pack_into('<4BII', ro, 0x30, 1, 3, 3, 3, 0, len(starts))
+    for i, start in enumerate(starts):
+        struct.pack_into('<II', ro, 0x3c + i * 8, start, 0)
+
+    symbols = [('', 0), *exports.items(), (imported, 0)]
+    strings = bytearray(b'\0')
+    symtab = 0x100
+    strtab = symtab + 24 * len(symbols)
+    for i, (symbol, pc) in enumerate(symbols[1:], 1):
+        struct.pack_into('<IBBHQQ', ro, symtab + 24 * i, len(strings), 0x12, 0, bool(pc), pc, 0)
+        strings += symbol.encode() + b'\0'
+    ro[strtab:strtab + len(strings)] = strings
+    rela = 0x1d0
+    struct.pack_into('<QQq', ro, rela, DATA_OFF, (len(symbols) - 1) << 32 | 1026, 0)  # JUMP_SLOT
+    for i, (kind, value) in enumerate(((6, RO_OFF + symtab), (5, RO_OFF + strtab),
+                                       (23, RO_OFF + rela), (2, 24))):
+        struct.pack_into('<QQ', ro, 0x80 + i * 16, kind, value)
+
+    nso = make_nso((struct.pack(f'<{len(code)}I', *code), ro, bytes(64)), compress=(0, 0, 0))
+    struct.pack_into('<I', nso, 0x24, RO_OFF)
+    struct.pack_into('<I', nso, 0x34, DATA_OFF)
+    source = dest / (name + '.nso')
+    source.write_bytes(nso)
+    subprocess.run([sys.executable, ROOT / 'dm/tools/patch_nso.py', source, dest, name, '--thread-slots', target],
+                   check=True, env=dict(os.environ, DM_REWRITE_J='1'))
 
 
 def main():
-    target, dest = sys.argv[1:]
-    ro = bytearray(128)
-    ro[:4] = b'MOD0'
-    struct.pack_into('<i', ro, 16, 48)
-    callback_pc = 4 * len(ENTRY)
-    struct.pack_into('<4B6I', ro, 48, 1, 3, 3, 3, 0, 2, 8, 0, callback_pc, 0)
-    with tempfile.TemporaryDirectory() as tmp:
-        d = Path(tmp)
-        nso = d / 'input'
-        code = ENTRY + CALLBACK
-        nso.write_bytes(make_nso((struct.pack(f'<{len(code)}I', *code), ro, bytes(64)), compress=(0, 0, 0)))
-        subprocess.run([sys.executable, ROOT / 'dm/tools/patch_nso.py', nso, d, 'guest', '--thread-slots', target],
-                       check=True, env=dict(os.environ, DM_REWRITE_J='1'))
-        fields = dict(line[2:].split('\t') for line in (d / 'guest.fixups.tsv').read_text().splitlines())
-        pc, kind, svc, orig = (d / 'guest.gates.tsv').read_text().split()
-        assert kind == 'svc' and int(svc) == 0x1e
-        image = (d / 'guest.patched.bin').read_bytes()
-        words = (f'    [{i}] = {w:#x},' for i, (w,) in enumerate(struct.iter_unpack('<I', image)) if w)
-        header = [f'static const uint32_t guest_image[{len(image) // 4}] = {{', *words, '};',
-                  f'#define GUEST_CALLBACK_PC {callback_pc:#x}', f'#define GUEST_GATE_PC {int(pc, 16):#x}',
-                  f'#define GUEST_SVC_PC {int(orig, 16):#x}', f'#define GUEST_KEY_PAGE {fields["KEY_PAGE_OFF"]}']
-        for key in ('K18', 'KTLS', 'KTLR', 'KGATE'):
-            header.append(f'#define GUEST_{key} {fields[f"KEY_{key}_IDX"]}')
-        Path(dest).write_text('\n'.join(header) + '\n')
+    target, output = sys.argv[1:]
+    dest = Path(output)
+    # main.callback -> sdk.adjust (+3) -> registered host import test_sdk_call (+13).
+    module(dest, target, 'main', ENTRY + CALLBACK, {'guest_entry': 8, 'guest_callback': 4 * len(ENTRY)}, 'adjust')
+    module(dest, target, 'sdk', (0x14000002, RO_OFF, 0x91000c00), {'adjust': 8}, 'test_sdk_call')
 
 
 if __name__ == '__main__':
