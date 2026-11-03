@@ -15,7 +15,7 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/0000000000000003.spv $(B)/shaders/0000000000000004.spv $(B)/shaders/0000000000000021.spv $(B)/shaders/0000000000000022.spv
 profile:
 	$(MAKE) -C $(HOST) GAME=$(GAME) game_profile
-$(B)/t_replay: $(SRC) ../nvn_obj.h ../nvn_mtl.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
+$(B)/t_replay: $(SRC) spv_vertex_fetch.h ../nvn_obj.h ../nvn_mtl.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile
