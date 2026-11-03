@@ -46,3 +46,18 @@ $(B)/shaders/0000000000000004.spv: tests/groups.comp tests/groups.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/groups.vk.txt $(@:.spv=.vk.txt)
+
+# The public NVN recorder currently builds on Apple Silicon. Point VULKAN_SDK at the Mac SDK
+# with an offscreen driver installed, or provide RECORDER_CPPFLAGS and LIBS for a local loader.
+RECORDER_CPPFLAGS = $(if $(VULKAN_SDK),-I$(VULKAN_SDK)/include)
+RECORDER_LDFLAGS = $(if $(VULKAN_SDK),-L$(VULKAN_SDK)/lib -Xlinker -rpath -Xlinker $(VULKAN_SDK)/lib)
+RECORDER_SRC = $(filter-out tests/t_replay.c,$(SRC)) tests/recorder_unavailable.c \
+               ../../../host/crash.c ../../../host/hle_bigstack.c ../../tests/t_host_stubs.c ../nvn_entry.S ../nvn_thunks.S
+.PHONY: recorded-transfer-test recorded-transfer-conformance
+recorded-transfer-test: $(B)/t_recorded_transfer
+	$(B)/t_recorded_transfer
+recorded-transfer-conformance: recorded-transfer-test
+	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
+$(B)/t_recorded_transfer: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_refl.h spv_vertex_fetch.h $(RECORDER_SRC) $(GAME_H) | profile
+	mkdir -p $(B)
+	$(CC) $(CPPFLAGS) $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) -framework CoreFoundation $(RECORDER_LDFLAGS) -o $@ $(LIBS)
