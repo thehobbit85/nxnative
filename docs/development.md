@@ -2,6 +2,8 @@
 
 The README covers packing and playing. This page is for working on nxnative itself: how it is built, the script's options, running games on the Mac, and adding a game (per-game notes are in [dm/games](../dm/games/README.md#games)). Agent-oriented details (bring-up failure catalogue, graphics specifics, debugging recipes) are in [docs/agents](agents/README.md).
 
+The [Android host and builder plan](android-parity.md) and [NVN-to-Vulkan parity matrix](nvn-vulkan-parity.md) track porting work against the Apple runtime.
+
 ## How it works
 
 | Part | State |
