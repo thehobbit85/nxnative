@@ -7,7 +7,7 @@
 // present interval, rhi.SyncInterval (nvn.SyncInterval in UE 4.18's Switch RHI: DRAGON QUEST XI S). Each is a TAutoConsoleVariable whose +0x10 points to its value, the game thread's
 // copy then the render thread's. The games' configs set the limit to 30 and the interval to 2 (their notes name the .ini files)
 #include "hle.h"
-#include <mach/mach.h>
+#include "host_memory.h"
 
 // What a field holds: the frame rate as a float, double or int32, vsyncs per frame (60 / frame rate) as an int32, or the frame time in milliseconds as a float. Copies: consecutive copies of the
 // value (Unreal keeps one for the game thread, one for the render thread). A row with no pointer (ptr_off 0) has its field at main + field: a constant in main's read-only data, which the loader
@@ -53,7 +53,7 @@ static const lock_t k_locks[] = {
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
-static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
+static int rd(uint64_t a, void *out, size_t n) { return a >= 0x1000 && dm_host_read(a, out, n); }
 
 // NieR 1.0.3 exposes its preset minimum but ships fixed mode-specific fallbacks.
 // Keep the native current-scale and UV controller intact; only select its

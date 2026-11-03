@@ -78,6 +78,7 @@ jobs:
           qemu-aarch64 dm/host/tests/build/t_bigstack
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" android-memory-build
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE" build/t_fault_access build/t_lifecycle build/t_hid build/t_android_scheduler
+          make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE -ldl" build/t_fpslock build/t_uecvar build/t_ue_heap_span
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang" build/t_audio_android
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" android-fs-build
           make -C dm/host/tests -j4 GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" \
@@ -94,6 +95,9 @@ jobs:
             dm/host/tests/build/t_lifecycle
             dm/host/tests/build/t_software_video
             dm/host/tests/build/t_hid
+            dm/host/tests/build/t_fpslock
+            dm/host/tests/build/t_uecvar
+            dm/host/tests/build/t_ue_heap_span
             dm/host/tests/build/t_android_scheduler
             dm/host/tests/build/android-fs/t_*
           retention-days: 1
@@ -115,6 +119,12 @@ jobs:
           tests/t_lifecycle
           tests/t_memory_android
           tests/t_memory_android_unlimited
+      - name: Check frame settings and engine heap alignment on bionic
+        run: |
+          for test in t_fpslock t_uecvar t_ue_heap_span; do
+            chmod +x "tests/$test"
+            "tests/$test"
+          done
       - name: Check guest HID state, scripted input and haptic routing
         env:
           TMPDIR: ${{ runner.temp }}

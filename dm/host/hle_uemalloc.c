@@ -23,8 +23,13 @@
 // 14 IsInternallyThreadSafe (1), 20 GetAllocationSize (stores a 32-bit size), 21 the TLS cache setup, 22 Trim (main+0x329a408). Its object is in the bss and its constructor is inlined into
 // the GMalloc setup, which the cut skips (the game's patches.py). It has no Binned3 name to find, so it keeps a row of fixed addresses, which runs only on the main build it was found in (AGENTS.md)
 #include "hle.h"
+#ifdef __APPLE__
 #include <malloc/malloc.h>
 #include <mach/mach.h>
+#else
+#include <malloc.h>
+#endif
+#include <stdbool.h>
 #include <stdatomic.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
@@ -42,12 +47,21 @@ static const struct { const char *build, *what; int layout; uint64_t obj, vtable
 };
 enum { NSLOT = 32 };
 
+#ifdef __APPLE__
 static malloc_zone_t *g_zone;
+#define block_size(p) malloc_size(p)
+#define block_free(p) malloc_zone_free(g_zone, p)
+#define block_realloc(p, n) malloc_zone_realloc(g_zone, p, n)
+#else
+#define block_size(p) malloc_usable_size(p)
+#define block_free(p) free(p)
+#define block_realloc(p, n) realloc(p, n)
+#endif
 static _Atomic int64_t g_used, g_peak;   // bytes in use (usable sizes) and their high-water mark, for the [mem] line (one per 256 MB of new peak)
 static void used(int64_t d) {
     int64_t after = atomic_fetch_add(&g_used, d) + d, peak = atomic_load(&g_peak);
     while (after > peak && !atomic_compare_exchange_weak(&g_peak, &peak, after)) {}
-    if (after > peak && after >> 28 != peak >> 28) LOG("[mem] Unreal heap (host malloc zone) up to %.2f GB in use", after / 1073741824.0);
+    if (after > peak && after >> 28 != peak >> 28) LOG("[mem] Unreal heap (host allocator) up to %.2f GB in use", after / 1073741824.0);
 }
 // Unreal's virtual allocator provides a 64 KiB-aligned base for span-sized blocks. Wwise masks an
 // interior pointer to that boundary to find its header, even though it requests only 4 KiB alignment.
@@ -57,18 +71,31 @@ static size_t align_of(size_t n, uint32_t a) {
 }
 static void *alloc(size_t n, uint32_t a) {
     size_t alignment = align_of(n, a);
-    void *p = alignment == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, alignment, n ? n : 1);
-    if (p) used((int64_t)malloc_size(p));
+    void *p;
+#ifdef __APPLE__
+    p = alignment == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, alignment, n ? n : 1);
+#else
+    if (posix_memalign(&p, alignment, n ? n : 1)) return NULL;
+#endif
+    if (p) used((int64_t)block_size(p));
     return p;
 }
-static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
+static void release(void *p) { if (p) { used(-(int64_t)block_size(p)); block_free(p); } }
 static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!p) return alloc(n, a);
     if (!n) { release(p); return NULL; }
     // The zone's realloc first: it grows in place and gives back what a shrink leaves, and an in-place block keeps its boundary. Only a block it leaves off the boundary is copied
-    size_t old = malloc_size(p), alignment = align_of(n, a);
-    void *q = malloc_zone_realloc(g_zone, p, n); if (!q) return NULL;
-    used((int64_t)malloc_size(q) - (int64_t)old);
+    size_t old = block_size(p), alignment = align_of(n, a);
+#ifndef __APPLE__
+    // bionic realloc guarantees only its standard alignment. Obtain the new
+    // aligned block before giving up the old one, so TryRealloc can fail safely.
+    if (alignment > 16) {
+        void *r = alloc(n, a); if (!r) return NULL;
+        memcpy(r, p, old < n ? old : n); release(p); return r;
+    }
+#endif
+    void *q = block_realloc(p, n); if (!q) return NULL;
+    used((int64_t)block_size(q) - (int64_t)old);
     if (!((uintptr_t)q & (alignment - 1))) return q;
     void *r = alloc(n, a);
     if (!r) {
@@ -91,12 +118,19 @@ static void *m_Realloc(void *self, void *p, size_t n, uint32_t a) {
 }
 static void *m_TryRealloc(void *self, void *p, size_t n, uint32_t a) { (void)self; return realloc_aligned(p, n, a); }
 static void m_Free(void *self, void *p) { (void)self; release(p); }
-static size_t m_QuantizeSize(void *self, size_t n, uint32_t a) { (void)self; (void)a; return malloc_good_size(n); }
-static bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = malloc_size(p); return true; }
+static size_t m_QuantizeSize(void *self, size_t n, uint32_t a) {
+    (void)self; (void)a;
+#ifdef __APPLE__
+    return malloc_good_size(n);
+#else
+    return n;   // bionic does not expose size-class rounding
+#endif
+}
+static bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = block_size(p); return true; }
 static void *m_Malloc32(void *self, uint32_t n, uint32_t a) { return m_Malloc(self, n, a); }
 static void *m_Realloc32(void *self, void *p, uint32_t n, uint32_t a) { return m_Realloc(self, p, n, a); }
-static uint32_t m_QuantizeSize32(void *self, uint32_t n, uint32_t a) { (void)self; (void)a; size_t q = malloc_good_size(n); return q > UINT32_MAX ? n : (uint32_t)q; }
-static bool m_GetAllocationSize32(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)malloc_size(p); return true; }
+static uint32_t m_QuantizeSize32(void *self, uint32_t n, uint32_t a) { size_t q = m_QuantizeSize(self, n, a); return q > UINT32_MAX ? n : (uint32_t)q; }
+static bool m_GetAllocationSize32(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)block_size(p); return true; }
 static void m_Nothing(void *self) { (void)self; }   // Trim (its bool argument is ignored), the thread-local cache setup and teardown, DumpAllocatorStats
 static void *g_vt[NSLOT];
 static const char *g_what;
@@ -104,7 +138,7 @@ static const char *g_what;
 // Observation gate OBS_UE_MALLOC, on the cut constructor call: the object in the register the gate number's upper bits name (x0), before anything calls it
 static void obj_made(uint64_t *regs, int param) {
     *(void **)(uintptr_t)regs[param] = g_vt;
-    static int once; if (!once++) LOG("%s: Unreal's allocator (FMallocBinned3 at %#llx) runs on a host malloc zone", g_what, (unsigned long long)regs[param]);
+    static int once; if (!once++) LOG("%s: Unreal's allocator (FMallocBinned3 at %#llx) runs on the host allocator", g_what, (unsigned long long)regs[param]);
 }
 
 // Whether [a, a + n) may be Unreal heap memory: with the host allocator installed, a range outside the guest block that the host has mapped readable and writable.
@@ -113,12 +147,31 @@ static void obj_made(uint64_t *regs, int param) {
 // nn::os::CreateThread moves such a stack into the stack region with svcMapMemory, whose source must be backed memory (hle_svc.c map_source_backed): this heap lives
 // outside the guest block, so the check refused it and the SDK aborted in MapAliasStack before the game started (the caller has already checked the guest block's own regions)
 int dm_ue_heap_owns(uint64_t a, uint64_t n) {
-    if (!g_zone || !a || !n) return 0;
+#ifdef __ANDROID__
+    // Bionic can tag its heap pointers in the top byte. The VM map and the
+    // guest reservation both use untagged addresses.
+    a &= UINT64_C(0x00ffffffffffffff);
+#endif
+    if (!g_what || !a || !n || n > UINT64_MAX - a) return 0;
     int dm_guest_as_contains(uintptr_t a);   // hle_svc.c
     if (dm_guest_as_contains((uintptr_t)a) || dm_guest_as_contains((uintptr_t)(a + n - 1))) return 0;   // inside the guest block: not this heap
+#ifdef __APPLE__
     vm_address_t at = (vm_address_t)a; vm_size_t sz = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
     if (vm_region_64(mach_task_self(), &at, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return 0;   // vm_region_64: iOS has no mach_vm.h
+    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
     return at <= a && a + n <= at + sz && (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE);
+#else
+    // Like vm_region on Apple, require one complete readable/writable span.
+    FILE *maps = fopen("/proc/self/maps", "r"); if (!maps) return 0;
+    char line[512], perm[5]; unsigned long lo, hi; int backed = 0;
+    while (fgets(line, sizeof line, maps)) {
+        if (sscanf(line, "%lx-%lx %4s", &lo, &hi, perm) == 3 && lo <= a && a < hi) {
+            backed = perm[0] == 'r' && perm[1] == 'w' && n <= hi - a;
+            break;
+        }
+    }
+    fclose(maps); return backed;
+#endif
 }
 
 // The host's vtable over the guest's (the trivial slots stay the guest's), and the zone behind it
@@ -131,7 +184,11 @@ static void fill(const uint8_t *vtable, int L, const char *what) {
     g_vt[k_lay[L].free_] = (void *)m_Free;
     g_vt[k_lay[L].quantize] = s32 ? (void *)m_QuantizeSize32 : (void *)m_QuantizeSize; g_vt[k_lay[L].get_size] = s32 ? (void *)m_GetAllocationSize32 : (void *)m_GetAllocationSize;
     for (int s = 0; s < 6 && k_lay[L].nothing[s]; s++) g_vt[k_lay[L].nothing[s]] = (void *)m_Nothing;
-    g_zone = malloc_create_zone(0, 0); malloc_set_zone_name(g_zone, "guest Unreal heap"); g_what = what;
+#ifdef __APPLE__
+    g_zone = malloc_create_zone(0, 0); if (!g_zone) die("Unreal heap: cannot create malloc zone");
+    malloc_set_zone_name(g_zone, "guest Unreal heap");
+#endif
+    g_what = what;
 }
 
 // Called once the modules are loaded and relocated, before any guest code runs
@@ -152,7 +209,7 @@ void dm_ue_malloc_install(void) {
             if (*(uint32_t *)(b + k_ue[k].cut) != (k_ue[k].cut_insn ? k_ue[k].cut_insn : 0xd503201f)) { LOG("[RED] %s: main is rewritten without the allocator cut (its patches.py): Unreal's own allocator runs", k_ue[k].what); return; }
             fill(b + k_ue[k].vtable, k_ue[k].layout, k_ue[k].what);
             *(void **)(b + k_ue[k].obj) = g_vt;
-            LOG("%s: Unreal's allocator (main+%#llx) runs on a host malloc zone", k_ue[k].what, (unsigned long long)k_ue[k].obj);
+            LOG("%s: Unreal's allocator (main+%#llx) runs on the host allocator", k_ue[k].what, (unsigned long long)k_ue[k].obj);
         }
     }
 }
