@@ -1,15 +1,15 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
+#ifdef __APPLE__
 #include <TargetConditionals.h>
+#endif
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
 #include "hle.h"
 #if TARGET_OS_IPHONE
 #include <mach/mach.h>
@@ -291,7 +291,7 @@ static void read_layout(module_t *m, const char *dir) {
         }
     }
     fclose(f);
-    if (DM_TP_SLOT && !saw_tp_slot) die("%s: missing TP_SLOT; rewrite the modules with --thread-slots android", path);
+    if (DM_TP_SLOT != 0 && !saw_tp_slot) die("%s: missing TP_SLOT; rewrite the modules with --thread-slots android", path);
     if (!m->patch_off || m->key_page_off % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1)
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))
@@ -784,6 +784,13 @@ static uint8_t *slurp(const char *path, size_t *n) {
     close(fd); *n = st.st_size; return p;
 }
 
+static int seal_code(uint8_t *address, size_t size) {
+#ifdef __ANDROID__
+    __builtin___clear_cache((char *)address, (char *)address + size);
+#endif
+    return mprotect(address, size, PROT_READ | PROT_EXEC);
+}
+
 // Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
@@ -802,10 +809,10 @@ static void map_image(module_t *m, const char *dir) {
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
         free(raw); install_key_page(m);
-        if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
+        if (bl && seal_code(m->base + m->back_off, bl)) die("%s mprotect back patch", m->name);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
-        if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
-        if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
+        if (seal_code(m->base, rx)) die("%s mprotect text", m->name);
+        if (seal_code(a, m->patch_len)) die("%s mprotect patch", m->name);
         if (pre > m->patch_len && mprotect(a + m->patch_len, pre - m->patch_len, PROT_NONE)) die("%s mprotect gap", m->name);
         return;
     }
@@ -815,9 +822,9 @@ static void map_image(module_t *m, const char *dir) {
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
-    if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
+    if (seal_code(m->base, rx)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
-    if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
+    if (seal_code(m->base + po, m->size - po)) die("%s mprotect patch", m->name);
 }
 #endif
 
@@ -867,7 +874,7 @@ void run_module_inits(void) {
     for (int i = 0; i < g_nmod; i++) {
         module_t *m = &g_mod[i];
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
-        LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);
+        LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, (unsigned long long)m->init, (unsigned long long)m->init_arraysz / 8);
         ((void (*)(void))(m->base + m->init))();
     }
 }
