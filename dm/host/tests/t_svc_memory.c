@@ -132,6 +132,14 @@ static void expect(uintptr_t a, uintptr_t base, size_t size, unsigned state, uns
     memory_info m = query(a);
     assert(m.base == base && m.size == size && m.state == state && m.attr == attr && m.perm == perm);
 }
+static void host_memory(void) {
+    uintptr_t local = 0xcafe, value = 0, address = (uintptr_t)&local;
+    memory_info stack_info = query(address);
+    assert(stack_info.state == 0x0b && stack_info.perm == 3);
+    assert(address >= stack_info.base && address - stack_info.base < stack_info.size);
+    assert(dm_host_read(address, &value, sizeof value) && value == local);
+    assert(!dm_host_read(1, &value, sizeof value));   // unwinding an invalid guest frame must not fault
+}
 static void fatal(unsigned svc, uint64_t x0, uint64_t x1, uint64_t x2) {
     fflush(NULL); pid_t pid = fork(); assert(pid >= 0);
     if (!pid) {
@@ -238,7 +246,8 @@ static void ownership(void) {
     assert(!pages(0, alias, P) && !pages(1, alias, P));
     assert(*(uint8_t *)(alias + P) == 0x34);
     memset((void *)(stack + P), 0x76, 2 * P);
-    readonly_base = alias; readonly_size = memory_getpagesize();
+    readonly_size = memory_getpagesize();
+    readonly_base = (alias + P) & ~(readonly_size - 1);   // the host page containing the copyback destination
     assert(!mprotect((void *)readonly_base, readonly_size, PROT_READ));
     assert(!unmap(stack + P, alias + P, 2 * P) && !readonly_size);
     for (size_t i = P; i < 3 * P; ++i) assert(((uint8_t *)alias)[i] == 0x76);
@@ -392,11 +401,12 @@ static void fragmented_queries(void) {
 }
 static void lazy_commit(void) {
     size_t n = DM_GAME_APP_POOL - DM_GAME_MEM_USED, pg = memory_getpagesize();
-    char *resident = malloc(n / pg); assert(resident);
+    size_t nvec = n / getpagesize();   // mincore uses native pages even when exercising the 16 KiB guest-memory path
+    uint8_t *resident = malloc(nvec); assert(resident);
     assert(!pages(1, alias, n));
-    assert(!mincore((void *)alias, n, resident));
+    assert(!mincore((void *)alias, n, (void *)resident));
     size_t count = 0;
-    for (size_t i = 0; i < n / pg; ++i) count += !!(resident[i] & MINCORE_INCORE);
+    for (size_t i = 0; i < nvec; ++i) count += resident[i] & 1;   // in-core bit on Darwin and Linux
     assert(count < 32); // metadata scans must not fault the anonymous backing in
     ((uint8_t *)alias)[0] = 0x98;
     assert(!pages(0, alias, pg) && !pages(1, alias, pg));
@@ -579,7 +589,7 @@ int main(int argc, char **argv) {
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
     layout_order();
-    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); heap_regrow(); concurrency(); fragmented_queries();
+    host_memory(); lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY
