@@ -11,7 +11,7 @@ SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswiz
 .PHONY: replay-test fixture profile
 replay-test: fixture
 	DM_VK_DIR="$(abspath $(B))/shaders" $(B)/t_replay
-fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000000002.spv
+fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000000002.spv $(B)/shaders/0000000000000003.spv
 profile:
 	$(MAKE) -C $(HOST) GAME=$(GAME) game_profile
 $(B)/t_replay: $(SRC) ../nvn_obj.h ../nvn_mtl.h ../nvn_dirty.h ../nvn_tex.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
@@ -26,3 +26,8 @@ $(B)/shaders/0000000000000002.spv: tests/triangle.frag tests/fragment.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/fragment.vk.txt $(B)/shaders/0000000000000002.vk.txt
+
+$(B)/shaders/0000000000000003.spv: tests/image.comp tests/compute.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/compute.vk.txt $(B)/shaders/0000000000000003.vk.txt
