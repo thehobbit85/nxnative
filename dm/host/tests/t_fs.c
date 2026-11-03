@@ -14,19 +14,20 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
-#include <sys/clonefile.h>                // declared before the define, so only hle_fs.c's calls go to the fake
+#include <sys/resource.h>
+#include "../save_fs.h"
 static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
-static int fake_clonefile(const char *src, const char *dst, uint32_t flags);
+static int fake_clone_tree(const char *src, const char *dst);
 #define pwrite fake_pwrite
-#define clonefile fake_clonefile
+#define fs_clone_tree fake_clone_tree
 #include "../hle_fs.c"
 #undef pwrite
-#undef clonefile
+#undef fs_clone_tree
 ssize_t pwrite(int, const void *, size_t, off_t);
 static int g_clone_enotsup;                   // 1: clonefile fails as on HFS+ and exFAT (ENOTSUP), checked on disk images of both
-static int fake_clonefile(const char *src, const char *dst, uint32_t flags) {
+static int fake_clone_tree(const char *src, const char *dst) {
     if (g_clone_enotsup) { errno = ENOTSUP; return -1; }
-    return clonefile(src, dst, flags);
+    return fs_clone_tree(src, dst);
 }
 
 struct dm_flags g_flag; uint64_t g_t0_ns; uint64_t now_ns(void) { return 0; }   // stubs for log timestamps and the read path (not used by the write path)
@@ -81,16 +82,16 @@ int main(void) {
     CHECK(h_fs_OpenFile(&rh, "rom:/data/base", MODE_READ) == RES_OK && rh && !(rh & 15), "a folder file's handle is 16-byte aligned, as a Horizon FileAccessor pointer is (%#llx)", (unsigned long long)rh); h_fs_CloseFile(rh);
     g_nmnt = 0;
     unsetenv("DM_ROMFS_OVERLAY");
-    {   // game files that are neither a folder nor a file (a stale path, a fifo) stop the rom mount with a FATAL line, in a child so the abort does not end this test
-        char gone[1200], fifo[1200], out[1200]; snprintf(gone, sizeof gone, "%s/RomFS", root); snprintf(fifo, sizeof fifo, "%s/fifo", root); snprintf(out, sizeof out, "%s/fatal.txt", root);
-        mkfifo(fifo, 0644);
-        const char *paths[2] = {gone, fifo};
+    {   // game files that are neither a folder nor a file (a stale path, a special file) stop the rom mount with a FATAL line, in a child so the abort does not end this test
+        char gone[1200], special[1200], out[1200]; snprintf(gone, sizeof gone, "%s/RomFS", root); snprintf(special, sizeof special, "%s/special", root); snprintf(out, sizeof out, "%s/fatal.txt", root);
+        if (symlink("/dev/null", special)) { perror("symlink"); return 2; }
+        const char *paths[2] = {gone, special};
         for (int i = 0; i < 2; i++) {
             fflush(NULL); pid_t pid = fork();
-            if (!pid) { freopen(out, "w", stderr); setenv("DM_ROMFS", paths[i], 1); h_fs_MountRom("rom", NULL, 0); _exit(0); }
+            if (!pid) { if (!freopen(out, "w", stderr)) _exit(2); setvbuf(stderr, NULL, _IONBF, 0); setenv("DM_ROMFS", paths[i], 1); h_fs_MountRom("rom", NULL, 0); _exit(0); }
             int st = 0; waitpid(pid, &st, 0);
             char line[512] = {0}; FILE *f = fopen(out, "r"); if (f) { fread(line, 1, sizeof line - 1, f); fclose(f); }
-            CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT && strstr(line, "FATAL the game files") && strstr(line, paths[i]), "%s game files stop the rom mount", i ? "a fifo as the" : "missing");
+            CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT && strstr(line, "FATAL the game files") && strstr(line, paths[i]), "%s game files stop the rom mount", i ? "a special file as the" : "missing");
         }
     }
 
@@ -135,7 +136,7 @@ int main(void) {
         CHECK(read_fs("rom:\\data\\a", got, sizeof got) && !strcmp(got, "mod") && read_fs("rom:\\data\\c", got, sizeof got) && !strcmp(got, "xy"), "backslash paths reach the overlay folder and the image");
         h = 0; cnt = -1; CHECK(h_fs_OpenDirectory(&h, "rom:\\data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 4, "and list the merged directory (%lld)", (long long)cnt); h_fs_CloseDirectory(h);
         unsetenv("DM_ROMFS_OVERLAY"); g_nmnt = 0;
-        snprintf(fn, sizeof fn, "%s/2.img", root); CHECK(!link(ip, fn), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
+        snprintf(fn, sizeof fn, "%s/2.img", root); f = fopen(fn, "wb"); CHECK(f && fwrite(img, 1, sizeof img, f) == sizeof img && !fclose(f), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
         size_t cache = 0;
         CHECK(h_fs_QueryAocCache(&cache, 2) == RES_OK && cache == 176, "DLC image reports Horizon table size (176, got %zu)", cache);
         CHECK(h_fs_MountAoc("aoc", 2, NULL, 0) == RES_OK && read_fs("aoc:/data/a", got, sizeof got) && !strcmp(got, "hello"), "DLC mounts and reads directly from its image");
@@ -233,7 +234,7 @@ int main(void) {
     CHECK(write_save("save:/a", "ok2") == RES_OK && h_fs_Commit("save") == RES_OK, "the next transaction commits as usual");
     // 6c Cloning the work directory at mount fails: do not exit; mount the committed directory read-only instead. Reads work, writes fail, commits are no-ops, the committed version is unchanged, and the front end is notified once; the next normal mount works as before
     setenv("DM_TEST_FS_FAILAT", "mountclone:1", 1); g_nmnt = 0; nf0 = g_nfail;
-    snprintf(p, sizeof p, "rm -rf '%s'", work); system(p);
+    rm_tree(work);
     CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_nfail == nf0 + 1, "mount returns success, front end notified once (actually %d times)", g_nfail - nf0);
     CHECK(read_fs("save:/a", got, sizeof got) && !strcmp(got, "ok2"), "the read-only mount reads the committed a=ok2 (read %s)", got);
     CHECK(write_save("save:/a", "zzz") != RES_OK, "writes fail");
@@ -289,6 +290,51 @@ int main(void) {
         t_guest_sym = NULL;
     }
 
+    // A save transferred from a case-insensitive host can carry a physical alias on either filesystem.
+    snprintf(p, sizeof p, "%s/.dm-case-9", save); put(p, "alias");
+    CHECK(!fs_set_name(p, "GuestName", 9), "seed a saved guest name");
+    struct timespec stamp[2] = {{1000000123, 0}, {1000000123, 0}};
+    CHECK(!utimensat(AT_FDCWD, p, stamp, 0), "seed a fixed modification time");
+    g_nmnt = 0;
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK && read_fs("save:/GuestName", got, sizeof got) &&
+          !strcmp(got, "alias"), "the working snapshot resolves the guest name");
+    struct stat alias_stat;
+    CHECK(h_fs_Commit("save") == RES_OK && !stat(p, &alias_stat) && alias_stat.st_mtime == 1000000123,
+          "publishing the snapshot preserves modification time");
+    g_nmnt = 0;
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK && read_fs("save:/GuestName", got, sizeof got) &&
+          !strcmp(got, "alias"), "remount resolves the published guest name and bytes");
+
+#ifdef __linux__
+    // A real snapshot error after staging must not publish, leave .new, or follow
+    // a link while copying or cleaning. A retry publishes the same pending write.
+    char sentinel[1300], linkpath[1300], snapshot[1300], target[1300];
+    snprintf(sentinel, sizeof sentinel, "%s/outside", root); put(sentinel, "keep");
+    snprintf(linkpath, sizeof linkpath, "%s/outward", work);
+    CHECK(!symlink(sentinel, linkpath), "seed a symlink pointing outside the working save");
+    CHECK(write_save("save:/a", "retry") == RES_OK, "stage a change before the snapshot failure");
+    struct rlimit previous, short_file;
+    if (getrlimit(RLIMIT_FSIZE, &previous)) { perror("getrlimit"); return 2; }
+    short_file = previous; short_file.rlim_cur = 1;
+    void (*previous_signal)(int) = signal(SIGXFSZ, SIG_IGN);
+    if (previous_signal == SIG_ERR || setrlimit(RLIMIT_FSIZE, &short_file)) { perror("file size limit"); return 2; }
+    Result failed_commit = h_fs_Commit("save");
+    if (setrlimit(RLIMIT_FSIZE, &previous) || signal(SIGXFSZ, previous_signal) == SIG_ERR) return 2;
+    CHECK(failed_commit == RES_FAIL, "a short snapshot write at the file-size limit refuses the commit");
+    snprintf(snapshot, sizeof snapshot, "%s.new", save);
+    snprintf(p, sizeof p, "%s/a", save);
+    CHECK(same(p, "ok3") && access(snapshot, F_OK) && errno == ENOENT && same(sentinel, "keep"),
+          "failed snapshot leaves the published save and outside file intact and deletes its partial tree");
+    CHECK(h_fs_Commit("save") == RES_OK && same(p, "retry"), "retry publishes the pending bytes");
+    snprintf(linkpath, sizeof linkpath, "%s/outward", save);
+    ssize_t linklen = readlink(linkpath, target, sizeof target);
+    CHECK(linklen == (ssize_t)strlen(sentinel) && !memcmp(target, sentinel, (size_t)linklen) && same(sentinel, "keep"),
+          "the published symlink retains its target as text");
+    errno = 0;
+    CHECK(fs_clone_tree(work, save) && errno == EEXIST && same(p, "retry"),
+          "a pre-existing destination survives a refused snapshot");
+#endif
+
     printf("⑨ saves named by a host before backslash paths\n");
     {   char old[1100], q[1300], r[1300]; struct stat ost; uint64_t h = 0; DirectoryEntry de[32]; int64_t cnt = 0;
         snprintf(old, sizeof old, "%s/oldsave", root); mkdir(old, 0755);
@@ -328,7 +374,7 @@ int main(void) {
         g_nmnt = 0;
     }
 
-    char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
+    rm_tree(root);
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;
 }
