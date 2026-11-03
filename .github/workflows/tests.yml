@@ -77,7 +77,7 @@ jobs:
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" android-memory-build
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE" build/t_fault_access build/t_lifecycle build/t_hid build/t_android_scheduler
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE -ldl" build/t_fpslock build/t_uecvar build/t_ue_heap_span
-          make -C dm/host/tests GAME="$GAME" LANGUAGE_SAN= CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE -ldl" build/t_language build/t_nfc build/t_shared_font
+          make -C dm/host/tests GAME="$GAME" LANGUAGE_SAN= CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE -ldl" build/t_language build/t_nfc build/t_shared_font build/t_fdstat
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static -D_GNU_SOURCE -Wno-error=format -ldl" build/t_system_event
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang" build/t_audio_android
           make -C dm/host/tests GAME="$GAME" CLANG="$bin/aarch64-linux-android30-clang -static" android-fs-build
@@ -98,6 +98,7 @@ jobs:
             dm/host/tests/build/t_fpslock
             dm/host/tests/build/t_uecvar
             dm/host/tests/build/t_ue_heap_span
+            dm/host/tests/build/t_fdstat
             dm/host/tests/build/t_language
             dm/host/tests/build/t_nfc
             dm/host/tests/build/t_shared_font
@@ -133,7 +134,7 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: |
-          for test in t_language t_nfc t_shared_font t_system_event; do
+          for test in t_language t_nfc t_shared_font t_system_event t_fdstat; do
             chmod +x "tests/$test"
             "tests/$test"
           done
