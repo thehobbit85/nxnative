@@ -160,6 +160,9 @@ $(B)/t_save_sync_metadata: t_save_sync_metadata.c ../save_sync.c ../save_sync.h 
 save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
+# The Android device supplies AAudio and drives the actual output callbacks.
+$(B)/t_audio_android: t_audio_android.c ../hle_audio.c ../hle_audren.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -I.. $(GINC) -o $@ t_audio_android.c ../hle_bigstack.c -laaudio -lm
 $(B)/t_audio: t_audio.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox
 $(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)

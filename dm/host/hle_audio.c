@@ -1,13 +1,52 @@
 // nn::audio AudioOut: the game (FMOD nx output layer) appends PCM buffers block by block; once played the system puts them back on the "released" queue and signals the event.
-// Host: real audio output = CoreAudio AudioUnit (Mac DefaultOutput / iOS RemoteIO); silent sink = consumes buffers in real time (no sound, pacing matches the real device).
-//       iOS defaults to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
+// Host: real audio output = AAudio on Android or CoreAudio AudioUnit (Mac DefaultOutput / iOS RemoteIO); silent sink = consumes buffers in real time (no sound, pacing matches the real device).
+//       Android and iOS default to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
 // The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and only writes the front part of the structs (AudioOut: the SDK's own fields, au_info).
 #include "hle.h"
+#ifdef __ANDROID__
+#include <aaudio/AAudio.h>
+#define DM_AUDIO_DEFAULT 1
+#define DM_DEVICE_NAME "AAudio"
+#else
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
-#include <dispatch/dispatch.h>
+#define DM_AUDIO_DEFAULT TARGET_OS_IPHONE
+#define DM_DEVICE_NAME "AudioUnit"
+#endif
 #include <stdatomic.h>
 #include <unistd.h>
+
+// Release notifications are posted from the device callback. Timed waits use
+// a monotonic deadline so a wall-clock change cannot stop the renderer.
+#ifdef __ANDROID__
+#include <semaphore.h>
+#include <time.h>
+typedef sem_t *audio_sem;
+static inline audio_sem audio_sem_create(void) {
+    audio_sem s = malloc(sizeof *s);
+    if (!s || sem_init(s, 0, 0)) die("audio semaphore allocation failed");
+    return s;
+}
+static inline void audio_sem_signal(audio_sem s) { sem_post(s); }
+static inline void audio_sem_wait(audio_sem s, int ms) {
+    if (ms < 0) { while (sem_wait(s) && errno == EINTR) {} return; }
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    end.tv_sec += ms / 1000; end.tv_nsec += (ms % 1000) * 1000000L;
+    if (end.tv_nsec >= 1000000000L) { end.tv_sec++; end.tv_nsec -= 1000000000L; }
+    while (sem_clockwait(s, CLOCK_MONOTONIC, &end) && errno == EINTR) {}
+}
+static inline void audio_sem_free(audio_sem s) { sem_destroy(s); free(s); }
+#else
+#include <dispatch/dispatch.h>
+typedef dispatch_semaphore_t audio_sem;
+static inline audio_sem audio_sem_create(void) { return dispatch_semaphore_create(0); }
+static inline void audio_sem_signal(audio_sem s) { dispatch_semaphore_signal(s); }
+static inline void audio_sem_wait(audio_sem s, int ms) {
+    dispatch_semaphore_wait(s, ms < 0 ? DISPATCH_TIME_FOREVER : dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * 1000000));
+}
+static inline void audio_sem_free(audio_sem s) { dispatch_release(s); }
+#endif
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
 enum { BK_NONE, BK_AU, BK_NULL };   // what is consuming an output's queue right now (aout.backend)
@@ -25,12 +64,18 @@ typedef struct {
     gbuf *q[QMAX]; _Atomic uint32_t q_head, q_tail;       // Pending: written by the game side, read by the output side
     gbuf *rel[RELMAX]; _Atomic uint32_t rel_head, rel_tail; // Released: written by the output side, read by the game side
     uint64_t pos;                      // Bytes already played of the current block
+#ifdef __ANDROID__
+    AAudioStream *au;
+    _Atomic int device_error;
+#else
     AudioUnit au;
+#endif
+    int wants_device, mute;
     int backend;                       // BK_*: the running consumer. Start, Stop and the background suspend change it only under g_aos_lock and act on it rather than re-deriving it from state and g_suspended
     pthread_t null_th; _Atomic int null_run;
-    dispatch_semaphore_t notify_sem;
+    audio_sem notify_sem;
     pthread_t notify_th; _Atomic int notify_run, notify_pending, notify_armed;
-    dispatch_semaphore_t rel_sem;      // Host outputs only (dm_pcmout_open): signaled for each release, so the in-process audio renderer blocks instead of polling (dm_pcmout_wait)
+    audio_sem rel_sem;      // Host outputs only (dm_pcmout_open): signaled for each release, so the in-process audio renderer blocks instead of polling (dm_pcmout_wait)
     int id;                            // open sequence number (#N in the log; tells simultaneous outputs apart, e.g. Engage's Wwise and Unity's built-in FMOD)
     int nlog;                          // Start / Stop / Close lines logged so far (at most 32 per output)
     _Atomic uint64_t under_n, under_b; // underruns: times the pending queue was empty when the callback needed data / zero-filled bytes
@@ -64,14 +109,20 @@ static void au_note(aout *a, const char *what, void *lr) {
 static void notify_release(aout *a) {
     atomic_store_explicit(&a->notify_pending, 1, memory_order_release);
     if (atomic_exchange_explicit(&a->notify_armed, 1, memory_order_acq_rel) == 0)
-        dispatch_semaphore_signal(a->notify_sem);
+        audio_sem_signal(a->notify_sem);
 }
 
-void dm_host_helper_qos(qos_class_t q);   // hle_thread.c: under DM_QOS_MAP a helper thread sets its own class instead of inheriting its creator's
+// AAudio schedules its real-time callback. Its ordinary helpers inherit their creator's scheduling policy.
+static void audio_helper_priority(void) {
+#ifndef __ANDROID__
+    void dm_host_helper_qos(qos_class_t q);
+    dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);
+#endif
+}
 static void *event_notify(void *p) {
-    aout *a = p; dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // the game's audio thread waits on the release event it signals
+    aout *a = p; audio_helper_priority();   // the game's audio thread waits on the release event it signals
     for (;;) {
-        dispatch_semaphore_wait(a->notify_sem, DISPATCH_TIME_FOREVER);
+        audio_sem_wait(a->notify_sem, -1);
         if (atomic_exchange_explicit(&a->notify_pending, 0, memory_order_acq_rel) && a->event)
             hle_signal_system_event(a->event);
         // Acquire a producer that saw the old armed=1, so the pending recheck
@@ -81,7 +132,7 @@ static void *event_notify(void *p) {
         if (!atomic_load_explicit(&a->notify_run, memory_order_acquire)) break;
         if (atomic_load_explicit(&a->notify_pending, memory_order_acquire) &&
             atomic_exchange_explicit(&a->notify_armed, 1, memory_order_acq_rel) == 0)
-            dispatch_semaphore_signal(a->notify_sem);
+            audio_sem_signal(a->notify_sem);
     }
     return NULL;
 }
@@ -118,7 +169,7 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
     }
     if (released) {
         if (a->event) notify_release(a);   // the notify thread only signals the guest's event: outputs without one (the host's renderer output, games that poll) need no wake-up
-        if (a->rel_sem) dispatch_semaphore_signal(a->rel_sem);
+        if (a->rel_sem) audio_sem_signal(a->rel_sem);
     }
 }
 
@@ -148,9 +199,7 @@ static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
 
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
-static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
-    (void)f; (void)ts; (void)bus; (void)frames;
-    aout *a = ctx;
+static void render_pcm(aout *a, void *dst, uint32_t frames, size_t bytes) {
     atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_relaxed);
     {
         // At each 2000-callback checkpoint publish a snapshot for the watchdog: LOG takes a stdio lock and must never run here or in the release-event notifier.
@@ -164,9 +213,68 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
             atomic_store_explicit(&a->st_pending, 1, memory_order_release);
             a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = a->st_count = 0; a->st_u0 = un; a->st_ub0 = ubb;
         } }
-    pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
-    { static int mute = -1; if (mute < 0) { const char *e = getenv("DM_AUDIO_MUTE"); mute = e && atoi(e); }   // diagnostic: the whole real-output path (AudioUnit callback pacing, background take-over) but with the output silenced (lifecycle tests on the Mac without noise)
-      if (mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize); }
+    pull_device(a, dst, bytes);
+    if (a->mute) memset(dst, 0, bytes);
+}
+#ifdef __ANDROID__
+// AAudio stream operations all run under g_aos_lock, on the host stack.
+// Only the data callback consumes guest buffers. The error callback wakes no
+// guest code: the control-side watchdog retires the stream and retries it.
+static aaudio_data_callback_result_t aa_render(AAudioStream *stream, void *ctx, void *data, int32_t frames) {
+    (void)stream;
+    aout *a = ctx;
+    render_pcm(a, data, frames, (size_t)frames * device_channels(a) * sizeof(int16_t));
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+static void aa_error(AAudioStream *stream, void *ctx, aaudio_result_t error) {
+    (void)stream;
+    aout *a = ctx;
+    atomic_store(&a->device_error, error);
+}
+static void device_stop(aout *a) {
+    // requestStop is asynchronous. Close finishes the callback thread before
+    // the silent sink may pull, Stop releases partial buffers, or Close frees a.
+    AAudioStream_requestStop(a->au);
+    aaudio_result_t status = AAudioStream_close(a->au);
+    if (status != AAUDIO_OK) die("AAudio close failed (%d)", status);
+    a->au = NULL;
+}
+static int device_start(aout *a) {
+    AAudioStreamBuilder *b;
+    aaudio_result_t status = AAudio_createStreamBuilder(&b);
+    if (status != AAUDIO_OK) return status;
+    int ch = device_channels(a);
+    AAudioStreamBuilder_setDirection(b, AAUDIO_DIRECTION_OUTPUT);
+    AAudioStreamBuilder_setSharingMode(b, AAUDIO_SHARING_MODE_SHARED);
+    AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setUsage(b, AAUDIO_USAGE_GAME);
+    AAudioStreamBuilder_setContentType(b, AAUDIO_CONTENT_TYPE_SONIFICATION);
+    AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setSampleRate(b, RATE);
+    AAudioStreamBuilder_setChannelCount(b, ch);
+    AAudioStreamBuilder_setDataCallback(b, aa_render, a);
+    AAudioStreamBuilder_setErrorCallback(b, aa_error, a);
+    atomic_store(&a->device_error, AAUDIO_OK);
+    status = AAudioStreamBuilder_openStream(b, &a->au);
+    AAudioStreamBuilder_delete(b);
+    if (status != AAUDIO_OK) return status;
+    if (AAudioStream_getFormat(a->au) != AAUDIO_FORMAT_PCM_I16 || AAudioStream_getSampleRate(a->au) != RATE ||
+        AAudioStream_getChannelCount(a->au) != ch) status = AAUDIO_ERROR_INVALID_FORMAT;
+    else {
+        // As on Apple, request one 5 ms renderer period. AAudio rounds it up
+        // to its native minimum. Its default may prime more frames at once
+        // than the renderer can queue, producing a gap after the first blocks.
+        int32_t size = AAudioStream_setBufferSizeInFrames(a->au, RATE / 200);
+        if (size < 0) LOG("[RED] audio #%d: AAudio buffer size request failed (%d)", a->id, size);
+        status = AAudioStream_requestStart(a->au);
+    }
+    if (status != AAUDIO_OK) device_stop(a);
+    return status;
+}
+#else
+static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
+    (void)f; (void)ts; (void)bus;
+    render_pcm(ctx, bl->mBuffers[0].mData, frames, bl->mBuffers[0].mDataByteSize);
     return noErr;
 }
 #if !TARGET_OS_IPHONE
@@ -246,15 +354,23 @@ static void au_open(aout *a) {
     if (pthread_create(&t, NULL, au_create_th, a) || dm_host_thread_join(t, &r)) die("AudioUnit setup: cannot start its thread");
     OSStatus st = (OSStatus)(intptr_t)r; if (st) die("AudioUnit setup failed (status %d)", (int)st);
 }
+static int device_start(aout *a) { return a->au ? AudioOutputUnitStart(a->au) : -1; }
+static void device_stop(aout *a) { AudioOutputUnitStop(a->au); }
+#endif
 // Silent sink: consumes in real time at 48 kHz every 5 ms. When more than 100 ms behind (iOS suspended the whole process in the background, SIGSTOP on the Mac), restart the count from now and do not make up the missed time --
 // making it up would pull hundreds of times in one go (seconds' worth), releasing all of the game's buffers and logging hundreds of underruns; a suspended console does not play that stretch either
 static void *null_sink(void *p) {
-    aout *a = p; uint8_t scratch[RATE / 200 * 2 * 8]; dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // paces the game's audio in real time
+    aout *a = p; uint8_t scratch[RATE / 200 * 2 * 8]; audio_helper_priority();   // paces the game's audio in real time
     uint64_t bytes = (uint64_t)RATE / 200 * 2 * a->ch, t = now_ns();
     while (atomic_load_explicit(&a->null_run, memory_order_acquire)) {
         t += 5000000; uint64_t now = now_ns();
         if (t > now) usleep((useconds_t)((t - now) / 1000)); else if (now - t > 100000000) t = now;
-        pull(a, scratch, bytes);
+        // A device can reject the requested channel layout. The silent sink
+        // still consumes its complete guest frames without exceeding scratch.
+        for (uint64_t left = bytes; left;) {
+            size_t n = left < sizeof scratch ? (size_t)left : sizeof scratch;
+            pull(a, scratch, n); left -= n;
+        }
     }
     return NULL;
 }
@@ -262,17 +378,17 @@ static void *null_sink(void *p) {
 static void null_start(aout *a) { atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); a->backend = BK_NULL; }
 static void null_stop(aout *a) { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL); a->backend = BK_NONE; }
 static void backend_stop(aout *a) {
-    if (a->backend == BK_AU) { AudioOutputUnitStop(a->au); a->backend = BK_NONE; }
+    if (a->backend == BK_AU) { device_stop(a); a->backend = BK_NONE; }
     else if (a->backend == BK_NULL) null_stop(a);
 }
-static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : TARGET_OS_IPHONE; }
+static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : DM_AUDIO_DEFAULT; }
 // Start the AudioUnit of an output whose backend is BK_NONE (callers hold g_aos_lock). When the device refuses (the session is held by a call, or is being reset), the silent sink stands in and the watchdog retries
 static void au_go(aout *a, uint64_t now) {
-    OSStatus st = a->au ? AudioOutputUnitStart(a->au) : -1;
+    int st = device_start(a);
     a->wd_n = atomic_load_explicit(&a->cb_n, memory_order_relaxed); a->wd_t = now;
     if (!st) { a->backend = BK_AU; a->stalled = 0; return; }
     null_start(a);
-    if (!a->stalled) { a->stalled = 1; a->retry_ms = 1000; LOG("[RED] audio #%d: the AudioUnit did not start (status %d): the silent sink stands in, retrying", a->id, (int)st); }
+    if (!a->stalled) { a->stalled = 1; a->retry_ms = 1000; LOG("[RED] audio #%d: the " DM_DEVICE_NAME " did not start (status %d): the silent sink stands in, retrying", a->id, (int)st); }
     else if (a->retry_ms < 8000) a->retry_ms *= 2;
     a->retry_at = now + (uint64_t)a->retry_ms * 1000000;
 }
@@ -310,19 +426,25 @@ static void *au_watchdog(void *p) {
         pthread_mutex_lock(&g_aos_lock);
         uint64_t t = now_ns(), gap = t - last; last = t;
         for (int i = 0; i < AOMAX; i++) {
-            aout *a = g_aos[i]; if (!a || !a->au) continue;
+            aout *a = g_aos[i]; if (!a || !a->wants_device) continue;
             uint64_t n = atomic_load_explicit(&a->cb_n, memory_order_relaxed);
             if (a->backend != BK_AU || g_suspended || gap > 4ull * WD_TICK_MS * 1000000 || n != a->wd_n) {
                 if (a->backend == BK_AU && n != a->wd_n) a->retry_ms = 0;   // callbacks seen: a later stall starts the back-off from 1 s again
                 a->wd_n = n; a->wd_t = t;
-            } else if (t - a->wd_t > WD_STALL_MS * 1000000ull) {
-                LOG("[RED] audio #%d: the device has not called back for %.0f ms while playing: the silent sink stands in, retrying the AudioUnit", a->id, (t - a->wd_t) / 1e6);
-                AudioOutputUnitStop(a->au); a->backend = BK_NONE; null_start(a);
+            }
+            int error = 0;
+#ifdef __ANDROID__
+            error = atomic_load(&a->device_error);
+#endif
+            if (a->backend == BK_AU && !g_suspended && (error || t - a->wd_t > WD_STALL_MS * 1000000ull)) {
+                if (error) LOG("[RED] audio #%d: " DM_DEVICE_NAME " error %d: the silent sink stands in until retry", a->id, error);
+                else LOG("[RED] audio #%d: the device has not called back for %.0f ms while playing: the silent sink stands in, retrying the " DM_DEVICE_NAME, a->id, (t - a->wd_t) / 1e6);
+                device_stop(a); a->backend = BK_NONE; null_start(a);
                 a->stalled = 1; a->retry_ms = a->retry_ms ? (a->retry_ms < 8000 ? a->retry_ms * 2 : 8000) : 1000; a->retry_at = t + (uint64_t)a->retry_ms * 1000000;
             }
             if (a->stalled && a->backend == BK_NULL && !g_suspended && t >= a->retry_at) {
                 null_stop(a); au_go(a, t);
-                if (a->backend == BK_AU) LOG("audio #%d: AudioUnit restarted", a->id);
+                if (a->backend == BK_AU) LOG("audio #%d: " DM_DEVICE_NAME " restarted", a->id);
             }
         }
         pthread_mutex_unlock(&g_aos_lock);
@@ -356,14 +478,18 @@ static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *par
     atomic_init(&a->null_run, 0); atomic_init(&a->notify_run, 1);
     atomic_init(&a->notify_pending, 0); atomic_init(&a->notify_armed, 0);
     atomic_init(&a->st_pending, 0);
-    a->notify_sem = dispatch_semaphore_create(0); a->id = atomic_fetch_add(&nopen, 1);
+    a->notify_sem = audio_sem_create(); a->id = atomic_fetch_add(&nopen, 1);
     pthread_create(&a->notify_th, NULL, event_notify, a);
     if (ev) hle_bind_system_event(ev, 1);   // Buffer release event: bind a kernel event on the guest thread (auto-clear), afterwards signaled by the audio thread
     char sb[64]; int use_au = real_audio();
     LOG("audio #%d OpenAudioOut %s channels %d %s%s (call site %s)", a->id, name ? name : "(default)", ch, use_au ? "real output" : "silent sink", ev ? "" : ", no release event (the game polls)", site(lr, sb, sizeof sb));
-    // The helper finishes (and is joined) before lifecycle/watchdog readers can find this output.
-    // Keep construction outside g_aos_lock: joining the helper can yield the guest core.
+    a->wants_device = use_au;
+    const char *mute = getenv("DM_AUDIO_MUTE"); a->mute = mute && atoi(mute);
+#ifndef __ANDROID__
+    // Join the Apple setup helper before publication and outside the registry lock.
+    // On Android Start opens the current route and every Stop retires the stream.
     if (use_au) au_open(a);
+#endif
     objmap_put(g, a);
     pthread_mutex_lock(&g_aos_lock);
     int slot = -1; for (int i = 0; i < AOMAX; i++) if (!g_aos[i]) { slot = i; break; }
@@ -390,7 +516,7 @@ static Result au_start_at(void *g, void *lr) {
     int was = atomic_exchange_explicit(&a->state, STATE_STARTED, memory_order_acq_rel);
     au_note(a, was == STATE_STARTED ? "Start (already playing)" : g_suspended ? "Start (app in the background: the silent sink takes over for now)" : "Start", lr);
     if (was != STATE_STARTED) {
-        if (a->au && !g_suspended) { a->stalled = 0; au_go(a, now_ns()); }
+        if (a->wants_device && !g_suspended) { a->stalled = 0; au_go(a, now_ns()); }
         else null_start(a);
     }
     pthread_mutex_unlock(&g_aos_lock);
@@ -416,7 +542,7 @@ static void au_release_pending(aout *a) {
     atomic_store_explicit(&a->rel_tail, rw, memory_order_release);
     atomic_store_explicit(&a->q_head, qh, memory_order_release); a->pos = 0;
     pthread_mutex_unlock(&a->m);
-    if (released) { if (a->event) notify_release(a); if (a->rel_sem) dispatch_semaphore_signal(a->rel_sem); }
+    if (released) { if (a->event) notify_release(a); if (a->rel_sem) audio_sem_signal(a->rel_sem); }
 }
 static void au_stop_at(void *g, void *lr) {   // lr NULL: the stop inside Close, not logged separately
     aout *a = ao(g);
@@ -433,7 +559,7 @@ static void au_close(void *g, void *lr) {
     au_stop_at(g, NULL);
     aout *a = objmap_del(g);
     atomic_store_explicit(&a->notify_run, 0, memory_order_release);
-    dispatch_semaphore_signal(a->notify_sem);
+    audio_sem_signal(a->notify_sem);
     pthread_join(a->notify_th, NULL);
     audio_report report;
     pthread_mutex_lock(&g_aos_lock);
@@ -441,9 +567,11 @@ static void au_close(void *g, void *lr) {
     for (int i = 0; i < AOMAX; i++) if (g_aos[i] == a) g_aos[i] = NULL;
     pthread_mutex_unlock(&g_aos_lock);
     if (have_report) stats_log(&report);
+#ifndef __ANDROID__
     if (a->au) au_dispose(a->au);
-    dispatch_release(a->notify_sem);
-    if (a->rel_sem) dispatch_release(a->rel_sem);
+#endif
+    audio_sem_free(a->notify_sem);
+    if (a->rel_sem) audio_sem_free(a->rel_sem);
     pthread_mutex_destroy(&a->m); int ch = a->ch; free(a);
     au_info(g, ch, STATE_STOPPED);
 }
@@ -523,11 +651,11 @@ HLE_FORCE("_ZN2nn5audio22GetAudioInSampleFormatEPKNS0_7AudioInE", "recording sam
 void *dm_pcmout_open(int ch) {
     void *key = calloc(1, 64); uint8_t param[8] = {0}; *(uint16_t *)(param + 4) = (uint16_t)ch;
     if (au_open_at(key, NULL, "AudioRenderer", param, NULL)) die("host PCM output cannot be opened");
-    ao(key)->rel_sem = dispatch_semaphore_create(0);
+    ao(key)->rel_sem = audio_sem_create();
     return key;
 }
 // Wait until the output releases a block, at most ms milliseconds (spurious returns are fine: the caller checks dm_pcmout_released again)
-void dm_pcmout_wait(void *k, int ms) { dispatch_semaphore_wait(ao(k)->rel_sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * 1000000)); }
+void dm_pcmout_wait(void *k, int ms) { audio_sem_wait(ao(k)->rel_sem, ms); }
 void dm_pcmout_start(void *k) { au_start_at(k, NULL); }
 void dm_pcmout_close(void *k) { au_close(k, NULL); free(k); }   // stop, take it out of the registry (frees its AOMAX slot), free it and its key
 int dm_pcmout_append(void *k, void *b) { return (int)h_au_Append(k, b); }
@@ -541,14 +669,14 @@ void dm_audio_suspend(int on) {
         g_suspended = on; int failed = 0;
         for (int i = 0; i < AOMAX; i++) {
             aout *a = g_aos[i];
-            if (!a || !a->au) continue;
+            if (!a || !a->wants_device) continue;
             // While suspended the silent sink consumes in real time instead: otherwise buffers are no longer released, the FMOD output thread waits forever and the game's audio pacing stalls (same for an incoming call interruption)
-            if (on) { if (a->backend == BK_AU) { AudioOutputUnitStop(a->au); null_start(a); } }
+            if (on) { if (a->backend == BK_AU) { device_stop(a); null_start(a); } }
             else if (a->backend == BK_NULL) {
                 // The session may still be held by someone else (back in the game with a call not yet hung up): not fatal, the silent sink keeps covering and the watchdog retries
                 null_stop(a); a->stalled = 0; au_go(a, now_ns()); failed |= a->backend != BK_AU; }
         }
-        LOG("audio %s", on ? "suspended (background / interruption)" : failed ? "resumed, an AudioUnit still refuses to start (retrying)" : "resumed (foreground / interruption ended)");
+        LOG("audio %s", on ? "suspended (background / interruption)" : failed ? "resumed, an " DM_DEVICE_NAME " still refuses to start (retrying)" : "resumed (foreground / interruption ended)");
     }
     pthread_mutex_unlock(&g_aos_lock);
 }
@@ -556,13 +684,16 @@ void dm_audio_suspend(int on) {
 void dm_audio_reset(void) {
     pthread_mutex_lock(&g_aos_lock);
     for (int i = 0; i < AOMAX; i++) {
-        aout *a = g_aos[i]; if (!a || !a->au) continue;
+        aout *a = g_aos[i]; if (!a || !a->wants_device) continue;
         int playing = a->backend == BK_AU;
-        if (playing) { AudioOutputUnitStop(a->au); a->backend = BK_NONE; }
+        if (playing) { device_stop(a); a->backend = BK_NONE; }
+#ifndef __ANDROID__
         AudioUnitUninitialize(a->au); AudioComponentInstanceDispose(a->au);
         OSStatus st = au_create(a);
         if (st) LOG("[RED] audio #%d: no AudioUnit after the media services reset (status %d): this output stays silent", a->id, (int)st);
-        if (playing) { if (a->au && !g_suspended) { a->stalled = 0; au_go(a, now_ns()); } else null_start(a); }
+        a->wants_device = a->au != NULL;
+#endif
+        if (playing) { if (a->wants_device && !g_suspended) { a->stalled = 0; au_go(a, now_ns()); } else null_start(a); }
     }
     LOG("audio outputs set up again after the media services reset");
     pthread_mutex_unlock(&g_aos_lock);
