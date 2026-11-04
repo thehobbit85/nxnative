@@ -65,6 +65,8 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- **Android font atlas initial content:** [Storage of a CPU-uncached pool at first use](../../../docs/reference/nvn-objects.md#storage-of-a-cpu-uncached-pool-at-first-use). Reusing Metal's rule populates the previously zero Vulkan atlas; some glyphs remain clipped, under investigation.
+
 General host changes first needed here; each applies to every game:
 
 - [Vulkan depth formats and nearest scaled depth copies](../../../docs/reference/rendering.md#vulkan-depth-formats-and-nearest-scaled-depth-copies): Android SwiftShader advertises no D24S8 features; the format and copy fallbacks pass synthetic depth/stencil replay. Commercial retesting is in progress.
@@ -88,7 +90,7 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- Android runtime: the ARM64 API 35 emulator reaches the saved opening room after the actor sentinel repair. The room, Link, other characters and hearts render after restoring Metal's lower-left viewport/culling rules in Vulkan; menu and dialogue text are still missing, so the gameplay milestone remains open. Scaled nearest depth/stencil copies now pass the synthetic GPU checks. The bound-geometry warning comes from the program's stage mask; the exported game shaders are vertex, fragment and compute stages, with no geometry stage to execute.
+- Android runtime: the ARM64 API 35 emulator reaches the saved opening room after the actor sentinel repair. The room, Link, other characters and hearts render after restoring Metal's lower-left viewport/culling rules in Vulkan. The CPU-uncached font-atlas fill restores text, with some glyphs still clipped; the gameplay milestone remains open. Scaled nearest depth/stencil copies now pass the synthetic GPU checks. The bound-geometry warning comes from the program's stage mask; the exported game shaders are vertex, fragment and compute stages, with no geometry stage to execute.
 
 - **`SR_Y_DIRECTION`.** 2,487 of its pixel shaders read the window's Y-direction system register, which is −1 under a lower-left origin. The Ryujinx recompiler answers a constant +1 (a TODO in `InstEmitMove.cs`; LASRecomp answers −1). In the room shader the value only scales a depth slope under `abs()`; other shaders may use its sign (`dFdy`-based effects). Answering it per profile means a translator change, i.e. every game's chain.
 - development.md calls SDK 8.2.0 "the oldest so far"; Mario Kart 8 Deluxe (SDK 4.4.0) is older now.
