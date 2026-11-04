@@ -2304,6 +2304,8 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     pthread_mutex_unlock(&g_pool_mu); return hit;
 }
 void mtl_alias_drop_pool(const void *pool) { (void)pool; }
+// Vulkan textures already own image storage. The shared recorder still marks GPU-written pools.
+void mtl_pool_gpu_written(const void *pool) { if (pool) atomic_store(&((pool_t *)pool)->gpu_written, 1); }
 
 // statistics the NVN layer prints
 void mtl_stats(uint64_t *passes, uint64_t *draws) { *passes = 0; *draws = g_stat_draws; }
