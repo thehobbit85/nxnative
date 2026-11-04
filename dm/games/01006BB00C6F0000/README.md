@@ -67,6 +67,8 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 General host changes first needed here; each applies to every game:
 
+- [Vulkan depth formats and nearest scaled depth copies](../../../docs/reference/rendering.md#vulkan-depth-formats-and-nearest-scaled-depth-copies): Android SwiftShader advertises no D24S8 features; the format and copy fallbacks pass synthetic depth/stencil replay. Commercial retesting is in progress.
+
 - [Vulkan target lowers dynamic texture offsets](../../../docs/reference/shaders.md#vulkan-target-lowers-dynamic-texture-offsets): the captured postprocess shader `9338e3f1b597fe7c` passes Vulkan 1.1 validation using the bundled Ryujinx lowering.
 
 - [Vulkan export removes unused descriptor declarations](../../../docs/reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations): resolved the captured Android reflection failure.

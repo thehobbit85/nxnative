@@ -11,6 +11,7 @@ uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); r
 uint64_t guest_ns(void) { return now_ns(); }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
+static prog_t depth_copy_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
 static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
 int nvn_dpool_base(const void *pool, int texture) {
@@ -18,6 +19,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &depth_copy_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x35 + stage; return 1; }
     if (p == &output_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x33 + stage; return 1; }
     if (p == &driver_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x32; return 1; }
     if (p == &compute || p == &groups) { assert(stage == 0); memset(key, 0, 8); key[7] = p == &groups ? 4 : 3; return 1; }
@@ -532,7 +534,66 @@ static void queue_viewport_origin(void) {
     puts("Vulkan viewport placement follows device origin independently of queue raster origin");
 }
 
+static void depth_copies(void) {
+    const NVNformat formats[] = {NVN_FORMAT_DEPTH32F, NVN_FORMAT_DEPTH16, NVN_FORMAT_DEPTH24_STENCIL8, NVN_FORMAT_DEPTH32F_STENCIL8};
+    for (unsigned k=0;k<sizeof formats/sizeof *formats;k++) for (int scale=0;scale<2;scale++) {
+        tex_t source = {.serial=0x9000+32*k+4*scale, .d={.width=16,.height=16,.depth=2,.levels=2,.target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=formats[k]}};
+        tex_t target=source; target.serial++;
+        tex_t output = {.serial=source.serial+2,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+        nvn_tex_layout(&source.d,&source.L); nvn_tex_layout(&target.d,&target.L); nvn_tex_layout(&output.d,&output.L);
+        view_t slice={.set_levels=1,.base_level=1,.nlevels=1,.set_layers=1,.min_layer=1,.nlayers=1,.set_target=1,.target=NVN_TEXTURE_TARGET_2D};
+        mtl_reg_tex(900,&target,&slice);
+        samp_par nearest={0}; mtl_reg_samp(900,&nearest);
+        uint8_t pixels[256]={0}; list_t list={0}; int sw=scale?4:2;
+        p_clear_tex clear={.has_view=1,.view=slice,.r={.width=8,.height=8,.depth=1},.mask=15};
+        clear.tex=&source; clear.c.f[0]=.25f; clear.c.u[1]=7; put(&list,OP_CLEAR_TEX,&clear,sizeof clear);
+        clear.tex=&target; clear.c.f[0]=.75f; clear.c.u[1]=0; put(&list,OP_CLEAR_TEX,&clear,sizeof clear);
+        RECORD(OP_COPY_T2T,p_copy_t2t,.src=&source,.dst=&target,.has_sv=1,.sv=slice,.has_dv=1,.dv=slice,
+               .sr={.xoffset=2,.yoffset=2,.width=sw,.height=sw,.depth=1},.dr={.xoffset=1,.yoffset=1,.width=2,.height=2,.depth=1});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_copy_program,.stages=3);
+        RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1|BIND_TEX1_NOBASE,.slot=0,.h=900 | (900ull<<20));
+        RECORD(OP_VIEWPORTS,p_viewports,.n=1,.v={{0,0,8,8}});
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+        put(&list,OP_END,NULL,0);
+        mtl_queue_activate(901); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
+            int copied=x>=1&&x<3&&y>=1&&y<3, want=copied?64:191;
+            if(abs(pixels[4*(y*8+x)]-want)>1) {
+                fprintf(stderr,"depth copy format %#x scale%d at %d,%d got%u wanted%d\n",formats[k],scale,x,y,pixels[4*(y*8+x)],want); abort();
+            }
+        }
+        if(formats[k]==NVN_FORMAT_DEPTH24_STENCIL8 || formats[k]==NVN_FORMAT_DEPTH32F_STENCIL8) {
+            list=(list_t){0}; uint32_t zero[8]={0};
+            va_st va[]={{.fmt=NVN_FORMAT_RGBA32F},{.fmt=NVN_FORMAT_RGBA32UI},{.fmt=NVN_FORMAT_RGBA32I}};
+            p_bind_vattr attr={.n=3}; memcpy(attr.st,va,sizeof va);
+            p_bind_state depth={.kind=5}; ds_st ds={.st=1,.sf_f=NVN_COMPARE_FUNC_EQUAL,.sf_b=NVN_COMPARE_FUNC_EQUAL,
+                .fail_f=NVN_STENCIL_OP_KEEP,.zfail_f=NVN_STENCIL_OP_KEEP,.zpass_f=NVN_STENCIL_OP_KEEP,
+                .fail_b=NVN_STENCIL_OP_KEEP,.zfail_b=NVN_STENCIL_OP_KEEP,.zpass_b=NVN_STENCIL_OP_KEEP}; memcpy(depth.bytes,&ds,sizeof ds);
+            RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output},.depth=&target,.has_dview=1,.dview=slice);
+            RECORD(OP_CLEAR_COLOR,p_clear_color,.index=0,.mask=15,.rgba={0,0,1,1});
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&numeric_program,.stages=3);
+            put(&list,OP_BIND_STATE,&depth,sizeof depth); put(&list,OP_BIND_VATTR,&attr,sizeof attr);
+            RECORD(OP_STENCIL,p_stencil,.face=3,.which=2,.ref=7);
+            RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=1,.st={{.stride=0}});
+            RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=16,.addr=(uintptr_t)zero);
+            RECORD(OP_BIND_UBO_SMALL,p_bind_ubo_small,.stage=0,.index=0,.size=sizeof zero,.addr=(uintptr_t)zero);
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+            RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+            put(&list,OP_END,NULL,0); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+            for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
+                int copied=x>=1&&x<3&&y>=1&&y<3;
+                assert(pixels[4*(y*8+x)+1]==(copied?255:0)); assert(pixels[4*(y*8+x)+2]==(copied?0:255));
+            }
+        }
+        mtl_queue_forget(901); mtl_reg_tex(900,NULL,NULL); mtl_tex_release(&source);mtl_tex_release(&target);mtl_tex_release(&output);
+    }
+    puts("Depth and stencil copies preserve subrectangles, mip levels and array layers at equal and scaled sizes");
+}
+
 int main(void) {
+    depth_copies();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);

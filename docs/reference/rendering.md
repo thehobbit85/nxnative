@@ -1571,3 +1571,12 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the windowless implementation returns generation zero; the NativeActivity still supplies its actual window generation.
 - **Check:** LLVM's uninitialized-value analysis passes for the presenter; both Android binaries link, and the synthetic APK still presents and recreates its swapchain.
 - **Found on:** the synthetic Android integration in [Android parity](../android-parity.md#integration-milestone-checks).
+
+
+### Vulkan depth formats and nearest scaled depth copies
+
+- **Symptom:** an Android Vulkan scene is black, sampled depth is zero, or the renderer reports `scaled texture copy between formats ... that cannot be blitted: skipped`.
+- **Cause:** D24 depth/stencil is optional in Vulkan. SwiftShader advertises no format features for D24S8, although image creation did not reject it; its sampled depth was zero. The copy executor also dropped scaled depth copies when the format lacked blit support, omitted stencil and ignored texture-view base layers.
+- **Fix:** reuse LAS Recomp's capability-based D24S8/D32S8 selection and nearest transfer fallback: depth to a buffer, to an integer colour image, nearest blit, then back through the buffer to depth. Stencil follows separately through R8_UINT. Scratch images grow as needed and retire through submission fences. Equal-size copies carry both planes, and both paths honor view levels and layers. The attribution and upstream revision are in [the reuse note](../../dm/third_party/lasrecomp/README.md). Linear depth resampling and conversion between packed guest depth bytes and a different host format remain open.
+- **Check:** Android SwiftShader GPU replay samples four depth formats and checks stencil tests after equal and scaled copies of subrectangles in nonzero mip levels and array layers. The full replay suite passes in both dynamic-rendering and traditional render-pass modes; `DM_VK_DEPTH_COPY_TRANSFER=1` forces the fallback for testing on drivers that can blit depth. `DM_CTL`'s `passdump N` now schedules the existing Vulkan pass log for the next N complete frames, allowing the game failure to be traced without restarting with a fixed frame number.
+- **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#rendering), with unsupported D24S8 attachments and a two-level depth/stencil pyramid on the emulator.

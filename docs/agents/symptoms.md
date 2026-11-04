@@ -757,6 +757,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - portrait gameplay overlaps the touch controls, touch coordinates land outside the game picture, or a TV's picture renders at 4K again after a layout pass. → [iOS layouts: portrait, a half-folded Duo, iPad windows](../reference/rendering.md#ios-layouts-portrait-a-half-folded-duo-ipad-windows)
 - with *Picture shape* at 1.43:1 (`DM_SCREEN_ASPECT`) the game renders 1920x1344, but on an iPhone Duo in Fit (the default) the picture comes out smaller than the 16:9 one, with black bars on all four sides; it fills the screen only in Fill. On the Mac a click lands off the point under the pointer (it was mapped on a 16:9 rectangle of the window). → [The picture laid out in the shape the game presents](../reference/rendering.md#the-picture-laid-out-in-the-shape-the-game-presents)
 - LLVM reports an uninitialized window-generation value when the Android CLI presents without a NativeActivity window. → [Android presentation without a window](../reference/rendering.md#android-presentation-without-a-window)
+- an Android Vulkan scene is black, sampled depth is zero, or the renderer reports `scaled texture copy between formats ... that cannot be blitted: skipped`. → [Vulkan depth formats and nearest scaled depth copies](../reference/rendering.md#vulkan-depth-formats-and-nearest-scaled-depth-copies)
 
 ## Shaders
 
