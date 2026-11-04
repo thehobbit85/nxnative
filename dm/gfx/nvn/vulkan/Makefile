@@ -7,6 +7,7 @@ GLSLC ?= glslc
 LIBS ?= -lvulkan -lpthread -lm
 CPPFLAGS += -D_GNU_SOURCE -I$(HOST) -I$(HOST)/gen/$(GAME) -I../../../games/$(GAME) -I$(NVN) -I$(NVN)/include
 CFLAGS += -O1 -Wall -Werror -Wno-unused-function
+REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
 .PHONY: replay-test fixture profile
 replay-test: fixture
@@ -39,7 +40,7 @@ $(B)/shaders/0000000000000040.spv: tests/buffer.comp tests/buffer.vk.txt
 	cp tests/buffer.vk.txt $(@:.spv=.vk.txt)
 $(B)/t_replay: $(SRC) spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
+	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile
 $(B)/shaders/0000000000000001.spv: tests/triangle.vert tests/vertex.vk.txt
 	mkdir -p $(B)/shaders
