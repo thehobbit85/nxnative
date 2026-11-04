@@ -69,6 +69,13 @@
 - **Fix:** `scripts/build_android.py` gives Make stable symlink aliases for affected NDK and output paths. Aliases live in a private temporary directory; actual objects and libraries stay in the requested output folder. Stable alias names preserve compiler stamps and incremental native reuse. Direct Make calls retain the path restriction.
 - **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic wrapper builds. `test_build_wrapper.py` executes Make with spaced paths and shell characters and checks that a second build reuses the native output.
 
+### Incomplete Android package inputs
+
+- **Symptom:** APK preparation spends time compiling Java before noticing a wrong native library or missing game assets; an incomplete prepared folder can omit the main module, shader descriptors or requested DLC/save data.
+- **Cause:** the donor packer mostly checked paths as it wrote the APK. Directory walks silently omitted nonexistent optional folders, any rewritten module satisfied its module-presence check, and shader binaries and descriptors were collected independently.
+- **Fix:** check the ELF64 little-endian AArch64 shared-library header, explicit file/folder arguments, the main module, Android rewrite metadata and paired shader files before SDK compilation. Reject APK paths that collide with source assets or the development signing key. Empty shader directories remain valid for synthetic guests without graphics programs; full shader semantics and runtime capability checks belong to the exporter and renderer.
+- **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic prepared-folder and wrong-ABI fixtures in `test_packaging.py`.
+
 ### Interrupted Android asset updates
 
 - **Symptom:** a failed or interrupted APK asset import leaves a mix of old and new game files; removed modules, shaders or DLC survive updates. A different companion ZIP with the same version and file lengths can be accepted.
