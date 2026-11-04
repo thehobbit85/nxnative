@@ -205,14 +205,26 @@ def export(pkg, keys, out):
         captured, cache, dest, xlate_dir = (work / n for n in ('raw', 'cache', 'result', 'translator'))
         for d in (captured, dest, xlate_dir):
             d.mkdir()
+        # Only compiled Metal libraries are shared. The shader/metadata cache
+        # must remain private: a cache hit there skips raw SPIR-V capture and
+        # does not distinguish the wrapper's Vulkan target from Apple's job.
+        cas = work / 'cas'
+        cas.mkdir()
+        metal_cache = out.parent / 'vk-metallib'
+        metal_cache.mkdir(exist_ok=True)
+        (cas / 'metallib').symlink_to(metal_cache.resolve(), target_is_directory=True)
         for src in XLATE.parent.iterdir():
             if src != XLATE:
                 (xlate_dir / src.name).symlink_to(src)
         wrapper = xlate_dir / XLATE.name
         wrapper.write_text('#!/bin/sh\nexec ' + shlex.join([sys.executable, str(Path(__file__).resolve()), '--capture']) + ' "$@"\n')
         wrapper.chmod(0o700)
+        # Reuse compiled Metal output by its content hash, including the normal
+        # Apple build's libraries. Translation and raw SPIR-V capture stay fresh:
+        # the temporary reflection cache must use the Vulkan target's job.
         env = dict(os.environ, XLATE=str(wrapper), WORK=str(work), DMSH_SPV_CAPTURE=str(captured),
-                   DMSH_CAS=str(work / 'cas'), DMSH_PREFILL='', DMSH_TARGETS='mac')
+                   DMSH_CAS=str(cas),
+                   DMSH_PREFILL=str(out.parent / 'cache'), DMSH_TARGETS='mac')
         env.pop('IOSOUT', None)
         keys = sorted(set(keys))
         for i in range(0, len(keys), 512):
