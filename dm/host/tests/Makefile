@@ -317,6 +317,21 @@ $(B)/t_haptics_apple: t_haptics_apple.m ../haptics_apple.m ../haptics_apple.h ..
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_haptics_apple.m ../hle_haptics.c -framework Cocoa -framework GameController -framework CoreHaptics -framework IOKit
 $(B)/t_time: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_time.c
+.PHONY: clock android-clock-build
+run: clock
+clock: $(B)/t_clock
+	$(B)/t_clock wall
+	$(B)/t_clock fixed
+	$(B)/t_clock det
+CLOCK_SRC = t_clock.c t_condvar_stub.c
+CLOCK_HEADERS = ../hle_os.c ../hle_time.c ../hle_thread.c ../hle.h ../dm.h $(GAME_H)
+$(B)/t_clock: $(CLOCK_SRC) $(CLOCK_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_GUEST_CLOCK -I.. $(GINC) -o $@ $(CLOCK_SRC)
+android-clock-build: $(B)/t_clock_android $(B)/t_time_android
+$(B)/t_clock_android: $(CLOCK_SRC) $(CLOCK_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -DDM_TEST_GUEST_CLOCK -I.. -I../../android/compat $(GINC) -o $@ $(CLOCK_SRC)
+$(B)/t_time_android: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $<
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
 # Run a synthetic worker through thread_main, the guest stack switch, the SVC gate and bionic signals.
