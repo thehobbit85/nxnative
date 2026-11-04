@@ -13,6 +13,13 @@ The NSO rewriter (`dm/tools/patch_nso.py`) and its per-build tables (`dm/tools/s
 
 ## Patches across updates
 
+### Checked out-of-line code repairs
+
+- **Symptom:** a verified guest-code defect needs more instructions than fit at the original site, but has no connection to frame pacing.
+- **Cause:** fixed-size `CUTS` cannot hold a conditional repair; using `FRAME_STEP` for it would also enable unrelated frame-step state and host behavior.
+- **Fix:** build-keyed `CODE_STUBS` callbacks use `ctx.site(offset, original_hex)` to check aligned original instructions, reject overlap with existing rewrite sites, cuts and observation gates, and select a nearby patch area. `ctx.here()` and `ctx.emit(word)` assemble the repair there; `ctx.put(offset, words, reason)` replaces exactly the checked range and records it in the module's cuts table. Every checked site must receive a detour. This enables no frame-step feature, and unknown builds receive no repair. The profile registry and generated patch index include these callbacks. The callback author still verifies register liveness, flags, branch range and the repair's semantics.
+- **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#physics), whose actor sentinel requires a conditional lookup guard. Synthetic NSO tests check build gating and original-byte rejection; native ARM64 replay checks the original fault, the sentinel fallback and unchanged valid lookups.
+
 ### Function-matched cuts for unregistered builds
 
 - **Symptom:** an updated game loses a needed cut because its NSO build ID changed, although the relevant code still matches a verified version; the rewriter reports `[RED] function patch ... skipped` when that match cannot be established, and the NSP script ends with `[RED] main: no function patch carries the registered builds' fixes to this build` or `[RED] main: function patches not applied` (Super Smash Bros. Ultimate 13.0.1: a static-initialiser abort in `nninitStartup`, GitHub issue #375).

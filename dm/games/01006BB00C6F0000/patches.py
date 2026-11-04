@@ -1,5 +1,30 @@
 # The Legend of Zelda: Link's Awakening (01006BB00C6F0000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build ID;
-# CUTS, OBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
+# CUTS, OBS, CODE_STUBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
+from nso_asm import B, NOP
+
+
+def actor_priority(ctx):
+    # The camera/system actor type 0xffff is a sentinel, not an entry in the
+    # 88-byte actor metadata table. The original constructor reads beyond main
+    # into whichever mapping follows it. Mac probes observed priority 3 there;
+    # Android's separate mappings fault. Preserve that working priority only for
+    # this sentinel, without changing valid actor metadata. This repairs guest
+    # undefined behavior; the original Switch read has not been measured.
+    ctx.site(0x1c17c, '0829099b08254139')
+    start = ctx.here()
+    for word in (0x52003d0b,  # eor w11,w8,#0xffff (x11 is dead through the epilogue)
+                 0x3400008b,  # cbz w11,default (+16)
+                 0x9b092908,  # madd x8,x8,x9,x10 (original index * 88 + table)
+                 0x39412508): # ldrb w8,[x8,#0x49] (original priority)
+        ctx.emit(word)
+    ctx.emit(B(ctx.here(), 0x1c184))
+    ctx.emit(0x52800068)      # default: mov w8,#3
+    ctx.emit(B(ctx.here(), 0x1c184))
+    ctx.put(0x1c17c, [B(0x1c17c, start), NOP], 'actor priority: no-type sentinel 0xffff uses working Mac priority 3 instead of reading beyond the actor table')
+
+
+CODE_STUBS = {'909e904af78ac1b8deefe97ab2ccdb51': actor_priority}
+
 CUTS = {
   # The Legend of Zelda: Link's Awakening 1.1.0 (v131072) main: the physics step (main+0x15730, main thread) rebuilds each world's PhysX completion task in place
   # (a PxLightCpuTask at world+0xc8) and passes it to simulate. A worker runs it (main+0x10ccf80: fetchResults, world+0x1d8 done = 1, notify, unlock) and then calls its
@@ -17,6 +42,10 @@ CUTS = {
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
+    {'what': 'Actor priority for the no-type sentinel', 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
+     'why': 'The game indexes its actor metadata with 0xffff for camera/system actors; the fallback preserves observed Mac behavior, with exact original bytes checked.',
+     'blocked': 'Other builds need the constructor, sentinel and priority consumer checked before carrying the guard.',
+     'checked': 'Native ARM64 replay: original sentinel faults, guarded sentinel returns 3, 40 valid priorities unchanged; Android opening movie reached.'},
     {'what': 'PhysX completion task release', 'now': 'build', 'goal': 'game', 'purpose': 'race',
      'why': "a lifetime race in the game's own completion task (its release slot serves this one vtable)"},
 ]

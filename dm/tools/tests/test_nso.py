@@ -58,6 +58,38 @@ def flags(d, set_=0, clear=0):
 
 
 class Load(unittest.TestCase):
+    def test_build_stub_detour_is_gated_and_checks_original_bytes(self):
+        words = (0x14000002, 0x1000, 0x52800020, 0xd65f03c0)
+        ro = bytearray(128); ro[:4] = b'MOD0'
+        struct.pack_into('<i', ro, 16, 48)
+        struct.pack_into('<4BIIII', ro, 48, 1, 3, 3, 3, 0, 1, 8, 0)
+        image = make_nso((struct.pack('<4I', *words), ro, bytes(64)), compress=(0,0,0))
+        bid = image[0x40:0x50].hex()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); profile = root/'profiles'/'stub-fixture'; profile.mkdir(parents=True)
+            patch = profile/'patches.py'
+            patch.write_text("from nso_asm import B\ndef stub(c):\n"
+                             " c.site(8, '20008052')\n start=c.here()\n c.emit(0x528000e0)\n"
+                             " c.emit(B(c.here(),12))\n c.put(8,[B(8,start)],'fixture detour')\n"
+                             f"CODE_STUBS={{'{bid}':stub}}\n")
+            source=root/'input'; source.write_bytes(image)
+            env=dict(os.environ,DM_GAME='0100633007D48000',DM_GAMES_DIR=str(root/'profiles'),DM_REWRITE_J='1',PYTHONDONTWRITEBYTECODE='1')
+            out=root/'out'; out.mkdir()
+            command=[sys.executable,str(REPO/'dm/tools/patch_nso.py'),str(source),str(out),'fixture','--thread-slots','android']
+            subprocess.run(command,env=env,capture_output=True,text=True,check=True)
+            result=(out/'fixture.patched.bin').read_bytes(); branch=struct.unpack_from('<I',result,8)[0]
+            self.assertEqual(branch>>26,0b000101)
+            target=8+((branch&0x3ffffff)^0x2000000)*4-0x8000000
+            self.assertEqual(struct.unpack_from('<I',result,target)[0],0x528000e0)
+            self.assertIn('fixture detour',(out/'fixture.cuts.tsv').read_text())
+            patch.write_text(patch.read_text().replace('20008052','40008052'))
+            fail=subprocess.run(command,env=env,capture_output=True,text=True)
+            self.assertNotEqual(fail.returncode,0)
+            self.assertIn('original bytes mismatch',fail.stderr)
+            image[0x40]^=0xff; source.write_bytes(image)
+            subprocess.run(command,env=env,capture_output=True,text=True,check=True)
+            self.assertEqual(struct.unpack_from('<I',(out/'fixture.patched.bin').read_bytes(),8)[0],words[2])
+
     def test_rewrite_thread_slots(self):
         # A MOD0 with one unwind entry. Cover ordinary slot accesses and TLS operands
         # that name the virtual x18 or the architectural zero register.
