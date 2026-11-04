@@ -2,8 +2,8 @@
 // Shaders are the SPIR-V the Metal chain translates (dm/android/tools/spv_android.py: <key>.spv + <key>.vk.txt in DM_VK_DIR), every resource in set 0 with a binding of its own; here the vertex
 // stage keeps set 0 and the fragment stage is moved to set 1 (its DescriptorSet decorations rewritten at load), so one pipeline layout holds both.
 // Memory: Vulkan cannot use the game's memory pools in place (no VK_EXT_external_memory_host on Mali), so what a draw reads from them -- uniform buffers, vertex and index data, the shader's
-// own constants -- is copied into the submission's ring buffer when the draw is recorded. The command list is walked in order on the CPU and its in-order writes (inline uniform updates,
-// buffer copies and fills) are applied to guest memory where they stand, so each draw copies what the GPU would have read at that point. Textures are Vulkan images: packaged ones
+// own constants -- is copied into the submission's ring buffer when the draw is recorded. GPU-written ranges, copies, fills and inline updates retain ordered ring backing;
+// later consumers compose overlapping writes on the GPU, and completion copies publish the final bytes to guest memory. Textures are Vulkan images: packaged ones
 // (block-linear in the pool) are deswizzled and uploaded at first use; render targets, copies and clears stay on the GPU. Every image lives in VK_IMAGE_LAYOUT_GENERAL, and passes and copies
 // are separated by full memory barriers: simple and correct first, faster later.
 // Event values, counter reports and texture-to-buffer copies reach guest memory when the GPU has finished the submission (the completion thread), as on the Metal backend.
@@ -157,18 +157,27 @@ static uint64_t gpu_ticks(void) {
 // later work recorded from the same range is bound to that ring range itself instead of a fresh copy of the guest's stale bytes (gw_find); the entry dies with the ring
 // (ctx_complete, when the bytes are back in guest memory)
 typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t fence; } gw_t;
-enum { NGW = 512 };
-static gw_t g_gw[NGW]; static int g_ngw; static pthread_mutex_t g_gwmu = PTHREAD_MUTEX_INITIALIZER;
+static gw_t *g_gw; static size_t g_ngw, g_cgw; static pthread_mutex_t g_gwmu = PTHREAD_MUTEX_INITIALIZER;
+static int overlaps(uint64_t a, uint64_t an, uint64_t b, uint64_t bn) {
+    return an && bn && (a < b ? b - a < an : a - b < bn);
+}
 static void gw_add(uint64_t addr, uint64_t size, VkBuffer buf, VkDeviceSize off, uint8_t *p, uint64_t fence) {
     pthread_mutex_lock(&g_gwmu);
-    for (int i = 0; i < g_ngw; i++) if (g_gw[i].addr == addr && g_gw[i].size == size) {
+    for (size_t i = 0; i < g_ngw; i++) if (g_gw[i].addr == addr && g_gw[i].size == size) {
         --g_ngw;
         memmove(g_gw + i, g_gw + i + 1, (size_t)(g_ngw - i) * sizeof *g_gw);
         break;
     }   // keep overlapping writes in submission order
-    if (g_ngw == NGW) { RED_ONCE(62, "more than %d GPU-written buffer ranges in flight: the oldest is forgotten", NGW); memmove(g_gw, g_gw + 1, (NGW - 1) * sizeof *g_gw); g_ngw--; }
+    if (g_ngw == g_cgw) {
+        if (g_cgw > SIZE_MAX / 2 / sizeof *g_gw) die("Vulkan: GPU write tracking size overflow");
+        size_t capacity = g_cgw ? g_cgw * 2 : 512;
+        gw_t *next = realloc(g_gw, (size_t)capacity * sizeof *next);
+        if (!next) die("Vulkan: cannot track live GPU buffer writes");
+        g_gw = next; g_cgw = capacity;
+    }
     g_gw[g_ngw++] = (gw_t){addr, size, buf, off, p, fence};
     pthread_mutex_unlock(&g_gwmu);
+    g_wgen++;
 }
 // The ring range holding what the GPU wrote at [addr, addr + size), when an entry of the submission being recorded covers it and the offset in it keeps `align`. An entry
 // of an earlier submission still in flight is waited for instead (its ring may be reused before this submission runs; once it completes the bytes are in guest memory and
@@ -177,21 +186,35 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns);
 static int gw_find(uint64_t addr, uint64_t size, VkDeviceSize align, VkBuffer *buf, VkDeviceSize *off, uint8_t **p) {
     int hit = 0; uint64_t wait = 0;
     pthread_mutex_lock(&g_gwmu);
-    for (int i = g_ngw - 1; i >= 0 && !hit && !wait; i--) {
+    for (size_t i = g_ngw; i-- > 0 && !hit && !wait;) {
         const gw_t *e = &g_gw[i];
-        if (addr >= e->addr + e->size || addr + size <= e->addr) continue;
+        if (!overlaps(addr, size, e->addr, e->size)) continue;
         if (e->fence != g_fence + 1) { wait = e->fence; break; }
-        if (addr < e->addr || addr + size > e->addr + e->size || (e->off + (addr - e->addr)) % align) { RED_ONCE(63, "a read overlaps a GPU-written buffer range of this submission without fitting in it: read from guest memory, which is stale until the write completes"); break; }
+        if (addr < e->addr || size > e->size - (addr - e->addr) || (e->off + (addr - e->addr)) % align) break; // copy_in composes partial overlaps
         *buf = e->buf; *off = e->off + (addr - e->addr); if (p) *p = e->p + (addr - e->addr); hit = 1;
     }
     pthread_mutex_unlock(&g_gwmu);
     if (wait) { static _Atomic uint64_t n; if (!atomic_fetch_add(&n, 1)) LOG("vk: a GPU-written buffer of an earlier submission is read: waiting for that submission (logged once)"); mtl_wait(wait, UINT64_MAX); }
     return hit;
 }
+// Prior submissions must finish before their CPU bytes are snapshotted or
+// overwritten. Their ring storage is recycled independently of this submission.
+static void gw_wait_prior(uint64_t addr, uint64_t size) {
+    uint64_t wait = 0;
+    pthread_mutex_lock(&g_gwmu);
+    for (size_t i = 0; i < g_ngw; i++) if (g_gw[i].fence != g_fence + 1 &&
+            overlaps(addr, size, g_gw[i].addr, g_gw[i].size) && g_gw[i].fence > wait) wait = g_gw[i].fence;
+    pthread_mutex_unlock(&g_gwmu);
+    if (wait) mtl_wait(wait, UINT64_MAX);
+}
+static void buffer_written(uint64_t addr, uint64_t size, VkBuffer buffer, VkDeviceSize offset, uint8_t *mapped) {
+    gw_add(addr, size, buffer, offset, mapped, g_fence + 1);
+    post_add((post_t){3, (void *)(uintptr_t)addr, 0, 0, 0, 0, mapped, size});
+}
 static void gw_expire(uint64_t fence) {   // completion: the submission's writes are in guest memory now, and its rings go
     pthread_mutex_lock(&g_gwmu);
-    int keep = 0;
-    for (int i = 0; i < g_ngw; ++i) if (g_gw[i].fence > fence) g_gw[keep++] = g_gw[i];
+    size_t keep = 0;
+    for (size_t i = 0; i < g_ngw; ++i) if (g_gw[i].fence > fence) g_gw[keep++] = g_gw[i];
     g_ngw = keep;
     pthread_mutex_unlock(&g_gwmu);
 }
@@ -1279,7 +1302,7 @@ static void lin_writeback(vtex *v) {
     VkDeviceSize o = ring_alloc(n, 16); if (o == VK_WHOLE_SIZE) return;
     VkBufferImageCopy bc = {o, v->linrow / v->linbpb, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {v->w, v->h, 1}};
     vkCmdCopyImageToBuffer(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, C->ring, 1, &bc);
-    post_add((post_t){3, (void *)v->mem, 0, 0, 0, 0, C->ringp + o, n});
+    buffer_written((uintptr_t)v->mem, n, C->ring, o, C->ringp + o);
     if (!g_lin_wb++) LOG("vk: linear render target %ux%u format %d goes back to its storage after each pass (serial %llu)", v->w, v->h, (int)v->f.f, (unsigned long long)v->serial);
 }
 static int g_pass_image_writes;
@@ -1465,10 +1488,34 @@ typedef struct { uint64_t addr, size, gen; VkDeviceSize off; } dcopy;
 #define NDC 4096
 static dcopy g_dc[NDC]; static int g_ndc;
 static VkDeviceSize copy_in(uint64_t addr, uint64_t size, VkDeviceSize align) {   // guest memory → ring, reused when the same range is asked for again unchanged (hashed by address)
+    gw_wait_prior(addr, size);
     dcopy *e = &g_dc[(addr >> 4 ^ addr >> 13) % NDC];
-    if (e->addr == addr && e->size >= size && e->gen == g_wgen && e->gen) return e->off;
+    if (e->addr == addr && e->size >= size && e->gen == g_wgen && e->gen && !(e->off % align)) return e->off;
+    int gpu = 0;
+    pthread_mutex_lock(&g_gwmu);
+    for (size_t i = 0; i < g_ngw; i++) gpu |= overlaps(addr, size, g_gw[i].addr, g_gw[i].size);
+    pthread_mutex_unlock(&g_gwmu);
+    if (gpu) pass_end();
     VkDeviceSize o = ring_put((const void *)(uintptr_t)addr, size, align);
-    if (o != VK_WHOLE_SIZE) *e = (dcopy){addr, size, g_wgen, o};
+    if (o == VK_WHOLE_SIZE) return o;
+    if (gpu) {
+        barrier_all(C->cb);
+        pthread_mutex_lock(&g_gwmu);
+        // Copy in write order. Each later range overwrites only its intersection;
+        // untouched bytes retain the CPU snapshot made above.
+        for (size_t i = 0; i < g_ngw; i++) {
+            const gw_t *w = &g_gw[i];
+            if (!overlaps(addr, size, w->addr, w->size)) continue;
+            uint64_t lo = addr > w->addr ? addr : w->addr;
+            uint64_t n = size - (lo - addr), wn = w->size - (lo - w->addr);
+            if (n > wn) n = wn;
+            VkBufferCopy region = {w->off + lo - w->addr, o + lo - addr, n};
+            vkCmdCopyBuffer(C->cb, w->buf, C->ring, 1, &region);
+            barrier_all(C->cb); // later intersections may write these bytes again
+        }
+        pthread_mutex_unlock(&g_gwmu);
+    }
+    *e = (dcopy){addr, size, g_wgen, o};
     return o;
 }
 static uint64_t g_tex_miss[4];   // texture slots read as the black dummy: 0 no handle bound, 1 handle not registered, 2 texture not created, 3 no view (logged with the frame stats)
@@ -1723,6 +1770,11 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
 static _Atomic uint64_t g_wait_ns, g_rec_ns, g_pwait_ns;   // time the submit thread waited for the GPU, spent recording, and the present waited for its slot
 static uint64_t g_stat_draws, g_stat_skip, g_skip_why[8];   // why: 0 no program, 1 shader missing / rejected, 2 no render target, 3 indirect, 4 primitive, 5 pipeline, 6 descriptors
 #define SKIP(w) do { g_stat_skip++; g_skip_why[w]++; return; } while (0)
+static int draw_begin(void) {
+    if (!pass_begin()) return 0;
+    for (int a = 0; a < P.n; a++) if (S.chmask.mask >> (4 * a) & 0xf) P.cwr[a] = P.cdrawn[a] = 1;
+    return 1;
+}
 static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (!S.bst[0]) SKIP(0);
     shader_t *vs = NULL, *fs = NULL;
@@ -1758,7 +1810,6 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     VkDescriptorSet sets[2] = {write_set(vs, 0), fs ? write_set(fs, 1) : VK_NULL_HANDLE};
     g_fb_n = 0;
     if (!sets[0] || (fs && !sets[1])) SKIP(6);
-    for (int a = 0; a < P.n; a++) if (S.chmask.mask >> (4 * a) & 0xf) P.cwr[a] = P.cdrawn[a] = 1;
     VkCommandBuffer cb = C->cb;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, fs ? 2 : 1, sets, 0, NULL);
@@ -1825,8 +1876,9 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
             uint32_t *ix = (uint32_t *)(C->ringp + o);
             for (uint32_t q = 0; q < nq; q++) { uint32_t b = q * 4; uint32_t v[6] = {b, b + 1, b + 2, b, b + 2, b + 3}; memcpy(ix + 6 * q, v, 24); }
             vkCmdBindIndexBuffer(cb, C->ring, o, VK_INDEX_TYPE_UINT32);
+            if (!draw_begin()) SKIP(2);
             vkCmdDrawIndexed(cb, nq * 6, inst, 0, (int32_t)(dw->first - vlo), (uint32_t)dw->base_instance);
-        } else vkCmdDraw(cb, (uint32_t)dw->count, inst, (uint32_t)(dw->first - vlo), (uint32_t)dw->base_instance);
+        } else { if (!draw_begin()) SKIP(2); vkCmdDraw(cb, (uint32_t)dw->count, inst, (uint32_t)(dw->first - vlo), (uint32_t)dw->base_instance); }
     } else {
         int32_t voff = (int32_t)(di->base_vertex - vlo);
         if (prim == NVN_DRAW_PRIMITIVE_QUADS || (isz == 1 && !g_has_u8)) {   // quads, or 8-bit indices without the extension: widened to 32 bits on the CPU
@@ -1836,10 +1888,12 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
             if (nq) for (uint32_t q = 0; q < nq; q++) { uint32_t b = 4 * q; uint32_t v[6] = {IDX(b), IDX(b + 1), IDX(b + 2), IDX(b), IDX(b + 2), IDX(b + 3)}; memcpy(ix + 6 * q, v, 24); }
             else for (uint32_t i = 0; i < n; i++) ix[i] = IDX(i);
             vkCmdBindIndexBuffer(cb, C->ring, o, VK_INDEX_TYPE_UINT32);
+            if (!draw_begin()) SKIP(2);
             vkCmdDrawIndexed(cb, out, inst, 0, voff, (uint32_t)di->base_instance);
         } else {
             VkDeviceSize o = copy_in(di->ibuf, (uint64_t)di->count * isz, 16); if (o == VK_WHOLE_SIZE) return;
             vkCmdBindIndexBuffer(cb, C->ring, o, isz == 1 ? VK_INDEX_TYPE_UINT8_EXT : isz == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+            if (!draw_begin()) SKIP(2);
             vkCmdDrawIndexed(cb, (uint32_t)di->count, inst, 0, voff, (uint32_t)di->base_instance);
         }
     }
@@ -1856,7 +1910,7 @@ static VkDeviceSize prepare_dispatch_indirect(uint64_t addr, VkBuffer *buffer) {
     struct { VkBuffer buf; VkDeviceSize off; } source[BYTES] = {0};
     uint64_t wait = 0;
     pthread_mutex_lock(&g_gwmu);
-    for (int i = 0; i < g_ngw; ++i) {
+    for (size_t i = 0; i < g_ngw; ++i) {
         const gw_t *w = &g_gw[i];
         if (addr >= w->addr + w->size || w->addr >= addr + BYTES) continue;
         if (w->fence != g_fence + 1) {
@@ -1926,8 +1980,7 @@ static void dispatch(const p_dispatch *d) {
     barrier_all(C->cb);
     for (int i = 0; i < g_nwb; i++) {
         gw_t *w = &g_wb[i];
-        gw_add(w->addr, w->size, w->buf, w->off, w->p, g_fence + 1);   // this submission's fence value (mtl_sub_commit assigns g_fence + 1)
-        post_add((post_t){3, (void *)(uintptr_t)w->addr, 0, 0, 0, 0, w->p, w->size});
+        buffer_written(w->addr, w->size, w->buf, w->off, w->p);
     }
     g_stat_draws++;
 }
@@ -2090,11 +2143,11 @@ static void copy_t2b(const p_copy_b2t *c) {
     barrier_all(C->cb);
     // Only copied bytes may overwrite the guest buffer. Row/image padding belongs to the caller.
     uint8_t *dst = (uint8_t *)(uintptr_t)c->src, *src = C->ringp + off;
-    if (width == row && image == slice) post_add((post_t){3, dst, 0, 0, 0, 0, src, slice * nz});
+    if (width == row && image == slice) buffer_written((uintptr_t)dst, slice * nz, C->ring, off, src);
     else for (uint32_t z = 0; z < nz; ++z) {
-        if (width == row) post_add((post_t){3, dst + z * image, 0, 0, 0, 0, src + z * slice, slice});
+        if (width == row) buffer_written((uintptr_t)(dst + z * image), slice, C->ring, off + z * slice, src + z * slice);
         else for (size_t y = 0; y < rows; ++y)
-            post_add((post_t){3, dst + z * image + y * row, 0, 0, 0, 0, src + z * slice + y * width, width});
+            buffer_written((uintptr_t)(dst + z * image + y * row), width, C->ring, off + z * slice + y * width, src + z * slice + y * width);
     }
 }
 static void clear_tex(const p_clear_tex *c) {
@@ -2144,7 +2197,31 @@ void mtl_sub_begin(void) {
 }
 void mtl_sub_index(const uint64_t *h, int n) { (void)h; (void)n; }
 void mtl_exec_rest(const uint64_t *handles, int n) { (void)handles; (void)n; }
-void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) { memmove((void *)dst, (const void *)src, n); g_wgen++; }
+void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
+    if (!n) return;
+    pass_end();
+    g_wgen++; // A copy destination must not alias a cached source snapshot.
+    VkDeviceSize offset = copy_in(src, n, 16);
+    if (offset != VK_WHOLE_SIZE) buffer_written(dst, n, C->ring, offset, C->ringp + offset);
+}
+static void buffer_update(uint64_t addr, const void *data, uint64_t n) {
+    if (!n) return;
+    gw_wait_prior(addr, n);
+    VkDeviceSize offset = ring_put(data, n, 16);
+    if (offset == VK_WHOLE_SIZE) return;
+    // Preserve CPU-side descriptor-handle decoding for inline updates. The
+    // ordered completion copy also overrides older GPU writes to these bytes.
+    memcpy((void *)(uintptr_t)addr, data, n);
+    buffer_written(addr, n, C->ring, offset, C->ringp + offset);
+}
+static void buffer_clear(const p_clear_buf *clear) {
+    uint64_t n = clear->size & ~3ull;
+    if (!n) return;
+    VkDeviceSize offset = ring_alloc(n, 16);
+    if (offset == VK_WHOLE_SIZE) return;
+    for (uint64_t i = 0; i < n; i += 4) memcpy(C->ringp + offset + i, &clear->value, 4);
+    buffer_written(clear->addr, n, C->ring, offset, C->ringp + offset);
+}
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post_add((post_t){1, (void *)val, mode, v}); }
 void mtl_sub_counter(uint64_t addr, uint32_t type) { post_add((post_t){2, NULL, 0, 0, addr, type}); }
 static void mtl_exec_(const uint8_t *p);
@@ -2206,9 +2283,9 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4); mtl_sub_event(val, m, v); break; }
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); mtl_sub_counter(ad, (uint32_t)t); break; }
             case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_fence + 1; s->fenced = 1; break; }
-            case OP_CLEAR_BUF: { const p_clear_buf *cb = (const p_clear_buf *)a; for (uint64_t o = 0; o + 4 <= cb->size; o += 4) memcpy((uint8_t *)cb->addr + o, &cb->value, 4); g_wgen++; break; }
+            case OP_CLEAR_BUF: buffer_clear((const p_clear_buf *)a); break;
             case OP_COPY_B2B: { uint64_t s, d, n; memcpy(&s, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); mtl_sub_copy(s, d, n); break; }
-            case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, a + 8, 8); memcpy((void *)d, a + 16, n); g_wgen++; break; }
+            case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, a + 8, 8); buffer_update(d, a + 16, n); break; }
             case OP_SET_RT: set_rt((const p_set_rt *)a); break;
             case OP_SET_TEX_POOL: S.tex_base = nvn_dpool_base(((const p_set_pool *)a)->pool, 1); break;
             case OP_SET_SAMP_POOL: S.samp_base = nvn_dpool_base(((const p_set_pool *)a)->pool, 0); break;

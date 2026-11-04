@@ -1,0 +1,4 @@
+stage cs
+tg 1 1 1
+b 0 ssbo 1 sbuf 0 -1 - -1
+b 1 ssbo 1 sbuf 1 -1 - -1
