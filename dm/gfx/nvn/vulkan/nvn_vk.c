@@ -1159,7 +1159,8 @@ static struct {
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
     float blend_color[4]; int64_t copy_stride, copy_img_stride;
 } S;
-static int g_depth_zero = 1, g_origin_ll;
+static int g_depth_zero = 1, g_queue_origin_ll;
+static _Atomic int g_origin_ll;
 static struct {   // the current render targets and the open dynamic rendering; clears that come before the pass's first draw become its load actions (a tiler then never reads the old contents)
     int n; vtex *ct[8]; VkImageView cv[8]; vtex *dt; VkImageView dv; uint32_t w, h; int open;
     uint32_t clv[8], cly[8]; uint8_t cwr[8], cdrawn[8];   // each colour attachment's level and layer, and whether a draw wrote it since its last same-pass snapshot (fb_prepare)
@@ -1569,7 +1570,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     int prim = dw ? dw->prim : di->prim;
     if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP || prim == NVN_DRAW_PRIMITIVE_PATCHES) { RED_ONCE(31, "primitive %d not implemented yet", prim); SKIP(4); }
     pso_key k; memset(&k, 0, sizeof k);
-    k.origin_ll = g_origin_ll;
+    k.origin_ll = g_queue_origin_ll;
     k.vs = vs; k.fs = fs; k.prim = prim; k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
     k.nc = P.n; for (int i = 0; i < P.n; i++) { k.cf[i] = P.ct[i] && P.cv[i] ? P.ct[i]->f.f : VK_FORMAT_UNDEFINED; k.blend[i] = S.blend[i]; }
     k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.ct[0] ? 1 : 1;
@@ -2336,7 +2337,7 @@ void mtl_set_depth_zero(int on) {   // vertex shaders loaded from here on follow
     g_depth_zero = on;
 }
 void mtl_set_origin_lower_left(int on) { g_origin_ll = on; }
-void mtl_set_queue_origin_lower_left(int on) { g_origin_ll = on; }
+void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_frame(uint64_t f) { (void)f; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {

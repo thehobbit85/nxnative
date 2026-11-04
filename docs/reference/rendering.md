@@ -609,6 +609,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `queue_t.origin_ll` captures the device origin in `nvnQueueInitialize`. Each submission selects that queue's raster origin under the submission lock. Metal winding uses this captured origin; viewport direction and presentation keep using the device origin. The full-coverage proof also accounts for the difference between these origins, and for a negative-Y viewport swizzle.
 - **Check:** `t_queue_origin` alternates two queues created with different origins on one device. GPU readback checks CW/CCW triangles, both current device origins, every cull mode, `front_facing`, negative-Y swizzles and the full-coverage proof: 389 checks pass with direct and deferred Metal encoding; restoring the previous winding expression fails 48. The complete Metal suite passes. Mario Wonder's full smoke route passes with the fix.
 - **Found on:** [Xenoblade Chronicles 2](../../dm/games/0100E95004038000/README.md#rendering), with native SDK initialization evidence and the comparison with Mario Wonder recorded there.
+- **Android integration:** Vulkan also keeps device viewport origin separate from queue raster origin, and includes the latter in its pipeline cache key. The synthetic `dm/gfx/nvn/vulkan/tests/t_replay.c` fixture alternates both origins and checks all pixels of a half-height viewport; sharing the two variables fails the check.
 
 ### The residency set committed before a present
 
