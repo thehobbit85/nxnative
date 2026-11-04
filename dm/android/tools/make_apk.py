@@ -223,7 +223,10 @@ def deploy(a):
         for parent, sources in groups.items():
             for offset in range(0, len(sources), 64):
                 run(adb, '-s', a.serial, 'push', *sources[offset:offset + 64], parent + '/', stdout=subprocess.DEVNULL)
-    run(adb, '-s', a.serial, 'shell', f'set -e; for d in dm vk font romfs aoc; do rm -rf {ext}/$d; mv {stage}/$d {ext}/$d; done; rmdir {stage}')
+    # ADB-created directories may remain shell-owned 0770 on emulators. The app
+    # has a different UID; it needs read/traverse access inside its scoped folder.
+    # Touch only staged game assets, never internal saves or external settings.
+    run(adb, '-s', a.serial, 'shell', f'set -e; chmod -R a+rX {stage}; for d in dm vk font romfs aoc; do rm -rf {ext}/$d; mv {stage}/$d {ext}/$d; done; rmdir {stage}')
     print(f'game files in {ext}')
 
 def main(argv=None):

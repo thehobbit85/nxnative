@@ -40,6 +40,14 @@
 
 ## Build tools
 
+### Android staged assets are unreadable by the app
+
+- **Symptom:** the Android host aborts opening `dm/main.fixups.tsv` although ADB lists and reads the deployed file.
+- **Cause:** on the ARM64 API 35 emulator, ADB creates shell-owned directories with mode 0770; the app has another UID and cannot traverse them. Renaming the staged directories does not change their ownership or access bits.
+- **Fix:** `make_apk.py --deploy` grants read access and directory traversal (`a+rX`) to the staged game assets before replacing the live game roots. It changes neither internal saves nor existing external settings, and requires no root access. The assets remain inside the app's scoped external folder.
+- **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md), first Android deployment. After correcting these permissions, module loading succeeds and execution reaches `nnMain`; gameplay is a separate check.
+- **Check:** `dm/android/tests/test_packaging.py` runs the actual deployment shell steps on permission-restricted temporary files for both local and on-device sources, checking final readability/traversal and preservation of an external settings file. Both cases fail before the fix and pass afterward.
+
 ### Android assets and large RomFS images
 
 - **Symptom:** a single large RomFS image can overrun Android's APK size limit; a directory-format update can keep loading an older image. Fresh Android builds can also omit shared fonts, and packaged DLC is not enumerated.

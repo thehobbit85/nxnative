@@ -5,6 +5,9 @@ import struct
 import io
 import zipfile
 import tempfile
+import shutil
+import subprocess
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +18,40 @@ spec.loader.exec_module(pack)
 
 
 class Packaging(unittest.TestCase):
+    def test_deploy_assets_remain_readable_outside_adb_owner(self):
+        # Run the deployment's shell steps on a real temporary tree. Android's
+        # shell-owned 0770 directories must be traversable by the separate app UID.
+        for remote in (False, True):
+            with self.subTest(remote=remote), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); ext = root / 'external'; ext.mkdir()
+                source = root / 'source'; source.mkdir()
+                for name in ('dm', 'romfs', 'vk'):
+                    (source / name).mkdir(mode=0o700)
+                    (source / name / 'asset').write_bytes(b'fixture')
+                    (source / name / 'asset').chmod(0o600)
+                sentinel = ext / 'env.txt'; sentinel.write_bytes(b'keep'); sentinel.chmod(0o600)
+                device = '/sdcard/Android/data/com.nxnative.t0100633007d48000/files'
+                def run(*args, **kwargs):
+                    if args[3] == 'shell':
+                        command = args[4].replace(device, str(ext))
+                        if command.startswith('am force-stop '): return
+                        subprocess.run(['sh', '-c', 'umask 007; ' + command], check=True)
+                    else:
+                        self.assertEqual(args[3], 'push')
+                        destination = args[-1].replace(device, str(ext))
+                        for path in args[4:-1]: shutil.copy(path, destination)
+                a = SimpleNamespace(sdk=None, id='0100633007D48000', test=False, serial='emulator-fixture',
+                                    from_device=str(source) if remote else None, build='', patched=None, romfs=None, aoc=None)
+                files = [(str(p.relative_to(source)), str(p)) for p in source.rglob('asset')]
+                with patch.object(pack, 'run', side_effect=run), patch.object(pack, 'game_files', return_value=files):
+                    pack.deploy(a)
+                for path in ext.rglob('*'):
+                    if path == sentinel: continue
+                    self.assertEqual(path.stat().st_mode & (0o5 if path.is_dir() else 0o4),
+                                     0o5 if path.is_dir() else 0o4, str(path))
+                self.assertEqual(sentinel.read_bytes(), b'keep')
+                self.assertEqual(sentinel.stat().st_mode & 0o777, 0o600)
+
     def test_large_image_spills_to_bounded_data_chunks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); src = root / 'RomFS.img'; src.write_bytes(b'abcde' * 1000000)
