@@ -6,12 +6,14 @@ and an APK made with --bundle --test. Artifacts contain no commercial game data.
 """
 from pathlib import Path
 import argparse
+import hashlib
 import json
 import os
 import re
 import shlex
 import subprocess
 import time
+import zipfile
 
 PACKAGE = 'com.nxnative.t0100633007d48000.test'
 EXTERNAL = '/sdcard/Android/data/' + PACKAGE + '/files'
@@ -25,6 +27,8 @@ def main():
     a = p.parse_args()
     if not a.serial.startswith('emulator-'): p.error('this automated install test is restricted to an emulator')
     a.output.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(a.apk) as apk:
+        assets_id = hashlib.sha256(apk.read('assets/game/files.txt')).hexdigest()
     base = [a.adb, '-s', a.serial]
 
     def adb(*args, binary=False):
@@ -46,7 +50,7 @@ def main():
     version = match.group(1)
     adb('shell', 'am', 'force-stop', PACKAGE)
     adb('shell', 'am', 'start', '-W', '-n', PACKAGE + '/com.nxnative.MenuActivity')
-    wait_for(lambda: shell('cat ' + EXTERNAL + '/.unpacked 2>/dev/null || true').strip() == version, 'bundled assets installed')
+    wait_for(lambda: shell('cat ' + EXTERNAL + '/.unpacked 2>/dev/null || true').strip() == assets_id, 'bundled assets installed')
     shell("printf 'DM_DBG=1\\n' > " + EXTERNAL + '/env.txt')
 
     def start_guest():

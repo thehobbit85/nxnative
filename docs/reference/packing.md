@@ -62,6 +62,13 @@
 - **Fix:** reserve a conservative bound before adding each file, spill oversized data into bounded chunks in a ZIP64-capable sidecar, and reconstruct chunks with offset and length checks. Remove the old image only after a directory update completes. Prepare both shared fonts and set the shared DLC path. Keep application title IDs distinct from aliased build-profile IDs so their installed data cannot collide.
 - **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), with synthetic large-file, image-to-directory, font and DLC checks. Java reconstruction also runs on the Android emulator with a forced-ZIP64 fixture; this does not claim a full multi-gigabyte sidecar UI import was tested.
 
+### Interrupted Android asset updates
+
+- **Symptom:** a failed or interrupted APK asset import leaves a mix of old and new game files; removed modules, shaders or DLC survive updates. A different companion ZIP with the same version and file lengths can be accepted.
+- **Cause:** the menu unpacked directly over live external game roots and used only the APK version code as its completion marker. Companion identity and length checks did not identify the contents of each asset.
+- **Fix:** the packer adds streamed SHA-256 digests to the asset manifest. The menu verifies bundled pieces and companion chunks into `.nx-install`, keeping the live roots until every asset is complete. A rename journal in `.nx-previous` records the original roots before replacement; recovery restores them after an interrupted commit. The manifest identity moves last as `.unpacked`, after which recovery only finishes cleanup. All five managed roots are replaced, so removed files disappear. Settings, logs and internal saves stay outside the transaction. A pending companion resumes only for the same manifest, independently of display and install versions.
+- **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic installer fixtures. `AssetInstallTest` interrupts each rename and repeats recovery; `GameManifestTest` rejects a same-size wrong payload. These checks cover process interruption and filesystem errors, not sudden power loss of the storage device.
+
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
 
 - **Symptom:** the first extraction stops with `nx_extract exit code 131` and `.NET location: Not found`, even though `dotnet` is on `PATH`. The shader translator can fail the same way.

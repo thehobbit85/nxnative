@@ -118,12 +118,14 @@ def build(a):
                         dz = archives.enter_context(zipfile.ZipFile(data_path, 'w', zipfile.ZIP_DEFLATED, allowZip64=True))
                         dz.writestr('nxdatos.txt', f'{package(a.id, a.test)}\t{vc}\n')
                     if dz is not None:
-                        write_data_file(dz, rel, src); listing.append(f'{rel}\t{os.path.getsize(src)}\t=d'); dn += 1; dbytes += os.path.getsize(src); continue
-                    names = []
+                        digest = write_data_file(dz, rel, src)
+                        listing.append(f'{rel}\t{os.path.getsize(src)}\t=d\t{digest}'); dn += 1; dbytes += os.path.getsize(src); continue
+                    names = []; digest = hashlib.sha256()
                     for piece in asset_pieces(src):
+                        digest.update(piece)
                         k = hashlib.sha1(piece).hexdigest()[:24]; names.append(k)
                         if k not in stored: stored.add(k); z.writestr(zipfile.ZipInfo('assets/game/p/' + k, (2020, 1, 1, 0, 0, 0)), piece, zipfile.ZIP_DEFLATED); raw += len(piece)
-                    listing.append(f'{rel}\t{os.path.getsize(src)}\t' + ' '.join(names))
+                    listing.append(f'{rel}\t{os.path.getsize(src)}\t' + ' '.join(names) + '\t' + digest.hexdigest())
                 z.writestr('assets/game/files.txt', '\n'.join(listing) + '\n')
                 print(f'game: {len(listing)} files, {len(stored)} pieces, {raw / 1e9:.2f} GB stored once')
                 if dz is not None:
@@ -178,12 +180,15 @@ def needs_data_archive(apk, src, limit):
 
 
 def write_data_file(archive, rel, src):
+    digest = hashlib.sha256()
     with open(src, 'rb') as stream:
         offset = 0
         while chunk := stream.read(2 << 20):
+            digest.update(chunk)
             archive.writestr(f'{rel}.nxpart/{offset:016x}', chunk)
             offset += len(chunk)
         if not offset: archive.writestr(rel, b'')
+    return digest.hexdigest()
 
 
 def asset_pieces(src):
