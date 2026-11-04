@@ -823,6 +823,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D All-Stars: Super Mario 64](../../dm/games/010049900F546001/README.md) : command 3 at boot turns 4,235 precompiled MIPS blocks into 14.2 MB of code in 27 ms; command 4 compiles a handful of blocks in play. Its code needs nothing from the rewriter (no x18, SVC, system register or PC-relative literal in 3.55 million instructions).
 
 
+### Sanitizer padding corrupts registration table iteration
+
+- **Symptom:** an AddressSanitizer build reports a global-buffer-overflow while walking `swforce`, or treats padding between service records as a function/name pointer.
+- **Cause:** ASan adds redzones around individual global variables. The host's linker sections are contiguous record tables; inserted gaps break their size-based iteration even though the service calls themselves pass.
+- **Fix:** `DM_SECTION` marks only immutable registration records with `no_sanitize("address")`, preserving their linker layout. Implementations, ordinary globals, heap and stack remain instrumented. This uses Clang's [documented global-variable attribute](https://clang.llvm.org/docs/AddressSanitizer.html#disabling-instrumentation-with-attribute-no-sanitize-address).
+- **Found on:** the synthetic account/Mii registration census in `dm/host/tests/t_account_mii.c`, not a commercial-game crash.
+- **Check:** run `account-mii`, `symbols` and `system-event` with `SAN=-fsanitize=address`; all iterate real linker-produced registrations. Normal Mac and Android runs remain required.
+
 ### JIT plugin reload loses initial data
 
 - **Symptom:** a second `CreateJitEnvironment` after `DestroyJitEnvironment` crashes in `nro_load_alone`, or the plugin retains bss state from its previous environment.

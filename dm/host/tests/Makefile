@@ -99,6 +99,17 @@ symbols: $(B)/t_symbols
 android-symbols-build: $(B)/t_symbols_android
 $(B)/t_symbols_android: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h ../android_text.h ../../android/compat/sha256.c $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $< ../../android/compat/sha256.c
+.PHONY: account-mii android-account-mii-build
+run: account-mii
+account-mii: $(B)/t_account_mii
+	$(B)/t_account_mii $(QUIET)
+ACCOUNT_MII_SRC = t_account_mii.c t_condvar_stub.c ../hle_thread.c
+ACCOUNT_MII_HEADERS = ../hle_account.c ../hle_mii.c ../hle.h ../dm.h ../host_memory.h $(GAME_H)
+$(B)/t_account_mii: $(ACCOUNT_MII_SRC) $(ACCOUNT_MII_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_GUEST_SYMBOLS -I.. $(GINC) -o $@ $(ACCOUNT_MII_SRC)
+android-account-mii-build: $(B)/t_account_mii_android
+$(B)/t_account_mii_android: $(ACCOUNT_MII_SRC) $(ACCOUNT_MII_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -DDM_TEST_GUEST_SYMBOLS -I.. -I../../android/compat $(GINC) -o $@ $(ACCOUNT_MII_SRC)
 run: $(B)/t_system_event
 run: $(B)/t_audren_work
 $(B)/t_audren_work: t_audren_work.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)
