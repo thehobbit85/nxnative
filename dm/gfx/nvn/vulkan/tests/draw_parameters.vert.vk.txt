@@ -1,0 +1,2 @@
+stage vs
+b 1 ubo 1 cbuf 0 -1 - -1

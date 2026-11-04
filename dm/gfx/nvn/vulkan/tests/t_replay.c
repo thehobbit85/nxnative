@@ -14,6 +14,7 @@ static prog_t driver_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
 static prog_t origin_program = {.nstage = 2};
+static prog_t draw_parameters_program = {.nstage = 2};
 static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
 static const void *flushed_storage;
 int nvn_flushed(const void *p, uint64_t n) { (void)n; return p == flushed_storage; }
@@ -22,6 +23,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &draw_parameters_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x39 + stage; return 1; }
     if (p == &origin_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x37 + stage; return 1; }
     if (p == &depth_copy_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x35 + stage; return 1; }
     if (p == &output_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x33 + stage; return 1; }
@@ -698,7 +700,32 @@ static void depth_copies(void) {
     puts("Depth and stencil copies preserve subrectangles, mip levels and array layers at equal and scaled sizes");
 }
 
+static void draw_parameters(void) {
+    tex_t output={.serial=0x3900,.d={.width=8,.height=8,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d,&output.L);
+    for (int mode=0;mode<3;++mode) {
+        list_t list={0}; uint8_t pixels[8*8*4]={0};
+        int32_t expected[4]={mode==0?7:mode==1?17:0,mode==1?-3:0,0,0};
+        uint16_t indices[3]={mode==1?3:0,mode==1?4:1,mode==1?5:2};
+        RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&output,.r={.width=8,.height=8,.depth=1},.mask=15,.c.f={0,0,1,1});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&draw_parameters_program,.stages=3);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)expected,.size=sizeof expected);
+        if (mode) RECORD(OP_DRAW_IDX,p_draw_idx,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.itype=1,.count=3,
+            .base_vertex=mode==1?2:0,.base_instance=expected[0],.instances=2,.ibuf=(uintptr_t)indices);
+        else RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.first=5,.count=3,.base_instance=expected[0],.instances=2);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (size_t i=0;i<sizeof pixels;i+=4) if (memcmp(pixels+i,(uint8_t[]){0,255,0,255},4)) {
+            fprintf(stderr,"draw parameters mode%d pixel%zu: %u,%u,%u,%u\n",mode,i/4,pixels[i],pixels[i+1],pixels[i+2],pixels[i+3]);abort();
+        }
+    }
+    mtl_tex_release(&output);
+    puts("Base instance, base vertex and draw index survive direct and indexed draw replay");
+}
 int main(void) {
+    draw_parameters();
     depth_copies();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);

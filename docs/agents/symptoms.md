@@ -1004,6 +1004,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a raw global memory read of a memory pool made after the shader's arguments were encoded gets 0, though the pool exists when the GPU runs it; a task shader that reads both ends of a range this way loops `(0 - 1) >> 5` times and hangs the GPU. The memory report's `raw pool table words at commit` line counts the words that were out of date. → [Raw pool table words that predate the pools](../reference/shaders.md#raw-pool-table-words-that-predate-the-pools)
 - Android shader export aborts with `unsupported Vulkan stage: gs` even when the game's observed draws use vertex and fragment shaders. → [Vulkan export preserves packaged shader stages](../reference/shaders.md#vulkan-export-preserves-packaged-shader-stages)
 - Android export stops with `no guest resource for descriptor 1 ('fp_t_tcb_3A')`. → [Vulkan export removes unused descriptor declarations](../reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations)
+- font strings lose their first glyph or show clipped characters despite a complete, correctly uploaded atlas. Instanced geometry can also disappear. → [Draw parameters on a Vulkan device without the optional feature](../reference/shaders.md#draw-parameters-on-a-vulkan-device-without-the-optional-feature)
 
 ## Cheats on a Switch
 

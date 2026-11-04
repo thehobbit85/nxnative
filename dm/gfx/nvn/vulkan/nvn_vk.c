@@ -17,6 +17,7 @@
 #include "dmsh_abi.h"
 #include "spv_vertex_fetch.h"
 #include "spv_output_defaults.h"
+#include "spv_draw_parameters.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -32,6 +33,7 @@
 
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceMemoryProperties g_memp; static VkPhysicalDeviceProperties g_props;
+static int g_draw_parameters;
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER;   // the queue (submissions, the present readback)
 static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;   // texture / sampler registrations and the image table (game threads register while the submit thread reads)
 
@@ -313,6 +315,9 @@ static void vk_init_(void) {
     if (dv >= VK_API_VERSION_1_2) { f12.pNext = chain; chain = &f12; f11.pNext = chain; chain = &f11; } else { sdp.pNext = chain; chain = &sdp; }
     VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, chain};
     vkGetPhysicalDeviceFeatures2(g_pd, &f2);
+    g_draw_parameters = dv >= VK_API_VERSION_1_2 ? f11.shaderDrawParameters : sdp.shaderDrawParameters;
+    if (getenv("DM_VK_NO_DRAW_PARAMETERS")) g_draw_parameters = 0;
+    if (!g_draw_parameters) LOG("vk: shader draw parameters supplied by host push constants");
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     f13.robustImageAccess = VK_FALSE;
     const char *ext[4]; uint32_t next = 0;
@@ -1074,6 +1079,11 @@ static uint32_t *spv_gl_depth(const uint32_t *w, size_t nw, size_t *out_n) {
 }
 static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
     size_t ns = *bytes;
+    if (!g_draw_parameters) {
+        size_t nn; int ok; uint32_t *w2=spv_draw_parameters(spv,ns/4,&nn,&ok);
+        if (!ok) { LOG("[RED] vk: shader %s draw-parameter lowering failed",s->key);free(spv);return NULL; }
+        if (w2) { free(spv);spv=w2;ns=nn*4; }
+    }
     { size_t nn; uint32_t *w2 = spv_output_defaults(spv, ns / 4, &nn); if (w2) { free(spv); spv = w2; ns = nn * 4; } }
     { size_t nn; uint32_t *w2 = spv_invariant(spv, ns / 4, &nn); if (w2) { free(spv); spv = w2; ns = nn * 4; } }
     { size_t nn; uint32_t *w2 = spv_point_size(spv, ns / 4, &nn); if (w2) { free(spv); spv = w2; ns = nn * 4; } }
@@ -1094,6 +1104,7 @@ static VkShaderModule vertex_variant(shader_t *s, uint64_t mask) {
     uint32_t *spv = read_file(path, &ns);
     if (!spv) { LOG("[RED] vk: cannot reopen vertex shader %s", s->key); return VK_NULL_HANDLE; }
     spv = vertex_spv(spv, &ns, s);
+    if (!spv) return VK_NULL_HANDLE;
     const char *reason;
     uint32_t *variant = spv_vertex_fetch(spv, ns / 4, mask, s->vin, &words, &reason);
     free(spv);
@@ -1148,6 +1159,12 @@ static shader_t *shader_get(const uint8_t md[8]) {
     }
     free(txt);
     if (s->stage == 0) { s->depth_zero = g_depth_zero; spv = vertex_spv(spv, &ns, s); }
+    else if (!g_draw_parameters) {
+        size_t nn; int ok; uint32_t *w2=spv_draw_parameters(spv,ns/4,&nn,&ok);
+        if (!ok) { LOG("[RED] vk: shader %s draw-parameter lowering failed",s->key);free(spv);return s; }
+        if (w2) { free(spv);spv=w2;ns=nn*4; }
+    }
+    if (!spv) return s;
     // the fragment stage's resources move to set 1 (DescriptorSet decorations, operand 34)
     uint32_t set = s->stage == 1 ? 1 : 0;
     for (size_t i = 5; i < ns / 4;) { uint32_t w = spv[i], op = w & 0xffff, len = w >> 16; if (!len) break; if (op == 71 && len >= 4 && spv[i + 2] == 34) spv[i + 3] = set; i += len; }
@@ -1169,7 +1186,9 @@ static VkPipelineLayout layout_get(shader_t *vs, shader_t *fs) {
     for (int i = 0; i < g_npl; i++) if (g_pl[i].vs == vs && g_pl[i].fs == fs) return g_pl[i].pl;
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_empty_dsl)); }
     VkDescriptorSetLayout sl[2] = {vs ? vs->dsl : g_empty_dsl, fs ? fs->dsl : g_empty_dsl};
-    VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, fs ? 2 : 1, sl, 0, NULL};
+    VkPushConstantRange draw = {VK_SHADER_STAGE_VERTEX_BIT, 0, 12};
+    VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, fs ? 2 : 1, sl,
+        g_draw_parameters ? 0 : 1, g_draw_parameters ? NULL : &draw};
     VkPipelineLayout pl; VKCHECK(vkCreatePipelineLayout(g_dev, &pi, NULL, &pl));
     g_pl = realloc(g_pl, (g_npl + 1) * sizeof *g_pl); g_pl[g_npl++] = (prog_vk){vs, fs, pl};
     return pl;
@@ -1778,6 +1797,14 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     }
     if (vhi < vlo) { g_stat_draws++; return; }
     if (vlo < 0) vlo = 0;
+    if (!g_draw_parameters) {
+        // Match Vulkan's built-ins after vertex-stream rebasing, including signed
+        // indexed offsets. Each direct draw has DrawIndex zero. InstanceIndex
+        // still comes from Vulkan and includes the command's firstInstance.
+        int32_t values[3] = {(int32_t)((dw ? dw->first : di->base_vertex) - vlo),
+                             dw ? dw->base_instance : di->base_instance, 0};
+        vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof values, values);
+    }
     uint32_t used = 0, ext[16] = {0};
     for (int i = 0; i < S.nattr; i++) if (vs->vin_mask >> i & 1) { uint32_t st = S.attr[i].stream, e = S.attr[i].offset + 16; used |= 1u << st; if (e > ext[st]) ext[st] = e; }
     for (int s = 0; s < 16; s++) if (used >> s & 1) {
