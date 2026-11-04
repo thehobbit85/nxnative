@@ -13,12 +13,14 @@ static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless
 static prog_t driver_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
+static prog_t origin_program = {.nstage = 2};
 static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
 int nvn_dpool_base(const void *pool, int texture) {
     return texture && pool == &texture_pool ? 2048 : texture && pool == &alternate_texture_pool ? 4096 :
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &origin_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x37 + stage; return 1; }
     if (p == &depth_copy_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x35 + stage; return 1; }
     if (p == &output_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x33 + stage; return 1; }
     if (p == &driver_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x32; return 1; }
@@ -502,7 +504,7 @@ static void queue_lifetime(void) {
     puts("Vulkan queue targets, copy strides and finalized program bindings passed");
 }
 
-// Device origin controls viewport placement even when the queue captured a different raster origin.
+// Rectangles address memory rows regardless of device or queue origin.
 static void queue_viewport_origin(void) {
     tex_t output = {.serial = 0x8100, .d = {.width = 4, .height = 4, .depth = 1, .levels = 1,
                     .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
@@ -525,13 +527,71 @@ static void queue_viewport_origin(void) {
         mtl_set_origin_lower_left(device); mtl_queue_activate(110 + queue); mtl_set_queue_origin_lower_left(queue);
         mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
         for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
-            int drawn = device ? y >= 2 : y < 2;
+            // Viewport coordinates name memory rows in either convention.
+            int drawn = y < 2;
             const uint8_t expected[] = {0, drawn ? 255 : 0, drawn ? 0 : 255, 255};
             assert(!memcmp(pixels + (y * 4 + x) * 4, expected, 4));
         }
     }
     mtl_queue_forget(110); mtl_queue_forget(111);
-    puts("Vulkan viewport placement follows device origin independently of queue raster origin");
+    puts("Vulkan viewport rectangles address the same memory rows for both origins");
+}
+
+// Same expectations as Metal's t_queue_origin: queue-latched raster origin
+// changes facing; the device origin changes clip Y within the viewport only.
+static void origin_facing(void) {
+    tex_t output = {.serial=0x8200, .d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d, &output.L);
+    const int front_in_clip[2][2][2] = {{{0,1},{1,0}},{{1,0},{0,1}}};
+    for (int device=0;device<2;device++) for (int queue=0;queue<2;queue++)
+    for (int winding=0;winding<2;winding++) for (int cull=0;cull<4;cull++) for (int ccw=0;ccw<2;ccw++) {
+        float positions[3][2]={{-1,-1},{3,-1},{-1,3}};
+        if (!ccw) { float tmp[2]; memcpy(tmp,positions[1],8); memcpy(positions[1],positions[2],8); memcpy(positions[2],tmp,8); }
+        uint8_t pixels[256]={0}; list_t list={0};
+        RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&output,.r={.width=8,.height=8,.depth=1},.mask=15,.c.f={0,0,1,1});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&origin_program,.stages=3);
+        p_bind_state bs={.kind=4}; poly_st poly={.front=winding,.cull=cull}; memcpy(bs.bytes,&poly,sizeof poly); put(&list,OP_BIND_STATE,&bs,sizeof bs);
+        va_st va={.fmt=NVN_FORMAT_RG32F}; p_bind_vattr attr={.n=1}; memcpy(attr.st,&va,sizeof va); put(&list,OP_BIND_VATTR,&attr,sizeof attr);
+        RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=1,.st={{.stride=8}});
+        RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sizeof positions,.addr=(uintptr_t)positions);
+        RECORD(OP_VIEWPORTS,p_viewports,.n=1,.v={{0,0,8,8}});
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+        put(&list,OP_END,NULL,0);
+        mtl_set_origin_lower_left(device); mtl_queue_activate(120+queue); mtl_set_queue_origin_lower_left(queue);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        int front=ccw==front_in_clip[queue][device][winding];
+        int visible=cull==NVN_FACE_NONE || (cull==NVN_FACE_FRONT && !front) || (cull==NVN_FACE_BACK && front);
+        uint8_t want[]={visible&&!front?255:0,visible&&front?255:0,visible?0:255,255};
+        for (int i=0;i<64;i++) { if(memcmp(pixels+4*i,want,4)) fprintf(stderr,"origin device%d queue%d winding%d cull%d ccw%d got%d,%d,%d expected%d,%d,%d\n",device,queue,winding,cull,ccw,pixels[4*i],pixels[4*i+1],pixels[4*i+2],want[0],want[1],want[2]); assert(!memcmp(pixels+4*i,want,4)); }
+    }
+    for (int device=0;device<2;device++) {
+        // Bottom half of clip space, offset viewport, then an unflipped scissor.
+        float positions[][2]={{-1,-1},{1,-1},{-1,0},{-1,0},{1,-1},{1,0}};
+        uint8_t pixels[256]={0}; list_t list={0};
+        RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&output,.r={.width=8,.height=8,.depth=1},.mask=15,.c.f={0,0,1,1});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&origin_program,.stages=3);
+        p_bind_state bs={.kind=4}; poly_st poly={.front=NVN_FRONT_FACE_CCW}; memcpy(bs.bytes,&poly,sizeof poly); put(&list,OP_BIND_STATE,&bs,sizeof bs);
+        va_st va={.fmt=NVN_FORMAT_RG32F}; p_bind_vattr attr={.n=1}; memcpy(attr.st,&va,sizeof va); put(&list,OP_BIND_VATTR,&attr,sizeof attr);
+        RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=1,.st={{.stride=8}});
+        RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sizeof positions,.addr=(uintptr_t)positions);
+        RECORD(OP_VIEWPORTS,p_viewports,.n=1,.v={{0,1,8,6}});
+        RECORD(OP_SCISSOR,p_scissor,.x=1,.y=2,.w=6,.h=3);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=6,.instances=1);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+        put(&list,OP_END,NULL,0);
+        mtl_set_origin_lower_left(device); mtl_queue_activate(122+device); mtl_set_queue_origin_lower_left(device);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
+            int drawn=x>=1 && x<7 && (device ? (y==2 || y==3) : y==4);
+            uint8_t want[]={0,drawn?255:0,drawn?0:255,255}; assert(!memcmp(pixels+4*(8*y+x),want,4));
+        }
+        mtl_queue_forget(122+device);
+    }
+    mtl_queue_forget(120); mtl_queue_forget(121); mtl_set_origin_lower_left(0);
+    puts("Vulkan queue/device origins preserve facing and every cull mode (128 cases)");
 }
 
 static void depth_copies(void) {
@@ -609,6 +669,7 @@ int main(void) {
     registered_images();
     strided_layers();
     queue_lifetime();
+    origin_facing();
     queue_viewport_origin();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
