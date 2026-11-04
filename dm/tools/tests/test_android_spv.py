@@ -179,7 +179,7 @@ OpFunctionEnd
                 raise RuntimeError('translation boundary')
             for name in ('first', 'retry'):
                 with mock.patch.object(vk.subprocess, 'run', side_effect=stop_before_translation), \
-                     mock.patch.object(vk, 'host_contract', return_value=b'fixture producer'), \
+                     mock.patch.object(vk, 'shader_contract', return_value=b'fixture producer'), \
                      mock.patch.object(vk.shutil, 'which', side_effect=lambda name: '/tools/' + name):
                     with self.assertRaisesRegex(RuntimeError, 'translation boundary'):
                         vk.export(root / 'pkg', ['0' * 16], root / name)

@@ -60,7 +60,7 @@ public final class AssetInstallTest {
                 check(stop == 0, "repair interruption not reached");
             } catch (IOException expected) { check(stop != 0, "unexpected repair error"); }
             AssetInstall.recover(root); AssetInstall.recover(root);
-            boolean committed = stop == 0 || stop == 12;
+            boolean committed = stop == 0 || stop == AssetInstall.ROOTS.length * 2;
             for (String name : AssetInstall.ROOTS) if (!name.startsWith(".")) {
                 check(new File(root, name + "/new").exists() == committed, "mixed repair: " + name);
                 check(new File(root, name + "/old").exists() != committed, "lost original during repair: " + name);
@@ -70,10 +70,10 @@ public final class AssetInstallTest {
     }
     public static void main(String[] args) throws Exception {
         interruption(0, true); interruption(0, false); interruption(-1, true); interruption(-1, false);
-        for (int i = 1; i <= 12; i++) interruption(i, true);
-        for (int i = 1; i <= 6; i++) interruption(i, false);
+        for (int i = 1; i <= AssetInstall.ROOTS.length * 2; i++) interruption(i, true);
+        for (int i = 1; i <= AssetInstall.ROOTS.length; i++) interruption(i, false);
         repairInterruption(0); repairInterruption(-1);
-        for (int i = 1; i <= 12; i++) repairInterruption(i);
+        for (int i = 1; i <= AssetInstall.ROOTS.length * 2; i++) repairInterruption(i);
         File root = Files.createTempDirectory("nx-install-resume").toFile();
         try {
             try (AssetInstall.Guard guard = AssetInstall.acquire(root)) {
@@ -85,8 +85,11 @@ public final class AssetInstallTest {
             check(new File(AssetInstall.prepare(root, OLD), "dm/prepared").exists(), "matching candidate not resumed");
             check(!new File(AssetInstall.prepare(root, NEW), "dm/prepared").exists(), "different candidate reused");
             write(new File(root, "aoc/stale"), "removed DLC");
+            write(new File(root, "programs/2/romfs/old"), "removed program");
+            write(new File(AssetInstall.prepare(root, NEW), "programs/1/romfs/new"), "child resources");
             AssetInstall.publish(root, NEW, AssetInstall::move);
             check(Arrays.equals(new File(root, "aoc").list(), new String[0]), "removed DLC survived replacement");
+            check(!new File(root, "programs/2").exists() && read(new File(root, "programs/1/romfs/new")).equals("child resources"), "program resources not replaced together");
             write(new File(root, "dm/current"), "current");
             File duplicate = AssetInstall.prepare(root, NEW);
             write(new File(duplicate, "dm/not-installed"), "unused");

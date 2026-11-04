@@ -44,6 +44,20 @@ public final class TargetContractTest {
         rejected(target.replace("module\tmain", "module\tother"), host, assets, pkg);
         rejected(target, host, assets, "com.nxnative.t0000000000000001");
         rejected(target.replace("shader_chain\tcacaa37ecb55", "shader_chain\t000000000000"), host, assets, pkg);
+        String child = "0100633007D48001";
+        String multiProducer = producer + "program_profile\t0\t" + id + "\nprogram_profile\t1\t" + child + "\n";
+        byte[] multiHost = ("NXNATIVE_ANDROID_HOST_V1\n" + multiProducer + "NXNATIVE_ANDROID_HOST_END\n").getBytes(StandardCharsets.UTF_8);
+        String childRows = rows.replace("dm/", "programs/1/dm/");
+        GameAssets.Manifest multiAssets = GameAssets.Manifest.read(new ByteArrayInputStream((rows + childRows).getBytes(StandardCharsets.UTF_8)));
+        String multiTarget = target.replace(producer, multiProducer).replace(hash(host), hash(multiHost))
+            + "program\t0\t" + id + "\t.\nprogram\t1\t" + child + "\tprograms/1\nprogram_shader\t1\tempty\n"
+            + "asset\tprograms/1/dm/main.patched.bin\t4\t" + sha + "\nasset\tprograms/1/dm/main.fixups.tsv\t5\t" + sha + "\n"
+            + "module\t1/main\t" + "b".repeat(32) + "\t" + sha + "\t" + sha + "\n";
+        TargetContract.verify(multiTarget, multiHost, multiAssets, pkg);
+        rejected(multiTarget.replace("program\t1\t" + child, "program\t1\t" + id), multiHost, multiAssets, pkg);
+        rejected(multiTarget.replace("program_shader\t1\tempty\n", ""), multiHost, multiAssets, pkg);
+        rejected(multiTarget.replace("module\t1/main", "module\t2/main"), multiHost, multiAssets, pkg);
+        rejected(multiTarget.replace("\tprograms/1\n", "\tprograms/2\n"), multiHost, multiAssets, pkg);
         System.out.println("Target contract: host provenance, schema/ABI/backend gates, app identity and asset/module bindings passed");
     }
 }

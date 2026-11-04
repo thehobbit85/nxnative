@@ -61,13 +61,17 @@ static void clear_and_readback(NVNformat format) {
         .h = {OP_COPY_T2B, sizeof copy}, .p = {.tex = &tex, .src = (uintptr_t)pixels, .r = {.width = 8, .height = 8, .depth = 1}}};
     struct { op_hdr barrier; typeof(clear) clear; typeof(copy) copy; op_hdr end; } list = {
         .barrier = {OP_BARRIER, sizeof(op_hdr)}, .clear = clear, .copy = copy, .end = {OP_END, sizeof(op_hdr)}};
+    assert(!mtl_tex_gpu_owned(tex.serial));
     mtl_sub_begin();
     mtl_exec((const uint8_t *)&list);
     uint64_t fence = mtl_sub_commit();
     assert(mtl_wait(fence, UINT64_MAX));
+    assert(mtl_tex_gpu_owned(tex.serial));
     for (size_t i = 0; i < sizeof pixels; i += 4)
         assert(pixels[i] == 255 && pixels[i + 1] == 0 && pixels[i + 2] == 255 && pixels[i + 3] == 255);
     puts("NVN clear, texture readback and Vulkan fence returned 64 expected pixels");
+    mtl_tex_release(&tex);
+    assert(!mtl_tex_gpu_owned(tex.serial));
 }
 
 typedef struct { _Alignas(8) uint8_t bytes[4096]; size_t length; } list_t;

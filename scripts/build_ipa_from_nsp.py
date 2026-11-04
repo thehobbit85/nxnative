@@ -1351,10 +1351,13 @@ def extract_dump(ex, name, src, app):   # one version of a dump folder (src: bas
     return dst
 
 
-def extract_aoc(nx, keys, repo, work, app, fam, logs):
+def extract_aoc(nx, keys, repo, work, app, fam, logs, first=None):
     """DLC NSPs in the folder → <id>_build/aoc/<index>.img (the RomFS of each one's data NCA; index = title ID − base − 0x1000). The host reports these indices as owned and mounts them (DM_AOC_DIR).
     Returns None without DLC. Reused when the DLC NSPs (names, sizes and times) and nx_extract's sources are as at the last extraction (Monster Hunter Rise: 250 DLC, 30 s),
     and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP or a dump folder packs its DLC into the same aoc/"""
+    # Android child programs share application DLC IDs and the primary's
+    # prepared images; subtracting the child title ID would renumber DLC.
+    if first is not None: return first['aoc']
     if not fam['dlc']: return None
     if fam.get('nup'):
         PROG.stage('unpack DLC', step='unpacking')
@@ -2744,12 +2747,47 @@ def other_programs(args, g, first=None):
     build folder (main with in_programs: it stops where the package would be made, and returns what the package takes). {program index: that}, empty for a game of one program"""
     global PROGRAM_INDEX
     runs = {}
-    for n, _ in g.pairs('programs') if g.get('programs', '') and not getattr(args, 'in_programs', None) else ():
-        say(f'==== program {n}')
-        sub = types.SimpleNamespace(**vars(args)); sub.program, sub.in_programs = int(n), first or {}
-        runs[int(n)] = main(sub)
-    PROGRAM_INDEX = 0
+    android = (args.platform or PLATFORM) == 'android'
+    profile_env = {key: os.environ.get(key) for key in ('DM_GAMES_DIR', 'DM_GAMES_FIRST')}
+    try:
+        for n, _ in g.pairs('programs') if g.get('programs', '') and getattr(args, 'in_programs', None) is None else ():
+            say(f'==== program {n}')
+            sub = types.SimpleNamespace(**vars(args)); sub.program, sub.in_programs = int(n), first or {}
+            if android:
+                if first is None: raise BuildError('Android program preparation needs the primary build folder')
+                sub.work_dir = str(Path(first['build']) / 'programs-build' / n)
+            runs[int(n)] = main(sub)
+    finally:
+        PROGRAM_INDEX = 0
+        if android:
+            for key, value in profile_env.items():
+                if value is None: os.environ.pop(key, None)
+                else: os.environ[key] = value
     return runs
+
+
+def android_program_catalog(args, g, first, env):
+    """Prepare children once; compile/package their exact selected profiles together."""
+    programs = other_programs(args, g, first)
+    if not programs: return None, programs
+    declared = {int(n): gid for n, gid in g.pairs('programs')}
+    if {n: part['profile'] for n, part in programs.items()} != declared:
+        raise BuildError('prepared Android profiles do not match the declared programs')
+    profiles = Path(first['build']) / 'android-profiles'; profiles.mkdir(exist_ok=True)
+    for part in [first, *programs.values()]:
+        path = profiles / part['profile']; target = Path(part['profile_dir']).resolve()
+        if path.is_symlink() and path.resolve() != target: path.unlink()
+        if not path.is_symlink():
+            if path.exists(): raise BuildError(f'Android generated profile link is occupied: {path}')
+            path.symlink_to(target, target_is_directory=True)
+    env['DM_GAMES_DIR'] = os.pathsep.join([str(profiles), env.get('DM_GAMES_DIR', '')])
+    env['DM_GAMES_FIRST'] = '1'
+    catalog = Path(first['build']) / 'android-programs.json'
+    keys = ('profile', 'build', 'patched', 'romfs', 'aoc', 'gfx')
+    rows = [dict(index=n, **{key: str(part[key]) if part.get(key) is not None else None for key in keys}) for n, part in sorted(programs.items())]
+    text = json.dumps({'schema': 1, 'programs': rows}, indent=2) + '\n'
+    if not catalog.exists() or catalog.read_text() != text: catalog.write_text(text)
+    return catalog, programs
 
 
 def mac_programs(args, g, first):
@@ -3028,6 +3066,16 @@ def main(args=None):
     py = sys.executable
     want = args.title_id or TITLE_ID
     if want and not re.fullmatch(r'[0-9A-Fa-f]{16}', want): raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits: {want}')
+    if android:
+        if not env.get('ANDROID_NDK_HOME'): raise BuildError('Android needs ANDROID_NDK_HOME')
+        if not (env.get('ANDROID_SDK_ROOT') or env.get('ANDROID_HOME')): raise BuildError('Android needs ANDROID_SDK_ROOT')
+        early_work = work_dir(args) or nsp_dir
+        # No title/profile or native product is read by --check-tools. Check
+        # before package scanning, NSZ conversion or a provisional survey.
+        run([py, repo / 'scripts/build_android.py', want or '0000000000000000', early_work, early_work / 'android-check.apk', '--check-tools'],
+            early_work / 'logs/android_tools.log', env=env)
+        for tool in ('spirv-val', 'spirv-opt'):
+            if not shutil.which(tool, path=env.get('PATH')): raise BuildError(f'Android shader export needs {tool} (SPIRV-Tools)')
     if PROGRAM_INDEX and dump: raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs; '
                                                      + ('a NUP' if nup else 'a dump folder') + ' is read as one program\'s files')
     if nup:
@@ -3113,12 +3161,6 @@ def main(args=None):
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
     logs = work / 'logs'
     check_prereqs(env, xlate, mac or android)
-    if android:
-        if not env.get('ANDROID_NDK_HOME'): raise BuildError('Android needs ANDROID_NDK_HOME')
-        if not (env.get('ANDROID_SDK_ROOT') or env.get('ANDROID_HOME')): raise BuildError('Android needs ANDROID_SDK_ROOT')
-        run([py, repo / 'scripts/build_android.py', g.id, work, out_ipa, '--check-tools'], logs / 'android_tools.log', env=env)
-        for tool in ('spirv-val', 'spirv-opt'):
-            if not shutil.which(tool, path=env.get('PATH')): raise BuildError(f'Android shader export needs {tool} (SPIRV-Tools)')
     picks = pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
@@ -3169,7 +3211,7 @@ def main(args=None):
     for on, k in ((glslc, 'glslc_capture'), (vkcap, 'vk_capture'), (glcap, 'gl_capture'), (uedec, 'ue_decode'), (gfx == 'nvn' and src['oodle_packs'][0], 'oodle_packs'), (gfx == 'nvn' and src['ue_legacy'][0], 'ue_legacy')):
         if on: say(src[k][1])
     PROG.add(glslc + vkcap + glcap + uedec + (gfx == 'nvn'))
-    aoc = extract_aoc(nx, keys, repo, work, app, fam, logs)
+    aoc = extract_aoc(nx, keys, repo, work, app, fam, logs, first=getattr(args, 'in_programs', None) if android else None)
     dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
     # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
@@ -3243,10 +3285,15 @@ def main(args=None):
     if android:
         android_patched = work / f'patched_android_{pkg_ver}'
         g = rewrite(py, repo, game / 'ExeFS', android_patched, env, logs, g, provisional, thread_slots='android')
-        PROG.stage('Android APK')
         android_fonts(py, repo, work, env, logs)
+        parts = {'build': work, 'profile': g.id, 'profile_dir': g.dir, 'patched': android_patched,
+                 'romfs': rfs.source(game), 'aoc': aoc, 'gfx': gfx, 'ex': ex, 'keep': keep}
+        if getattr(args, 'in_programs', None) is not None: return parts
+        catalog, programs = android_program_catalog(args, g, parts, env)
+        PROG.stage('Android APK')
         cmd = [py, repo / 'scripts/build_android.py', f'{app:016X}', work, out_ipa, '--profile', g.id,
                '--patched', android_patched, '--romfs', rfs.source(game), '--label', app_name, '--version-name', app_version or '1.0', '--language', lang]
+        if catalog: cmd += ['--programs', catalog]
         if args.android_version_code is not None: cmd += ['--version-code', str(args.android_version_code)]
         if args.android_keystore: cmd += ['--keystore', str(Path(args.android_keystore).expanduser().resolve())]
         if romfs_mode == 'bundle': cmd += ['--bundle']
@@ -3256,11 +3303,12 @@ def main(args=None):
         run(cmd, logs / 'android_build.log', env=env)
         if not out_ipa.is_file(): raise BuildError(f'no APK at {out_ipa}')
         PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
-        if not keep: rmtree(ex)
+        for part in [parts, *programs.values()]:
+            if not part['keep']: rmtree(part['ex'])
         say(f'done: {out_ipa}; install this development APK on an ARM64 Android device or emulator')
         if romfs_mode == 'separate':
             say('game assets are separate; after installing the APK, deploy with an explicit device serial:')
-            PROG.say(shlex.join([str(py), str(repo / 'dm/android/tools/make_apk.py'), f'{app:016X}', str(work), '--deploy', '--serial', '<adb-serial>', '--patched', str(android_patched), '--romfs', str(rfs.source(game))] + (['--aoc', str(aoc)] if aoc else [])))
+            PROG.say(shlex.join([str(py), str(repo / 'dm/android/tools/make_apk.py'), f'{app:016X}', str(work), '--deploy', '--serial', '<adb-serial>', '--profile', g.id, '--patched', str(android_patched), '--romfs', str(rfs.source(game))] + (['--aoc', str(aoc)] if aoc else []) + (['--programs', str(catalog)] if catalog else [])))
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Android APK', android_patched)
         return
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files

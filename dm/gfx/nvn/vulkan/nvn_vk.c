@@ -951,6 +951,13 @@ void mtl_tex_release(tex_t *t) {
     for (vtex **pp = &g_tex[t->serial % NHASH]; *pp; pp = &(*pp)->next) if ((*pp)->serial == t->serial) { vtex *v = *pp; *pp = v->next; pthread_mutex_unlock(&g_rmu); tex_free(v); return; }
     pthread_mutex_unlock(&g_rmu);
 }
+int mtl_tex_gpu_owned(uint64_t serial) {
+    pthread_mutex_lock(&g_rmu);
+    vtex *v = tex_find(serial);
+    int owned = v && v->gpu;
+    pthread_mutex_unlock(&g_rmu);
+    return owned;
+}
 void mtl_tex_cpu_written(const tex_t *t) {
     pthread_mutex_lock(&g_rmu);
     vtex *v = tex_find(t->serial); if (v) v->dirty = 1;
