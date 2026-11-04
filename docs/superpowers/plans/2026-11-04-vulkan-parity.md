@@ -50,7 +50,8 @@
 - [x] Implement graphics-stage write ownership and barriers, honoring read-only reflection.
 - [x] Add overlapping SSBO descriptors used by one dispatch and both graphics stages; verify words, atomics, guards and runtime-array lengths.
 - [x] Unify simultaneous storage bindings, preserving word-offset aliases with private SPIR-V block layouts and aligned descriptors. Validate shared source block types and representative exported shaders.
-- [ ] Cover CPU consumers of GPU-produced indices/handles, pool finalization, new pools at reused addresses and outstanding fences.
+- [x] Cover CPU consumers of GPU-produced indices/handles, including deferred binding and known overwrites without extra submission waits.
+- [ ] Cover zero-size ranges, pool finalization, new pools at reused addresses and outstanding fences.
 - [ ] Run synthetic Metal/Vulkan comparisons and commit the validated behavior.
 
 ## Remaining parity sequence

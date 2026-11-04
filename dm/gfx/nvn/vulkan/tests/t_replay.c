@@ -125,6 +125,14 @@ static void textured_draw(int compact, int split_submit) {
     RECORD(OP_BIND_IMG, p_bind_handles, .stage = 5, .first = 1, .n = 2, .h = {slot + 16, slot + 17});
     RECORD(OP_DISPATCH, p_dispatch, .ind = (uintptr_t)image_groups);
     RECORD(OP_BARRIER, uint32_t, 0);
+    uint64_t deferred_handle=0;
+    if(!compact) {
+        uint32_t handle_words[4]={slot,0,0,0};
+        push_constants(&list,1,240,handle_words,sizeof handle_words);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&deferred_handle,.size=8);
+        RECORD(OP_DISPATCH,p_dispatch,.x=2,.y=1,.z=1);
+    }
     RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
     RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &program, .stages = 3);
     va_st va = {.fmt = NVN_FORMAT_RG32F};
@@ -139,7 +147,7 @@ static void textured_draw(int compact, int split_submit) {
     } else {
         RECORD(OP_BIND_VBUF, p_bind_vbuf, .first = 0, .n = 1, .r = {{(uintptr_t)positions, sizeof positions}});
         RECORD(OP_BIND_UBO, p_bind_buf, .stage = 1, .index = 2, .addr = (uintptr_t)color, .size = sizeof color);
-        RECORD(OP_BIND_TEX, p_bind_handles, .stage = 1, .first = 3, .n = 1, .h = {slot});
+        RECORD(OP_BIND_TEX, p_bind_handles, .stage = 1, .first = 3, .n = 1, .defer = 1, .src = (uintptr_t)&deferred_handle);
     }
     RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
     RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels, .r = {.width = 8, .height = 8, .depth = 1});
@@ -292,7 +300,7 @@ static void uniform_texture_array(void) {
     float positions[] = {-1,-1, 3,-1, -1,3}, white[] = {1,1,1,1};
     const uint8_t expected[][4] = {{0,255,0,255}, {0,0,255,255}, {0,0,0,255},
                                    {255,255,255,255}, {0,0,0,255}, {0,0,0,255}, {0,0,255,255}, {255,255,255,255}};
-    for (int pass = 0; pass < 8; ++pass) {
+    for (int gpu=0;gpu<4;gpu++) for (int pass = 0; pass < 8; ++pass) {
         list_t list = {0}; uint8_t pixels[64] = {0};
         struct { uint32_t index; float coordinate; uint32_t pad[2]; } parameters = {pass == 2 ? 31u : 7u, pass == 3 || pass == 7 ? 1.5f : 0.5f, {0}};
         for (int i = 0; i < 3; ++i) {
@@ -303,8 +311,29 @@ static void uniform_texture_array(void) {
         RECORD(OP_SET_TEX_POOL, p_set_pool, .pool = pass == 6 ? &alternate_texture_pool : &texture_pool);
         RECORD(OP_SET_SAMP_POOL, p_set_pool, .pool = pass == 7 ? &alternate_sampler_pool : &sampler_pool);
         struct { uint64_t address, size, value; } update = {(uintptr_t)&handles[44 + 7], 8, pass >= 6 ? 5u : pass >= 4 ? 7u : pass ? 6u : 5u};
-        put(&list, OP_UPDATE_UB, &update, sizeof update);
+        if (!gpu) put(&list, OP_UPDATE_UB, &update, sizeof update);
         samplers[16 + 7] = (uint64_t)(pass == 3 ? 2 : 1) << 20;
+        if(gpu) {
+            uint32_t values[4]={(uint32_t)update.value,0,0,0};
+            handles[44+7]=0;
+            push_constants(&list,1,240,values,sizeof values);
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=update.address,.size=8);
+            RECORD(OP_DISPATCH,p_dispatch,.x=2,.y=1,.z=1);
+            values[0]=(uint32_t)samplers[16+7];samplers[16+7]=0;
+            push_constants(&list,1,240,values,sizeof values);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&samplers[16+7],.size=8);
+            RECORD(OP_DISPATCH,p_dispatch,.x=2,.y=1,.z=1);
+            if(gpu==2) { put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);mtl_sub_commit();list.length=0; }
+            if(gpu==3) {
+                // Two later known ranges cover the earlier GPU-written handle;
+                // the sampler is a known fill. Neither needs a submission cut.
+                struct { uint64_t address,size;uint32_t value,pad; } part={update.address,4,(uint32_t)update.value,0};
+                put(&list,OP_UPDATE_UB,&part,sizeof part);
+                part.address+=4;part.value=0;put(&list,OP_UPDATE_UB,&part,sizeof part);
+                RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)&samplers[16+7],.size=8,.value=values[0]);
+            }
+        }
         push_constants(&list, 0, 240, white, sizeof white);
         RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
         RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &bindless_program, .stages = 3);
@@ -319,9 +348,11 @@ static void uniform_texture_array(void) {
         RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
         RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels, .r = {.width = 4, .height = 4, .depth = 1});
         put(&list, OP_END, NULL, 0);
+        uint64_t before=mtl_last_fence();
         mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        if(!gpu || gpu==3) assert(mtl_last_fence()==before+1);
         for (size_t i = 0; i < sizeof pixels; i += 4) if (memcmp(pixels + i, expected[pass], 4)) {
-            fprintf(stderr, "uniform texture array pass %d pixel %zu: %u %u %u %u\n", pass, i / 4, pixels[i],pixels[i+1],pixels[i+2],pixels[i+3]);
+            fprintf(stderr, "uniform texture array GPU%d pass %d pixel %zu: %u %u %u %u\n", gpu, pass, i / 4, pixels[i],pixels[i+1],pixels[i+2],pixels[i+3]);
             abort();
         }
     }
@@ -329,7 +360,7 @@ static void uniform_texture_array(void) {
     mtl_reg_tex(4101, NULL, NULL);
     for (int i = 0; i < 3; ++i) { mtl_reg_tex(2053 + i, NULL, NULL); mtl_tex_release(&textures[i]); }
     mtl_tex_release(&output);
-    puts("Uniform texture arrays, pool bases, inline updates, independent samplers and missing handles passed");
+    puts("Uniform texture arrays, GPU-produced handles, known overwrites without waits, pool bases and independent samplers passed");
 }
 
 static void vertex_output_defaults(void) {
@@ -909,7 +940,36 @@ static void graphics_storage_alias(void) {
     mtl_tex_release(&target);
     puts("Vertex and fragment atomics share partially overlapping storage bindings");
 }
+static void gpu_indices(void) {
+    tex_t target={.serial=0xb200,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&target.d,&target.L);
+    for(int split=0;split<2;split++) for(int type=0;type<3;type++) {
+        uint32_t indices[3]={~0u,~0u,~0u}, values[4]={0,1,2,0}, expected[4]={0};
+        if(type==0) values[0]=0x00020100;
+        if(type==1) { values[0]=0x00010000;values[1]=2; }
+        uint8_t pixels[8*8*4]={0};list_t list={0};
+        push_constants(&list,1,240,values,sizeof values);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)indices,.size=4*(type+1));
+        RECORD(OP_DISPATCH,p_dispatch,.x=type+1,.y=1,.z=1);
+        if(split) { put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);mtl_sub_commit();list.length=0; }
+        RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&target,.r={.width=8,.height=8,.depth=1},.mask=15,.c.f={0,0,1,1});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&draw_parameters_program,.stages=3);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)expected,.size=sizeof expected);
+        RECORD(OP_DRAW_IDX,p_draw_idx,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.itype=type,.count=3,.instances=1,.ibuf=(uintptr_t)indices);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for(int i=0;i<64;i++) if(memcmp(pixels+4*i,(uint8_t[]){0,255,0,255},4)) {
+            fprintf(stderr,"GPU index split%d type%d pixel%d: %u,%u,%u,%u\n",split,type,i,pixels[4*i],pixels[4*i+1],pixels[4*i+2],pixels[4*i+3]);abort();
+        }
+    }
+    mtl_tex_release(&target);
+    puts("GPU-generated 8/16/32-bit indices reach indexed draws within and across submissions");
+}
 int main(void) {
+    if(getenv("DM_VK_TEST_HANDLES")) { uniform_texture_array();return 0; }
+    gpu_indices();
     graphics_storage_alias();
     simultaneous_aliases();
     graphics_storage();
