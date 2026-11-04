@@ -28,6 +28,10 @@ copies. Screenshot and texture-dump commands remain separate Vulkan diagnostics
 
 Set `ANDROID_SDK_ROOT` to an SDK with build-tools and an Android platform installed, and `JAVA_HOME` to a JDK. Build-tools 35.0.0 / platform 35 were used for this integration. The manifest and dex minimum are API 30; the target SDK remains the donor's API 33. This is a local development APK, not a store release.
 
+The complete NSP/XCI pipeline is currently supported on macOS because extraction/probing and shader preparation use Apple tools. The prepared-folder native recipe selects macOS or x86-64 Linux NDK tools; Linux preparation and packaging have not received the macOS end-to-end qualification. Windows and ARM64 Linux build hosts are not supported by this wrapper yet. Install GNU Make, the API 30 NDK compiler, a working JDK with Java 11 language support, SDK build-tools (`aapt2`, `d8`, `zipalign`, `apksigner`) and a platform `android.jar`. The SDK tools must support the chosen JDK.
+
+Both builders check Android tools before native compilation; the NSP/XCI builder does so before extraction and shader generation. `scripts/build_android.py <title-ID> <prepared-folder> <output.apk> --check-tools` checks prerequisites without building. SDK/JDK/NDK and prepared/output paths may contain spaces. Keep the repository checkout path free of spaces and shell characters: the native Makefiles still use unquoted relative dependencies, so the wrapper rejects unsupported checkout paths before work starts. APKs and receipts must stay outside collected asset directories (RomFS, modules, shaders, fonts, DLC and seed saves).
+
 The main builder accepts Android for NVN games, including NSP and XCI input folders:
 
 ```sh

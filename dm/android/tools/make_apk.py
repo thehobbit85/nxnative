@@ -40,6 +40,16 @@ def configure_tools(a):
             raise ValueError('set JAVA_HOME or put javac on PATH')
         JAVA = str(Path(javac).resolve().parent.parent)
     ENV = dict(os.environ, JAVA_HOME=JAVA, PATH=os.path.join(JAVA, 'bin') + os.pathsep + os.environ.get('PATH', ''))
+    for tool in [os.path.join(BT, name) for name in ('aapt2', 'd8', 'zipalign', 'apksigner')] + \
+                [os.path.join(JAVA, 'bin', name) for name in ('java', 'javac', 'keytool')]:
+        if not os.path.isfile(tool) or not os.access(tool, os.X_OK):
+            raise ValueError('missing executable Android build tool: ' + tool)
+    if not os.path.isfile(JAR): raise ValueError('missing Android platform android.jar: ' + JAR)
+    for tool in ('java', 'javac'):
+        try:
+            subprocess.run([os.path.join(JAVA, 'bin', tool), '-version'], check=True, env=ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ValueError('cannot execute JDK ' + tool + ': check JAVA_HOME (' + JAVA + ')') from error
 
 def run(*a, **k): subprocess.run([str(x) for x in a], check=True, env=ENV, **k)
 def file_digest(path):
@@ -160,8 +170,11 @@ def build(a):
     selected = selected_inputs(a, lib, ks)
     files, saves, icon, java, bid, sources = selected
     protected_sources = [src for _, src in sources] + ([a.romfs] if a.romfs else [])
+    asset_roots = [Path(a.build) / 'font', Path(a.build) / 'shader/vk', Path(a.patched or Path(a.build) / 'patched_android')]
+    asset_roots += [Path(path) for path in (a.save, a.aoc, a.romfs) if path and Path(path).is_dir()]
+    if not a.romfs: asset_roots += list(Path(a.build).glob('extract/*/RomFS'))
     for target in (output, receipt):
-        if any(target == Path(source).resolve() for source in protected_sources) or (a.save and target.is_relative_to(Path(a.save).resolve())):
+        if any(target == Path(source).resolve() for source in protected_sources) or any(target.is_relative_to(root.resolve()) for root in asset_roots):
             raise ValueError('output APK or receipt would replace or become part of a package input: ' + str(target))
     configure_tools(a)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -398,6 +411,7 @@ def main(argv=None):
     ap.add_argument('--save'); ap.add_argument('--cheats'); ap.add_argument('--label')
     ap.add_argument('--bundle', action='store_true'); ap.add_argument('--test', action='store_true')
     ap.add_argument('--library'); ap.add_argument('--sdk'); ap.add_argument('--build-tools'); ap.add_argument('--android-jar')
+    ap.add_argument('--check-tools', action='store_true', help='validate SDK/JDK prerequisites without building')
     ap.add_argument('--keystore'); ap.add_argument('--version-code', type=int)
     ap.add_argument('--version-name', default='1.0', help='game display version (independent of --version-code)')
     a = ap.parse_args(argv)
@@ -406,7 +420,8 @@ def main(argv=None):
     if a.deploy and not a.serial: ap.error('--deploy requires an explicit --serial')
     if not a.deploy and not a.out: ap.error('an output APK path is required')
     try:
-        if a.deploy: deploy(a)
+        if a.check_tools: configure_tools(a)
+        elif a.deploy: deploy(a)
         else:
             zipfile.ZIP64_LIMIT = 0xFFFFFFFE
             build(a)

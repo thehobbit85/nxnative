@@ -3090,6 +3090,7 @@ def main(args=None):
     if android:
         if not env.get('ANDROID_NDK_HOME'): raise BuildError('Android needs ANDROID_NDK_HOME')
         if not (env.get('ANDROID_SDK_ROOT') or env.get('ANDROID_HOME')): raise BuildError('Android needs ANDROID_SDK_ROOT')
+        run([py, repo / 'scripts/build_android.py', g.id, work, out_ipa, '--check-tools'], logs / 'android_tools.log', env=env)
         for tool in ('spirv-val', 'spirv-opt'):
             if not shutil.which(tool, path=env.get('PATH')): raise BuildError(f'Android shader export needs {tool} (SPIRV-Tools)')
     picks = pick_nsps(fam, have, versions)

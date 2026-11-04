@@ -76,6 +76,20 @@ class Packaging(unittest.TestCase):
             pack.main(['0100633007D48000', str(build), str(output / 'Game.apk'), *bundled, '--library', str(library), *version, *options])
         return output / 'Game.apk'
 
+    def test_incomplete_sdk_or_jdk_fails_during_configuration(self):
+        for missing in ('aapt2', 'd8', 'zipalign', 'apksigner', 'android.jar', 'java', 'javac', 'keytool'):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); bt = root / 'SDK with spaces/build-tools/35.0.0'; java = root / 'JDK with spaces'
+                jar = root / 'SDK with spaces/platforms/android-35/android.jar'
+                paths = [bt / n for n in ('aapt2', 'd8', 'zipalign', 'apksigner')] + [java / 'bin' / n for n in ('java', 'javac', 'keytool')] + [jar]
+                for path in paths:
+                    if path.name == missing: continue
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('#!/bin/sh\necho javac 17.0.1\n'); path.chmod(0o755)
+                args = SimpleNamespace(sdk=str(root / 'SDK with spaces'), build_tools=str(bt), android_jar=str(jar))
+                with patch.dict(pack.os.environ, {'JAVA_HOME': str(java)}):
+                    with self.assertRaisesRegex(ValueError, missing): pack.configure_tools(args)
+
     def test_unchanged_apk_reuses_verified_products(self):
         for limit, bundle in ((1, True), (1000000, True), (1, False)):
             with self.subTest(limit=limit, bundle=bundle), tempfile.TemporaryDirectory() as tmp:
@@ -228,6 +242,21 @@ class Packaging(unittest.TestCase):
                         pack.main(['0100633007D48000', tmp, str(output), '--library', str(lib), '--bundle'])
                     configure.assert_not_called()
                     self.assertEqual(output.read_bytes(), before)
+
+    def test_output_cannot_be_collected_as_an_asset_on_next_build(self):
+        for directory, option in (('extract/base/RomFS', None), ('romfs directory', '--romfs'),
+                                  ('dlc directory', '--aoc'), ('save directory', '--save'),
+                                  ('font', None), ('shader/vk', None), ('patched_android', None)):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); lib = root / 'lib.so'; lib.write_bytes(elf_library())
+                asset = root / directory; asset.mkdir(parents=True)
+                source = asset / 'data'; source.write_bytes(b'input')
+                args = ['0100633007D48000', tmp, str(asset / 'Game.apk'), '--library', str(lib)]
+                if option: args += [option, str(asset)]
+                with patch.object(pack, 'configure_tools', side_effect=RuntimeError('too late: SDK invoked')), patch.object(pack, 'game_files', return_value=[('romfs/data', str(source))]):
+                    with self.assertRaises(SystemExit): pack.main(args)
+                self.assertEqual(source.read_bytes(), b'input')
+                self.assertFalse((asset / 'Game.apk').exists())
 
     def test_explicit_missing_assets_fail_before_sdk_work(self):
         for option in ('--save', '--aoc', '--icon', '--env-file', '--cheats', '--romfs'):

@@ -56,6 +56,7 @@ The separate asset deployment uses the merged RomFS image directly. Synthetic AP
 - [Interrupted Android asset updates](../../../docs/reference/packing.md#interrupted-android-asset-updates): staged installation, content checks and recovery qualified with synthetic assets.
 - [Android build paths split by Make](../../../docs/reference/packing.md#android-build-paths-split-by-make): the wrapper preserves native output paths and incremental reuse through stable aliases.
 - [Incomplete Android package inputs](../../../docs/reference/packing.md#incomplete-android-package-inputs): preflight checks reject missing modules, resource pairs, explicit assets and wrong library ABIs.
+- [Android prerequisite failures](../../../docs/reference/packing.md#android-prerequisite-failures-after-native-compilation): early shared tool checks and asset-directory output protection.
 - [Incremental APK reuse](../../../docs/reference/packing.md#android-apk-rebuilt-despite-unchanged-inputs): selected-input and product hashes avoid unchanged repackaging; synthetic fixtures cover invalidation and interrupted publication.
 - [Separate Android deployment](../../../docs/reference/packing.md#separate-android-deployment-mixes-asset-generations): the installed APK identifies expected data; the shared installer verifies, replaces and recovers managed roots.
 
