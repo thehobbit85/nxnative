@@ -85,7 +85,7 @@ def vk_reflect(data, reflection):
     for x in ins:
         if opcode(x) == 71:
             dec[x[1]][x[2]] = x[3] if len(x) > 3 else True
-    types = {x[1]: x for x in ins if opcode(x) in (25, 26, 27, 28, 29, 30, 32)}
+    types = {x[1]: x for x in ins if opcode(x) in (21, 22, 25, 26, 27, 28, 29, 30, 32)}
     constants = {x[2]: x[3] for x in ins if opcode(x) == 43}
     resources = {b['msl_name']: b for b in reflection['bindings']}
     bindings = {}
@@ -107,6 +107,14 @@ def vk_reflect(data, reflection):
                 raise ValueError(f'no guest resource for descriptor {binding} ({name!r})')
             resource = {'kind': 'support'}
         entry = dict(resource, binding=binding, count=count, type=descriptor_type(ty, types, dec, x[3]))
+        if entry['type'] == 'cis':
+            image = types[ty[2]]
+            # Vulkan image view type, including the array shape; used for views
+            # and zero textures when an unselected bindless element is absent.
+            entry['view'] = {(0, 0): 0, (1, 0): 1, (2, 0): 2, (3, 0): 3,
+                             (0, 1): 4, (1, 1): 5, (3, 1): 6}[image[3], image[5]]
+            component = types[image[2]]
+            entry['num'] = (1 if component[3] else 2) if opcode(component) == 21 else 0
         if entry['type'] == 'simg' and 24 in dec[x[2]]:  # NonWritable on the descriptor variable
             entry['read_only'] = True
         if name + 'Smplr' in resources:
@@ -154,7 +162,7 @@ def export_spirv(data, optimizer):
 
 
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
-RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'img', 'sbuf', 'tbuf', 'ubo_ptr'}
+RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'img', 'sbuf', 'tbuf', 'ubo_ptr'}
 
 
 def vk_txt(meta):
@@ -187,6 +195,11 @@ def vk_txt(meta):
                   offset, sampler.get('kind', '-'), -1 if sreg is None else sreg)
         if bind.get('read_only'):
             fields += ('ro',)
+        if sampler.get('kind') == 'samp_ubo':
+            fields += (f"soff={sampler['off']}",)
+        for name in ('view', 'num'):
+            if name in bind:
+                fields += (f'{name}={bind[name]}',)
         lines.append('b ' + ' '.join(map(str, fields)))
     return '\n'.join(lines) + '\n'
 

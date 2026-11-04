@@ -637,6 +637,14 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Fix:** Android capture sets `host_target=vulkan` in a temporary translation job. The accessor then disables nonconstant-offset support and reuses Ryujinx's existing `TexturePass.InsertConstOffsets` lowering: add integer offsets to fetch coordinates, or normalized offsets using the mip dimensions to sampled coordinates. The normal Apple job keeps its previous capability. A synthetic Maxwell shader loads offsets from a guest uniform buffer and checks that the actual bundled translator removes the illegal sample operand and passes Vulkan 1.1 validation; the capture check also verifies that the caller's job is unchanged. Validation remains strict.
 - **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#found-on-this-game), captured postprocess shader `9338e3f1b597fe7c`.
 
+### Vulkan textures from uniform-buffer handles
+
+- **Symptom:** Android export stops with `unsupported guest binding kind: tex_ubo`; the Vulkan replay rejects a combined-image descriptor with count 32.
+- **Cause:** the donor Vulkan path resolves directly bound texture slots but does not resolve handles held in uniforms or apply the texture/sampler pool records at execution.
+- **Fix:** the exporter preserves the array length, texture and sampler uniform slots and byte offsets, and the sampled image's shape and numeric class. The replay follows the existing [uniform-handle layout](#an-array-of-handles-in-a-uniform-buffer) and [pool rebasing](#handles-from-uniform-buffers-take-the-bound-pools-bases): each 8-byte element supplies a texture ID and sampler ID, resolved against the active pools. Reads are bounded by the uniform binding and registered memory. Missing or dimension-incompatible entries receive a compatible black texture; feedback detection also examines the uniform array.
+- **Check:** `uniform_texture_array` in the Vulkan replay checks a 32-element 3D texture array, dynamic selection, independent sampler offsets, inline updates, missing entries, truncated uniform ranges, and switching texture/sampler pools while keeping local IDs unchanged. Export tests validate shape and float/signed/unsigned component reflection. GPU-produced handle tables within the same submission are not covered by these checks.
+- **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#found-on-this-game), shader `bd619b15fcd2a711`, a 32-element 3D texture/sampler array in uniform slot 8 at byte 352. The targeted export passes; commercial runtime validation remains separate.
+
 ### Tested tools and compiler-specific shader caches
 
 - **Symptom:** a shader build accepts tools that differ from `dmsh_chain.lock`; after an override build, returning to the tested Metal compiler can still restore the override's libraries.

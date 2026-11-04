@@ -12,7 +12,7 @@ SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswiz
 replay-test: fixture
 	DM_VK_DIR="$(abspath $(B))/shaders" $(B)/t_replay
 fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000000002.spv \
-         $(B)/shaders/0000000000000003.spv $(B)/shaders/0000000000000004.spv $(B)/shaders/0000000000000021.spv $(B)/shaders/0000000000000022.spv
+         $(B)/shaders/0000000000000003.spv $(B)/shaders/0000000000000004.spv $(B)/shaders/0000000000000021.spv $(B)/shaders/0000000000000022.spv $(B)/shaders/0000000000000031.spv
 profile:
 	$(MAKE) -C $(HOST) GAME=$(GAME) game_profile
 $(B)/t_replay: $(SRC) spv_vertex_fetch.h spv_scaled32.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
@@ -46,6 +46,11 @@ $(B)/shaders/0000000000000004.spv: tests/groups.comp tests/groups.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/groups.vk.txt $(@:.spv=.vk.txt)
+
+$(B)/shaders/0000000000000031.spv: tests/bindless.frag tests/bindless.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/bindless.vk.txt $(@:.spv=.vk.txt)
 
 # For a Mac build, point VULKAN_SDK at the Mac SDK
 # with an offscreen driver installed, or provide RECORDER_CPPFLAGS and LIBS for a local loader.

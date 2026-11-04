@@ -407,6 +407,41 @@ static void dummies(void) {
     VkClearColorValue black = {{0, 0, 0, 1}}; VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdClearColorImage(cb, g_dummy_img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &rr); once_end(cb);
 }
+// Unselected elements of a bindless array often contain no handle, or a handle
+// of another texture kind. Their descriptors still need the shader's view type.
+static VkImageView sampled_dummy(int view, int num) {
+    static VkImageView views[7][3];
+    if (view < 0) view = VK_IMAGE_VIEW_TYPE_2D;
+    if (view > VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || num < 0 || num > 2) return VK_NULL_HANDLE;
+    if (view == VK_IMAGE_VIEW_TYPE_2D && !num) return g_dummy_view;
+    if (views[view][num]) return views[view][num];
+    int one = view == VK_IMAGE_VIEW_TYPE_1D || view == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+    int cube = view == VK_IMAGE_VIEW_TYPE_CUBE || view == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+    VkFormat format = num == 1 ? VK_FORMAT_R32_SINT : num == 2 ? VK_FORMAT_R32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
+    VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
+        one ? VK_IMAGE_TYPE_1D : view == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
+        format, {1, 1, 1}, 1, cube ? 6u : 1u, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkImage image;
+    if (vkCreateImage(g_dev, &ii, NULL, &image) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkMemoryRequirements requirements; vkGetImageMemoryRequirements(g_dev, image, &requirements);
+    VkDeviceMemory memory = mem_alloc(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VKCHECK(vkBindImageMemory(g_dev, image, memory, 0));
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, ii.arrayLayers};
+    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, image,
+        (VkImageViewType)view, format, {0}, range};
+    VKCHECK(vkCreateImageView(g_dev, &vi, NULL, &views[view][num]));
+    VkCommandBuffer cb = once_begin(); to_general(cb, image, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkClearColorValue black = {{0, 0, 0, 1}};
+    if (num) black.uint32[3] = 1;
+    vkCmdClearColorImage(cb, image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
+    VkImageMemoryBarrier ready = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, image, range};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &ready);
+    once_end(cb);
+    return views[view][num];
+}
 
 // ---------- Formats ----------
 // Compressed formats Mali cannot sample, decoded on upload into the smallest format that samples the same: BC1-3 and BC7 to RGBA8, BC4 to R8, BC5 to RG8 (UNORM or SNORM: the
@@ -757,7 +792,7 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
         if (target == NVN_TEXTURE_TARGET_3D) { uint32_t dd = v->d >> bl ? v->d >> bl : 1; if (b0 >= dd) b0 = 0; nly = 1; vt = VK_IMAGE_VIEW_TYPE_2D; }
         else if (vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || vt == VK_IMAGE_VIEW_TYPE_2D_ARRAY) vt = nly > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     }
-    if (vt == VK_IMAGE_VIEW_TYPE_2D && nly > 1) nly = 1;
+    if ((vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_2D) && nly > 1) nly = 1;
     if (vt == VK_IMAGE_VIEW_TYPE_CUBE) { nly = 6; if (b0 + 6 > v->layers) b0 = v->layers >= 6 ? v->layers - 6 : 0; }
     if (vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) { nly -= nly % 6; if (!nly) { vt = VK_IMAGE_VIEW_TYPE_CUBE; nly = 6; b0 = 0; } }
     VkImageAspectFlags asp = v->aspect; if (asp & VK_IMAGE_ASPECT_DEPTH_BIT && !rt) asp = VK_IMAGE_ASPECT_DEPTH_BIT;   // sampling reads depth
@@ -851,9 +886,9 @@ static VkSampler samp_get(int sid) {
 
 // ---------- Shaders and pipelines ----------
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
-enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID };
-typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg, off; } sbind;
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
+typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg; int32_t off, soff, view, num; } sbind;
 typedef struct vin_module {
     uint64_t mask;
     VkShaderModule module;
@@ -1066,13 +1101,18 @@ static shader_t *shader_get(const uint8_t md[8]) {
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
         else if (sscanf(ln, "vin %d %d", &l, &t) == 2 && l >= 0 && l < 32) { s->vin[l] = (uint8_t)t; s->vin_mask |= 1u << l; }
         else if (sscanf(ln, "b %d %7s %d %15s %d %d %15s %d %3s", &b, ty, &cnt, kind, &reg, &off, sk, &sreg, access) >= 8 && s->nb < 64) {
-            sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = (int16_t)off; e->sreg = (int16_t)sreg;
+            sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = off; e->sreg = (int16_t)sreg;
+            e->soff = e->view = -1;
+            const char *field;
+            if ((field = strstr(ln, " soff="))) e->soff = atoi(field + 6);
+            if ((field = strstr(ln, " view="))) e->view = atoi(field + 6);
+            if ((field = strstr(ln, " num="))) e->num = atoi(field + 5);
             e->read_only = !strcmp(access, "ro");
             e->type = !strcmp(ty, "ubo") ? BT_UBO : !strcmp(ty, "ssbo") ? BT_SSBO : !strcmp(ty, "cis") ? BT_CIS : !strcmp(ty, "tbuf") ? BT_TBUF : !strcmp(ty, "utb") ? BT_UTB :
                       !strcmp(ty, "stb") ? BT_STB : !strcmp(ty, "simg") ? BT_SIMG : !strcmp(ty, "tex") ? BT_TEX : BT_SAMP;
             e->kind = !strcmp(kind, "cbuf") ? K_CBUF : !strcmp(kind, "c1") ? K_C1 : !strcmp(kind, "support") ? K_SUPPORT : !strcmp(kind, "drvcb") ? K_DRVCB : !strcmp(kind, "tex") ? K_TEX :
-                      !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : K_UNK;
-            e->skind = !strcmp(sk, "samp") ? S_SAMP : !strcmp(sk, "samp_tex") ? S_SAMP_TEX : !strcmp(sk, "samp_id") ? S_SAMP_ID : S_NONE;
+                      !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : !strcmp(kind, "tex_ubo") ? K_TEXU : K_UNK;
+            e->skind = !strcmp(sk, "samp") ? S_SAMP : !strcmp(sk, "samp_tex") ? S_SAMP_TEX : !strcmp(sk, "samp_id") ? S_SAMP_ID : !strcmp(sk, "samp_ubo") ? S_SAMPU : S_NONE;
             if (e->kind == K_UNK) LOG("[RED] vk: shader %s binding %d has kind %s, not implemented (reads zero)", key, b, kind);
         }
     }
@@ -1168,6 +1208,7 @@ static struct {
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc;
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
     float blend_color[4]; int64_t copy_stride, copy_img_stride;
+    int tex_base, samp_base;
 } S;
 static int g_depth_zero = 1, g_queue_origin_ll;
 static _Atomic int g_origin_ll;
@@ -1379,19 +1420,56 @@ static VkDeviceSize copy_in(uint64_t addr, uint64_t size, VkDeviceSize align) { 
     return o;
 }
 static uint64_t g_tex_miss[4];   // texture slots read as the black dummy: 0 no handle bound, 1 handle not registered, 2 texture not created, 3 no view (logged with the frame stats)
-static VkImageView tex_slot(int stage, uint64_t h, VkSampler *sm, int *ok, vtex **vo) {
+int nvn_dpool_base(const void *pool, int texture);   // shared recorder's host-table numbering
+// Same ABI as Metal's TEXU/SAMPU: handles occupy 8-byte elements, with the
+// texture ID in the low 20 bits and sampler ID in the next 12 bits. These IDs
+// are relative to the pools bound at replay time, unlike recorded slot binds.
+static uint32_t uniform_handle(int stage, int reg, int64_t off) {
+    if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16 || off < 0) return 0;
+    const p_bind_buf *u = &S.ubo[stage][reg];
+    if (!u->addr || u->size < 4 || (uint64_t)off > u->size - 4 || u->addr > UINT64_MAX - (uint64_t)off - 4) return 0;
+    if (!mtl_addr(u->addr + off, 4, NULL, NULL)) return 0;
+    uint32_t handle; memcpy(&handle, (const void *)(uintptr_t)(u->addr + off), 4);
+    return handle;
+}
+static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
+    uint64_t handle = 0;
+    if (b->kind == K_TEX && b->reg >= 0 && b->reg < NTEX) handle = S.tex[stage][b->reg];
+    else if (b->kind == K_TEXU && b->off >= 0) {
+        uint32_t raw = uniform_handle(stage, b->reg, b->off + 8ll * element);
+        uint32_t tid = raw & 0xfffff;
+        handle = tid ? (uint64_t)tid + S.tex_base : 0;
+    }
+    uint64_t sid = 0;
+    if (b->skind == S_SAMP && b->sreg >= 0 && b->sreg < 128) sid = S.samp[stage][b->sreg] >> 20;
+    else if (b->skind == S_SAMP_TEX) sid = handle >> 20;
+    else if (b->skind == S_SAMP_ID && b->sreg >= 0) sid = b->sreg;
+    else if (b->skind == S_SAMPU && b->soff >= 0) {
+        sid = uniform_handle(stage, b->sreg, b->soff + 8ll * element) >> 20;
+        if (sid) sid += S.samp_base;
+    }
+    return (handle & 0xfffff) | sid << 20;
+}
+static VkImageView tex_slot(uint64_t h, const sbind *b, int *ok, vtex **vo) {
+    VkImageView dummy = sampled_dummy(b->view, b->num);
     int tid = (int)(h & 0xfffff); *ok = 0; if (vo) *vo = NULL;
-    if (!tid) { g_tex_miss[0]++; return g_dummy_view; }
+    if (!tid) { g_tex_miss[0]++; return dummy; }
     pthread_mutex_lock(&g_rmu);
     treg_t tr = tid < g_ntreg ? g_treg[tid] : (treg_t){0};
     pthread_mutex_unlock(&g_rmu);
-    if (!tr.ok) { g_tex_miss[1]++; return g_dummy_view; }
-    vtex *v = tex_get(&tr.t, 0); if (!v) { g_tex_miss[2]++; return g_dummy_view; }
+    if (!tr.ok) { g_tex_miss[1]++; return dummy; }
+    vtex *v = tex_get(&tr.t, 0); if (!v) { g_tex_miss[2]++; return dummy; }
+    if (b->view >= 0) {
+        int one = v->target == NVN_TEXTURE_TARGET_1D || v->target == NVN_TEXTURE_TARGET_1D_ARRAY;
+        int want_one = b->view == VK_IMAGE_VIEW_TYPE_1D || b->view == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+        if (one != want_one || (v->target == NVN_TEXTURE_TARGET_3D) != (b->view == VK_IMAGE_VIEW_TYPE_3D)) return dummy;
+        if ((b->view == VK_IMAGE_VIEW_TYPE_CUBE || b->view == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) && (v->layers < 6 || v->w != v->h)) return dummy;
+    }
     if (vo) *vo = v;
-    VkImageView view = tex_view(v, &tr.t, &tr.v, tr.has_v, -1, 0);
-    (void)sm; (void)stage; *ok = view != VK_NULL_HANDLE;
+    VkImageView view = tex_view(v, &tr.t, &tr.v, tr.has_v, b->view, 0);
+    *ok = view != VK_NULL_HANDLE;
     if (!view) g_tex_miss[3]++;
-    return view ? view : g_dummy_view;
+    return view ? view : dummy;
 }
 // Same-pass feedback: a draw that samples a colour attachment of its own pass. On the Switch it reads what was there before the draw; Vulkan leaves it undefined, and the Mali-G57
 // returned garbage (Super Mario Odyssey's final pass, agl's post-effect program sampling the image it writes, drew yellow, green and red blotches over the picture; the Metal host
@@ -1430,12 +1508,14 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
     int want[8] = {0}, any = 0;
     for (int i = 0; i < fs->nb; i++) {
         const sbind *b = &fs->b[i];
-        if (b->type != BT_CIS || b->kind != K_TEX || b->reg < 0 || b->reg >= NTEX) continue;
-        int tid = (int)(S.tex[1][b->reg] & 0xfffff); if (!tid) continue;
+        if (b->type != BT_CIS || (b->kind != K_TEX && b->kind != K_TEXU) || b->count > 32) continue;
+        for (uint32_t element = 0; element < b->count; ++element) {
+        int tid = (int)(sampled_handle(1, b, element) & 0xfffff); if (!tid) continue;
         pthread_mutex_lock(&g_rmu); treg_t tr = tid < g_ntreg ? g_treg[tid] : (treg_t){0}; pthread_mutex_unlock(&g_rmu);
         if (!tr.ok) continue;
         vtex *v = tex_get(&tr.t, 0); if (!v) continue;
-        for (int a = 0; a < P.n; a++) if (P.ct[a] == v && P.cv[a] && v->d <= 1 && (S.chmask.mask >> (4 * a) & 0xf)) { want[a] = 1; any = 1; }
+        for (int a = 0; a < P.n; a++) if (P.ct[a] == v && P.cv[a] && v->target != NVN_TEXTURE_TARGET_3D && (S.chmask.mask >> (4 * a) & 0xf)) { want[a] = 1; any = 1; }
+        }
     }
     if (!any) return;
     int need = 0; for (int a = 0; a < P.n; a++) if (want[a] && P.cwr[a]) need = 1;
@@ -1483,6 +1563,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
     for (int i = 0; i < s->nb; ++i) {
         const sbind *b = &s->b[i];
         if (b->type == BT_SIMG) continue;
+        if (b->type == BT_CIS && b->count <= 32 && (b->kind == K_TEXU || (b->kind == K_TEX && b->count == 1))) continue;
         if (b->count != 1 || (b->type != BT_UBO && b->type != BT_SSBO && b->type != BT_CIS)) {
             RED_ONCE(22, "cannot populate descriptor %u type %d count %u (shader %s)", b->binding, b->type, b->count, s->key);
             return VK_NULL_HANDLE;
@@ -1491,7 +1572,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
     memset(g_bound_images[stage], 0, sizeof g_bound_images[stage]);
     VkDescriptorSet ds; VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, C->dp, 1, &s->dsl};
     if (vkAllocateDescriptorSets(g_dev, &ai, &ds) != VK_SUCCESS) { RED_ONCE(20, "descriptor pool exhausted in one submission: draws are dropped"); return VK_NULL_HANDLE; }
-    VkWriteDescriptorSet w[64]; VkDescriptorBufferInfo bi[64]; VkDescriptorImageInfo ii[64]; int nw = 0;
+    VkWriteDescriptorSet w[64]; VkDescriptorBufferInfo bi[64]; int nw = 0;
     for (int i = 0; i < s->nb; i++) {
         const sbind *b = &s->b[i];
         VkWriteDescriptorSet *x = &w[nw]; *x = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0, 1};
@@ -1541,15 +1622,25 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
             }
             x->descriptorType = b->type == BT_UBO ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; x->pBufferInfo = d;
         } else if (b->type == BT_CIS) {
-            VkSampler sm = g_dummy_samp; int ok = 0; VkImageView view = g_dummy_view;
-            if (b->kind == K_TEX && b->reg >= 0 && b->reg < NTEX) {
-                vtex *tv; view = tex_slot(stage, S.tex[stage][b->reg], &sm, &ok, &tv);
+            VkDescriptorImageInfo images[32];
+            for (uint32_t element = 0; element < b->count; ++element) {
+                uint64_t handle = sampled_handle(stage, b, element);
+                int ok; vtex *tv;
+                VkImageView view = tex_slot(handle, b, &ok, &tv);
+                if (!view) return VK_NULL_HANDLE;
                 if (stage == 1 && tv) for (int q = 0; q < g_fb_n; q++) if (tv == g_fb_src[q]) { view = g_fb_view[q]; break; }   // same-pass feedback: the snapshot (fb_prepare)
-                int sid = b->skind == S_SAMP && b->sreg >= 0 && b->sreg < 128 ? (int)(S.samp[stage][b->sreg] >> 20) : b->skind == S_SAMP_TEX ? (int)(S.tex[stage][b->reg] >> 20) : b->skind == S_SAMP_ID ? b->sreg : 0;
-                pthread_mutex_lock(&g_rmu); sm = samp_get(sid); pthread_mutex_unlock(&g_rmu);
+                pthread_mutex_lock(&g_rmu); VkSampler sampler = samp_get((int)(handle >> 20)); pthread_mutex_unlock(&g_rmu);
+                if (!ok && b->num) {
+                    static VkSampler nearest;
+                    if (!nearest) { VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; VKCHECK(vkCreateSampler(g_dev, &si, NULL, &nearest)); }
+                    sampler = nearest;
+                }
+                images[element] = (VkDescriptorImageInfo){sampler, view, VK_IMAGE_LAYOUT_GENERAL};
             }
-            ii[nw] = (VkDescriptorImageInfo){sm, view, VK_IMAGE_LAYOUT_GENERAL};
-            x->descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; x->pImageInfo = &ii[nw];
+            VkWriteDescriptorSet array = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0,
+                b->count, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, NULL, NULL};
+            vkUpdateDescriptorSets(g_dev, 1, &array, 0, NULL);
+            continue;
         }
         nw++;
     }
@@ -1976,6 +2067,8 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_COPY_B2B: { uint64_t s, d, n; memcpy(&s, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); mtl_sub_copy(s, d, n); break; }
             case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, a + 8, 8); memcpy((void *)d, a + 16, n); g_wgen++; break; }
             case OP_SET_RT: set_rt((const p_set_rt *)a); break;
+            case OP_SET_TEX_POOL: S.tex_base = nvn_dpool_base(((const p_set_pool *)a)->pool, 1); break;
+            case OP_SET_SAMP_POOL: S.samp_base = nvn_dpool_base(((const p_set_pool *)a)->pool, 0); break;
             case OP_CLEAR_COLOR: clear_color((const p_clear_color *)a); break;
             case OP_CLEAR_DS: clear_ds((const p_clear_ds *)a); break;
             case OP_DRAW: { p_draw t; draw(draw_rec(a, h.size, &t), NULL); break; }

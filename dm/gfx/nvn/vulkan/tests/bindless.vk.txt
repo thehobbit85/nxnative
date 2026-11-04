@@ -1,0 +1,3 @@
+stage ps
+b 0 cis 32 tex_ubo 7 352 samp_ubo 8 soff=128 view=2 num=0
+b 1 ubo 1 cbuf 9 -1 - -1
