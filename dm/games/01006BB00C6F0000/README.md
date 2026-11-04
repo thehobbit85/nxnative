@@ -76,6 +76,8 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- Android shader preparation: the XCI base plus v131072 update extract through the shared builder, but Vulkan export stops with `no guest resource for descriptor 1 ('fp_t_tcb_3A')`. The missing resource metadata needs investigation; no Android APK or Android gameplay result is established for this build.
+
 - **`SR_Y_DIRECTION`.** 2,487 of its pixel shaders read the window's Y-direction system register, which is −1 under a lower-left origin. The Ryujinx recompiler answers a constant +1 (a TODO in `InstEmitMove.cs`; LASRecomp answers −1). In the room shader the value only scales a depth slope under `abs()`; other shaders may use its sign (`dFdy`-based effects). Answering it per profile means a translator change, i.e. every game's chain.
 - **Two pixel shaders do not translate** (`9d8f6b8543355374`, `9338e3f1b597fe7c`: variants 0 and 1 of one program in `postprocess.bfsha` @0x252000; SPIRV-Cross throws on a null pointer). No run so far has loaded either.
 - development.md calls SDK 8.2.0 "the oldest so far"; Mario Kart 8 Deluxe (SDK 4.4.0) is older now.
