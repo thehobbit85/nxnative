@@ -76,6 +76,13 @@
 - **Fix:** check the ELF64 little-endian AArch64 shared-library header, explicit file/folder arguments, the main module, Android rewrite metadata and paired shader files before SDK compilation. Reject APK paths that collide with source assets or the development signing key. Empty shader directories remain valid for synthetic guests without graphics programs; full shader semantics and runtime capability checks belong to the exporter and renderer.
 - **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic prepared-folder and wrong-ABI fixtures in `test_packaging.py`.
 
+### Android prerequisite failures after native compilation
+
+- **Symptom:** a missing SDK executable or broken JDK fails packaging only after compiling the native host; an APK placed under an asset directory is collected on a later build.
+- **Cause:** the prepared wrapper checked only whether the NDK directory existed, and package output validation covered existing files without protecting entire collected directories.
+- **Fix:** share the packer's check-only SDK/JDK preflight with the native wrapper and run it before extraction in the NSP/XCI Android route. Check the actual NDK compiler/archiver and supported checkout path before invoking Make. Reject outputs inside collected asset directories, including automatically selected RomFS directories. NDK/output paths retain stable Make aliases; SDK/JDK arguments preserve spaces.
+- **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic prerequisite/path tests and an SDK build with spaced tool paths. The full shader preparation pipeline still requires macOS.
+
 ### Android APK rebuilt despite unchanged inputs
 
 - **Symptom:** repeated Android builds compile the same Java menu, recompress the same game assets and sign a new APK even when native and shader outputs were reused.

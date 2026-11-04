@@ -44,8 +44,13 @@ class AndroidTarget(unittest.TestCase):
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(module.subprocess, 'run') as run, mock.patch.object(sys, 'argv',
                 ['build_android.py', '0100000000000002', tmp, tmp + '/out.apk', '--profile', '0100000000000001', '--ndk', tmp]):
+            host = 'darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64'
+            native_tools = Path(tmp) / 'toolchains/llvm/prebuilt' / host / 'bin'; native_tools.mkdir(parents=True)
+            for name in ('aarch64-linux-android30-clang', 'llvm-ar'):
+                path = native_tools / name; path.write_text('#!/bin/sh\nexit 0\n'); path.chmod(0o755)
             module.main()
-            native, apk = [c.args[0] for c in run.call_args_list]
+            preflight, native, apk = [c.args[0] for c in run.call_args_list]
+            self.assertIn('--check-tools', preflight)
             self.assertIn('GAME=0100000000000001', native)
             self.assertEqual(apk[2], '0100000000000002')
             self.assertIn('0100000000000001/libdmhost.so', apk[apk.index('--library') + 1])
