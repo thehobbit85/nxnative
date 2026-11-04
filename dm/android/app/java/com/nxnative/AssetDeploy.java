@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.HashSet;
-import java.util.Arrays;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -38,7 +37,8 @@ public final class AssetDeploy {
     static void verify(File root, GameAssets.Manifest manifest, boolean upload) throws IOException {
         if (!root.isDirectory() || Files.isSymbolicLink(root.toPath())) throw new IOException("Missing game asset directory: " + root);
         Set<String> names = new HashSet<>();
-        Set<String> managed = new HashSet<>(Arrays.asList("dm", "romfs", "vk", "font", "aoc"));
+        Set<String> managed = new HashSet<>();
+        for (String name : AssetInstall.ROOTS) if (!name.startsWith(".")) managed.add(name);
         if (upload) {
             String[] children = root.list();
             if (children == null) throw new IOException("Could not list deployment");

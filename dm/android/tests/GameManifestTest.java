@@ -17,12 +17,15 @@ public final class GameManifestTest {
         byte[] good = new byte[]{1, 2, 3, 4, 5}; String digest = hash(good);
         String row = "romfs/romfs.img\t5\t=d\t" + digest + "\n";
         GameAssets.Manifest manifest = parse(row);
+        check(parse(row.replace("romfs/romfs.img", "programs/1/romfs/romfs.img")).entries.containsKey("programs/1/romfs/romfs.img"), "child RomFS omitted");
         check(manifest.identity.equals(hash(row.getBytes(StandardCharsets.UTF_8))), "identity does not cover complete manifest");
         check(manifest.entries.get("romfs/romfs.img").size == 5 && manifest.entries.get("romfs/romfs.img").data, "data entry differs");
         check(parse("romfs/empty\t0\t\t" + hash(new byte[0]) + "\n").entries.get("romfs/empty").pieces.length == 0, "empty file needs no pieces");
         for (String bad : new String[]{row + row, row.replace("\t5\t", "\t-1\t"), row.replace(digest, "bad"),
                 row.replace("romfs/romfs.img", "romfs/../env.txt"), row.replace("romfs/romfs.img", "romfs//bad"),
-                row.replace("=d", "../piece"), "romfs/file\t5\t=d\n"}) {
+                row.replace("=d", "../piece"), "romfs/file\t5\t=d\n",
+                row.replace("romfs/romfs.img", "programs/0/romfs/file"), row.replace("romfs/romfs.img", "programs/1/save/progress"),
+                row.replace("romfs/romfs.img", "programs/1/romfs/../../env.txt")}) {
             try { parse(bad); throw new AssertionError("accepted malformed manifest: " + bad); }
             catch (IOException expected) { }
         }

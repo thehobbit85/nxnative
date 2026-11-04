@@ -25,6 +25,8 @@ public final class AssetDeployTest {
     private static void upload(File root) throws Exception {
         File stage = new File(root, ".nx-deploy");
         AssetInstall.remove(stage);
+        // Python deployment creates all roots, even for a single-program app.
+        new File(stage, "programs").mkdirs();
         write(new File(stage, "dm/main.patched.bin"), "new code");
         write(new File(stage, "romfs/file"), "new data");
         write(new File(stage, "vk/empty"), "");
@@ -62,6 +64,14 @@ public final class AssetDeployTest {
             write(new File(root, "romfs/file"), "bad data");
             upload(root); AssetDeploy.install(root, manifest(), AssetInstall::move);
             check(Files.readString(new File(root, "romfs/file").toPath()).equals("new data"), "same-identity corruption not repaired");
+            GameAssets.Manifest multi = GameAssets.Manifest.read(new ByteArrayInputStream((TEXT + row("programs/1/romfs/child", "child data")).getBytes(StandardCharsets.UTF_8)));
+            upload(root); write(new File(root, ".nx-deploy/programs/1/romfs/child"), "child data");
+            AssetDeploy.install(root, multi, AssetInstall::move);
+            check(Files.readString(new File(root, "programs/1/romfs/child").toPath()).equals("child data"), "child data omitted");
+            upload(root); write(new File(root, ".nx-deploy/programs/1/romfs/child"), "wrong data");
+            try { AssetDeploy.install(root, multi, AssetInstall::move); throw new AssertionError("accepted wrong child data"); }
+            catch (IOException expected) { }
+            check(Files.readString(new File(root, "programs/1/romfs/child").toPath()).equals("child data") && AssetInstall.identity(root).equals(multi.identity), "rejected child data changed installation");
             File apk = new File(root, "fixture.apk");
             try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(apk))) {
                 zip.putNextEntry(new ZipEntry("assets/game/external-files.txt")); zip.write(TEXT.getBytes(StandardCharsets.UTF_8)); zip.closeEntry();

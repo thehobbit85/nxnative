@@ -18,6 +18,7 @@ from xml.sax.saxutils import escape
 HERE = os.path.dirname(os.path.abspath(__file__)); ANDROID = os.path.dirname(HERE)
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from dm.android.tools.target_contract import target_manifest
+from dm.android.tools.program_inputs import program_inputs, program_root
 SDK = BT = JAR = JAVA = ''
 ENV = os.environ.copy()
 APK_GAME_LIMIT = int(os.environ.get('APK_GAME_LIMIT', '3800000000'))
@@ -90,7 +91,7 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 def selected_inputs(a, lib, ks):
     # The Mac packer uses the same selection for its reuse key and copies. Keep
     # that contract here too, including automatically discovered icons/saves.
-    files = game_files(a.build, a.patched, a.romfs, a.aoc)
+    files = package_files(a)
     saves = []
     if a.save:
         for root, dirs, names in os.walk(a.save):
@@ -101,8 +102,11 @@ def selected_inputs(a, lib, ks):
     icon = a.icon or next(iter(sorted(glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')))), None)
     java = sorted(glob.glob(os.path.join(ANDROID, 'app', 'java', '**', '*.java'), recursive=True))
     sources = [('host', lib), ('keystore', ks), ('packer', __file__), ('target-contract', os.path.join(HERE, 'target_contract.py'))]
-    export_record = Path(a.build) / 'shader/vk/export-contract.json'
-    if export_record.is_file(): sources.append(('shader-export', str(export_record)))
+    sources.append(('program-inputs', os.path.join(HERE, 'program_inputs.py')))
+    if getattr(a, 'programs', None): sources.append(('programs', a.programs))
+    for index, item in program_inputs(a).items():
+        export_record = Path(item['build']) / 'shader/vk/export-contract.json'
+        if export_record.is_file(): sources.append(('shader-export/' + str(index), str(export_record)))
     sources += [('game/' + rel, src) for rel, src in files] + [('save/' + rel, src) for rel, src in saves]
     sources += [('java', src) for src in java]
     sources += [(role, src) for role, src in (('icon', icon), ('env', a.env_file), ('cheats', a.cheats)) if src]
@@ -174,9 +178,11 @@ def build(a):
     selected = selected_inputs(a, lib, ks)
     files, saves, icon, java, bid, sources = selected
     protected_sources = [src for _, src in sources] + ([a.romfs] if a.romfs else [])
-    asset_roots = [Path(a.build) / 'font', Path(a.build) / 'shader/vk', Path(a.patched or Path(a.build) / 'patched_android')]
-    asset_roots += [Path(path) for path in (a.save, a.aoc, a.romfs) if path and Path(path).is_dir()]
-    if not a.romfs: asset_roots += list(Path(a.build).glob('extract/*/RomFS'))
+    asset_roots = [Path(a.save)] if a.save else []
+    for item in program_inputs(a).values():
+        asset_roots += [Path(item['build']) / 'font', Path(item['build']) / 'shader/vk', Path(item['patched'] or Path(item['build']) / 'patched_android')]
+        asset_roots += [Path(path) for path in (item['aoc'], item['romfs']) if path and Path(path).is_dir()]
+        if not item['romfs']: asset_roots += list(Path(item['build']).glob('extract/*/RomFS'))
     for target in (output, receipt):
         if any(target == Path(source).resolve() for source in protected_sources) or any(target.is_relative_to(root.resolve()) for root in asset_roots):
             raise ValueError('output APK or receipt would replace or become part of a package input: ' + str(target))
@@ -330,6 +336,11 @@ def asset_pieces(src):
                 yield data[offset:offset + size]
 
 
+def package_files(a):
+    return [(program_root(index) + name, path) for index, item in sorted(program_inputs(a).items())
+            for name, path in game_files(item['build'], item['patched'], item['romfs'], item['aoc'])]
+
+
 def game_files(b, patched=None, romfs=None, aoc=None):   # (path in the app's external folder, source) for every game file
     vk = os.path.join(b, 'shader', 'vk'); out = []
     patched = str(patched or os.path.join(b, 'patched_android'))
@@ -374,10 +385,10 @@ def deploy(a):
     adb = os.path.join(sdk, 'platform-tools', 'adb') if sdk else 'adb'
     ext = f'/sdcard/Android/data/{package(a.id, a.test)}/files'
     stage = ext + '/.nx-deploy'
-    roots = ('dm', 'vk', 'font', 'romfs', 'aoc')
+    roots = ('dm', 'vk', 'font', 'romfs', 'aoc', 'programs')
     # The installed APK is the authority for this asset set. Reuse its Java
     # verifier/journal instead of maintaining a second transaction in shell.
-    files = [] if a.from_device else game_files(a.build, a.patched, a.romfs, a.aoc)
+    files = [] if a.from_device else package_files(a)
     apk = installed_apk(adb, a.serial, package(a.id, a.test))
     invoke = 'umask 000; CLASSPATH=' + shlex.quote(apk) + ' app_process /system/bin com.nxnative.AssetDeploy '
     run(adb, '-s', a.serial, 'shell', invoke + '--check ' + shlex.quote(apk))
@@ -386,7 +397,7 @@ def deploy(a):
     if a.from_device:
         source = shlex.quote(a.from_device.rstrip('/'))
         run(adb, '-s', a.serial, 'shell', f'set -e; test -d {source}/dm; test -d {source}/romfs; test -d {source}/vk; '
-            + f'for d in dm vk font romfs aoc; do if test -d {source}/$d; then cp -R {source}/$d/. {stage}/$d/; fi; done')
+            + f'for d in {" ".join(roots)}; do if test -d {source}/$d; then cp -R {source}/$d/. {stage}/$d/; fi; done')
     else:
         parents = sorted({os.path.dirname(stage + '/' + rel) for rel, _ in files})
         if parents: run(adb, '-s', a.serial, 'shell', 'mkdir -p ' + ' '.join(map(shlex.quote, parents)))
@@ -419,6 +430,7 @@ def main(argv=None):
     ap.add_argument('--bundle', action='store_true'); ap.add_argument('--test', action='store_true')
     ap.add_argument('--library'); ap.add_argument('--sdk'); ap.add_argument('--build-tools'); ap.add_argument('--android-jar')
     ap.add_argument('--profile', help='profile ID compiled into the host (default: application title ID)')
+    ap.add_argument('--programs', help='JSON catalog of prepared child programs for this application')
     ap.add_argument('--check-tools', action='store_true', help='validate SDK/JDK prerequisites without building')
     ap.add_argument('--keystore'); ap.add_argument('--version-code', type=int)
     ap.add_argument('--version-name', default='1.0', help='game display version (independent of --version-code)')

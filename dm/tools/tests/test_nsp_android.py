@@ -1,20 +1,104 @@
 """Android target routing and target-product isolation; no SDK or game data."""
 import importlib.util
+import json
+import os
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 import tempfile
 import types
 import unittest
 from unittest import mock
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('nsp_android', REPO / 'scripts/build_ipa_from_nsp.py')
 assert spec and spec.loader
-nsp = importlib.util.module_from_spec(spec)
+nsp: Any = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(nsp)
 
 
 class AndroidTarget(unittest.TestCase):
+    def test_android_tool_failure_precedes_package_scan_conversion_and_survey(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); keys = root / 'keys'; keys.touch()
+            args = nsp.parse_args([tmp, '--platform', 'android', '--keys', str(keys)])
+            reader = types.SimpleNamespace(contents=None, check_keys=lambda fam: None)
+            with mock.patch.object(nsp, 'check_native_python'), mock.patch.object(nsp, 'configure_dotnet'), \
+                 mock.patch.object(nsp, 'package_title_reader', return_value=nullcontext(reader)), \
+                 mock.patch.object(nsp, 'scan_nsps', side_effect=AssertionError('package scan began before Android preflight')), \
+                 mock.patch.object(nsp, 'run', side_effect=nsp.BuildError('Android SDK unavailable')), \
+                 mock.patch.dict(os.environ, {'ANDROID_NDK_HOME': tmp, 'ANDROID_SDK_ROOT': tmp}):
+                with self.assertRaisesRegex(nsp.BuildError, 'Android SDK'): nsp.main(args)
+
+    def test_child_dlc_reuses_application_indices_and_prepared_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); aoc = root / 'primary/aoc'; aoc.mkdir(parents=True)
+            (aoc / '1.img').write_bytes(b'application DLC one')
+            first = {'aoc': aoc}
+            for index in (1, 2):
+                child = root / str(index)
+                result = nsp.extract_aoc('unused', 'unused', REPO, child, 0x0100633007D48000 + index,
+                                         {'dlc': []}, child / 'logs', first=first)
+                self.assertEqual((result / '1.img').read_bytes(), b'application DLC one')
+                self.assertFalse(child.exists(), 'child re-extracted application DLC')
+            self.assertIsNone(nsp.extract_aoc('unused', 'unused', REPO, root / '3', 3, {'dlc': []}, root, first={'aoc': None}))
+
+    def test_catalog_binds_all_prepared_profiles_without_replacing_primary_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); profiles = root / 'selected'
+            from dm.games import game
+            for index in (0, 1, 2):
+                profile = profiles / f'{0x0100633007D48000 + index:016X}'; profile.mkdir(parents=True)
+                text = (REPO / 'dm/games/0100633007D48000/game.tsv').read_text()
+                if not index: text += '\nprograms\t1=0100633007D48001 2=0100633007D48002\n'
+                (profile / 'game.tsv').write_text(text)
+            g = game.load(str(profiles / '0100633007D48000'))
+            args = nsp.parse_args(['--platform', 'android', '--work-dir', tmp])
+            first = {'build': root, 'profile': g.id, 'profile_dir': g.dir}
+            def prepare(sub):
+                index = sub.program; build = Path(sub.work_dir); build.mkdir(parents=True)
+                (build / 'romfs').write_bytes(bytes([index]))
+                return dict(build=build, profile=f'{0x0100633007D48000 + index:016X}', profile_dir=profiles / f'{0x0100633007D48000 + index:016X}',
+                            patched=build / 'patched', romfs=build / 'romfs', aoc=None, gfx='nvn')
+            env = {}
+            with mock.patch.object(nsp, 'main', prepare): catalog, children = nsp.android_program_catalog(args, g, first, env)
+            self.assertEqual([p['index'] for p in json.loads(catalog.read_text())['programs']], [1, 2])
+            self.assertEqual([Path(children[i]['romfs']).read_bytes() for i in (1, 2)], [b'\x01', b'\x02'])
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(game.load(g.id).dir.resolve(), g.dir.resolve())
+                self.assertEqual(game.load('0100633007D48001').dir.resolve(), (profiles / '0100633007D48001').resolve())
+                self.assertIn('#define DM_GAME_MULTI 1', game.header(game.load(g.id)))
+
+    def test_child_programs_use_distinct_build_folders_and_restore_program_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = nsp.parse_args(['--platform', 'android', '--work-dir', tmp, '--no-keep-extracted'])
+            g = types.SimpleNamespace(get=lambda *a: '1=x 2=y', pairs=lambda key: [('1', 'x'), ('2', 'y')])
+            (root / 'prepared').write_text('primary')
+            def prepare(sub):
+                nsp.PROGRAM_INDEX = sub.program
+                work = Path(sub.work_dir); work.mkdir(parents=True, exist_ok=True)
+                (work / 'prepared').write_text(str(sub.program))
+                return {'build': work, 'keep': sub.keep_extracted}
+            with mock.patch.object(nsp, 'main', prepare):
+                parts = nsp.other_programs(args, g, {'build': root})
+            self.assertEqual((root / 'prepared').read_text(), 'primary')
+            self.assertEqual(len({str(parts[i]['build']) for i in (1, 2)}), 2)
+            self.assertEqual(nsp.PROGRAM_INDEX, 0)
+
+    def test_failed_child_preparation_restores_primary_program_selection(self):
+        args = nsp.parse_args(['--platform', 'android'])
+        g = types.SimpleNamespace(get=lambda *a: '1=x', pairs=lambda key: [('1', 'x')])
+        def fail(sub):
+            nsp.PROGRAM_INDEX = sub.program
+            raise nsp.BuildError('child preparation failed')
+        try:
+            with mock.patch.object(nsp, 'main', fail), self.assertRaisesRegex(nsp.BuildError, 'child preparation'):
+                nsp.other_programs(args, g, {'build': Path('/tmp/unused-fixture')})
+            self.assertEqual(nsp.PROGRAM_INDEX, 0)
+        finally: nsp.PROGRAM_INDEX = 0
+
     def test_android_metadata_options_are_checked_before_extraction(self):
         for options, error in ((['--platform', 'ios', '--android-keystore', 'key'], 'Android'),
                                (['--platform', 'ios', '--android-version-code', '7'], 'Android'),

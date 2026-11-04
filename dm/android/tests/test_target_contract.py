@@ -16,6 +16,69 @@ SPEC.loader.exec_module(contract)
 
 
 class TargetContract(unittest.TestCase):
+    def multi_fixture(self, root):
+        a, files = self.fixture(root)
+        child = root / '0100633007D48001'; shutil.copytree(a.profile, child)
+        with (Path(a.profile) / 'game.tsv').open('a') as stream: stream.write('programs\t1=0100633007D48001\n')
+        child_build = root / 'child'; child_build.mkdir()
+        (child_build / 'shader/vk').mkdir(parents=True)
+        copied = []
+        for name, src in files:
+            dest = child_build / Path(src).name; shutil.copyfile(src, dest)
+            copied.append(('programs/1/' + name, str(dest)))
+        catalog = root / 'programs.json'
+        catalog.write_text(json.dumps({'schema': 1, 'programs': [{'index': 1, 'profile': child.name, 'build': 'child', 'gfx': 'nvn'}]}))
+        a.programs = str(catalog)
+        return a, files + copied, child
+
+    def test_every_declared_program_has_its_own_modules_and_portable_identity(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'DM_GAMES_DIR': tmp, 'DM_GAMES_FIRST': '1'}):
+            root = Path(tmp); a, files, child = self.multi_fixture(root)
+            native = contract.host_contract(a.profile)
+            lib = root / 'lib.so'; lib.write_bytes(contract.START + native + contract.END)
+            target = contract.target_manifest(a, lib, files).decode()
+            self.assertIn('program_profile\t1\t' + child.name + '\n', native.decode())
+            self.assertIn('program\t1\t' + child.name + '\tprograms/1\n', target)
+            self.assertIn('module\t1/main\t', target)
+            self.assertNotIn(tmp, target)
+            with self.assertRaisesRegex(ValueError, 'main module'):
+                contract.target_manifest(a, lib, files[:2])
+            a.programs = None
+            with self.assertRaisesRegex(ValueError, 'declared programs'):
+                contract.target_manifest(a, lib, files)
+
+    def test_shader_producers_are_per_program_but_native_producer_covers_all(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'DM_GAMES_DIR': tmp, 'DM_GAMES_FIRST': '1'}):
+            root = Path(tmp); a, _, child = self.multi_fixture(root)
+            # Export before child preparation must not be invalidated by a
+            # later child profile derivation; the final host must see it.
+            contract.stamp_export(root / 'shader/vk', a.profile)
+            first = (root / 'shader/vk/export-contract.json').read_bytes()
+            native = contract.host_contract(a.profile)
+            with (child / 'game.tsv').open('a') as stream: stream.write('# derived child\n')
+            contract.stamp_export(root / 'shader/vk', a.profile)
+            self.assertEqual(first, (root / 'shader/vk/export-contract.json').read_bytes())
+            self.assertNotEqual(native, contract.host_contract(a.profile))
+
+    def test_child_shader_proof_and_catalog_cannot_be_silently_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'DM_GAMES_DIR': tmp, 'DM_GAMES_FIRST': '1'}):
+            root = Path(tmp); a, files, child = self.multi_fixture(root)
+            lib = root / 'lib.so'; lib.write_bytes(contract.START + contract.host_contract(a.profile) + contract.END)
+            shader = root / 'child/shader/vk/a.spv'; shader.write_bytes(b'child shader')
+            files.append(('programs/1/vk/a.spv', str(shader)))
+            with self.assertRaisesRegex(ValueError, 'shader.*export'): contract.target_manifest(a, lib, files)
+            contract.stamp_export(shader.parent, str(child))
+            self.assertIn(b'program_shader\t1\t', contract.target_manifest(a, lib, files))
+            shader.write_bytes(b'corrupt')
+            with self.assertRaisesRegex(ValueError, 'shader.*export'): contract.target_manifest(a, lib, files)
+            catalog = Path(a.programs); original = json.loads(catalog.read_text())
+            for changes in ({'index': 0}, {'index': True}, {'index': 2147483648}, {'profile': Path(a.profile).name}, {'gfx': 'gl'}, {'build': ''}):
+                with self.subTest(changes=changes):
+                    catalog.write_text(json.dumps({'schema': 1, 'programs': [dict(original['programs'][0], **changes)]}))
+                    with self.assertRaises(ValueError): contract.target_manifest(a, lib, files[:4])
+            catalog.write_text(json.dumps({'schema': 1, 'programs': original['programs'] * 2}))
+            with self.assertRaisesRegex(ValueError, 'unique'): contract.target_manifest(a, lib, files[:4])
+
     def fixture(self, root):
         profile = root / '0100633007D48000'; profile.mkdir()
         (profile / 'game.tsv').write_text((ROOT / 'dm/games/0100633007D48000/game.tsv').read_text().replace('modules\tmain subsdk0 sdk', 'modules\tmain'))

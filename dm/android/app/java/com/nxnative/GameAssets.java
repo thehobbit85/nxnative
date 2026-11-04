@@ -18,7 +18,7 @@ final class GameAssets {
     private GameAssets() { }
 
     private static void checkName(String name) throws IOException {
-        if (!name.matches("(?:dm|romfs|vk|font|aoc)/.+") || name.contains("\\"))
+        if (!name.matches("(?:programs/[1-9][0-9]{0,9}/)?(?:dm|romfs|vk|font|aoc)/.+") || name.contains("\\"))
             throw new IOException("Invalid game asset path: " + name);
         for (String part : name.split("/", -1)) if (part.isEmpty() || part.equals(".") || part.equals(".."))
             throw new IOException("Invalid game asset path: " + name);

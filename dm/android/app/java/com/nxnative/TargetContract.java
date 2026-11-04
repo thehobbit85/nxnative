@@ -18,6 +18,8 @@ final class TargetContract {
         if (!condition) throw new IOException("Incompatible Android target: " + detail + "; rebuild the APK and matching data");
     }
     private static boolean digest(String value) { return value.matches("[0-9a-f]{64}"); }
+    private static boolean index(String value) { return value.matches("0|[1-9][0-9]{0,9}") && Long.parseLong(value) <= Integer.MAX_VALUE; }
+    private static String root(String index) { return index.equals("0") ? "" : "programs/" + index + "/"; }
     static byte[] entry(ZipFile apk, String name) throws IOException {
         ZipEntry entry = apk.getEntry(name);
         if (entry == null) throw new IOException("APK has no " + name + "; rebuild it with the current Android builder");
@@ -38,8 +40,10 @@ final class TargetContract {
         String start = "NXNATIVE_ANDROID_HOST_V1\n", end = "NXNATIVE_ANDROID_HOST_END\n";
         int a = binary.indexOf(start), b = binary.indexOf(end);
         need(a >= 0 && b > a && binary.lastIndexOf(start) == a && binary.lastIndexOf(end) == b, "native producer record");
-        need(target.startsWith(binary.substring(a + start.length(), b)), "native producer differs from target manifest");
+        String producer = binary.substring(a + start.length(), b);
+        need(target.startsWith(producer), "native producer differs from target manifest");
         Map<String, String> scalar = new HashMap<>();
+        Map<String, String> nativePrograms = new HashMap<>(), programs = new HashMap<>(), shaderExports = new HashMap<>();
         Map<String, String[]> modules = new HashMap<>();
         Set<String> names = new HashSet<>(), inputs = new HashSet<>(), features = new HashSet<>();
         Set<String> known = Set.of("schema", "platform", "arch", "host_abi", "tp_slot", "shader_schema", "shader_chain",
@@ -55,7 +59,16 @@ final class TargetContract {
                     break;
                 }
                 case "module":
-                    need(f.length == 5 && f[1].matches("[A-Za-z0-9_-]+") && f[2].matches("[0-9a-f]{16,64}") && digest(f[3]) && digest(f[4]) && modules.put(f[1], f) == null, "module row");
+                    need(f.length == 5 && f[1].matches("(?:[1-9][0-9]{0,9}/)?[A-Za-z0-9_-]+") && f[2].matches("[0-9a-f]{16,64}") && digest(f[3]) && digest(f[4]) && modules.put(f[1], f) == null, "module row");
+                    break;
+                case "program_profile":
+                    need(f.length == 3 && index(f[1]) && f[2].matches("[0-9A-F]{16}") && producer.contains(row + "\n") && nativePrograms.put(f[1], f[2]) == null, "native program profile");
+                    break;
+                case "program":
+                    need(f.length == 4 && index(f[1]) && f[2].matches("[0-9A-F]{16}") && f[3].equals(f[1].equals("0") ? "." : "programs/" + f[1]) && programs.put(f[1], f[2]) == null, "program resources");
+                    break;
+                case "program_shader":
+                    need(f.length == 3 && index(f[1]) && !f[1].equals("0") && shaderExports.put(f[1], f[2]) == null, "program shader export");
                     break;
                 case "profile_input":
                     need(f.length == 3 && f[1].matches("[0-9A-F]{16}/[A-Za-z0-9_.-]+") && digest(f[2]) && inputs.add(f[1]), "profile input");
@@ -76,14 +89,27 @@ final class TargetContract {
         need(packageName == null || packageName.equals(pkg) || packageName.equals(pkg + ".test"), "application identity");
         need(hash(library).equals(scalar.get("host_sha256")), "native library hash");
         need(!inputs.isEmpty() && features.size() == 1 && names.equals(assets.entries.keySet()), "profile/features or asset inventory");
-        boolean shaders = names.stream().anyMatch(n -> n.startsWith("vk/"));
-        need(shaders ? digest(scalar.get("shader_export")) : "empty".equals(scalar.get("shader_export")), "shader export provenance");
+        need(programs.equals(nativePrograms), "prepared programs differ from native profiles");
+        if (programs.isEmpty()) programs.put("0", scalar.get("profile"));
+        need(scalar.get("profile").equals(programs.get("0")), "primary program profile");
+        shaderExports.put("0", scalar.get("shader_export"));
+        need(shaderExports.keySet().equals(programs.keySet()), "program shader inventory");
         Set<String> binaries = new HashSet<>();
-        for (String name : names) if (name.startsWith("dm/") && name.endsWith(".patched.bin")) binaries.add(name.substring(3, name.length() - 12));
-        need(modules.containsKey("main") && binaries.equals(modules.keySet()), "module inventory");
+        for (String program : programs.keySet()) {
+            String prefix = root(program), modulePrefix = program.equals("0") ? "" : program + "/";
+            boolean shaders = names.stream().anyMatch(n -> n.startsWith(prefix + "vk/"));
+            need(shaders ? digest(shaderExports.get(program)) : "empty".equals(shaderExports.get(program)), "shader export provenance for program " + program);
+            need(modules.containsKey(modulePrefix + "main"), "main module for program " + program);
+            for (String name : names) if (name.startsWith(prefix + "dm/") && name.endsWith(".patched.bin"))
+                binaries.add(modulePrefix + name.substring(prefix.length() + 3, name.length() - 12));
+        }
+        for (String name : names) if (name.startsWith("programs/")) need(programs.containsKey(name.split("/")[1]), "undeclared program asset");
+        need(binaries.equals(modules.keySet()), "module inventory");
         for (String[] module : modules.values()) {
-            GameAssets.Entry code = assets.entries.get("dm/" + module[1] + ".patched.bin");
-            GameAssets.Entry fixups = assets.entries.get("dm/" + module[1] + ".fixups.tsv");
+            String[] parts = module[1].split("/");
+            String path = parts.length == 1 ? "dm/" + parts[0] : root(parts[0]) + "dm/" + parts[1];
+            GameAssets.Entry code = assets.entries.get(path + ".patched.bin");
+            GameAssets.Entry fixups = assets.entries.get(path + ".fixups.tsv");
             need(code != null && fixups != null && module[3].equals(code.hash) && module[4].equals(fixups.hash), "module " + module[1]);
         }
     }
