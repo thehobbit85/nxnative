@@ -157,12 +157,12 @@ static uint64_t gpu_ticks(void) {
 // the exposure an auto-exposure pass computes) lives only in the ring until its submission completes and the copy goes back to guest memory (post kind 3). Until then
 // later work recorded from the same range is bound to that ring range itself instead of a fresh copy of the guest's stale bytes (gw_find); the entry dies with the ring
 // (ctx_complete, when the bytes are back in guest memory)
-typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t fence; } gw_t;
+typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t fence; int cpu_known; } gw_t;
 static gw_t *g_gw; static size_t g_ngw, g_cgw; static pthread_mutex_t g_gwmu = PTHREAD_MUTEX_INITIALIZER;
 static int overlaps(uint64_t a, uint64_t an, uint64_t b, uint64_t bn) {
     return an && bn && (a < b ? b - a < an : a - b < bn);
 }
-static void gw_add(uint64_t addr, uint64_t size, VkBuffer buf, VkDeviceSize off, uint8_t *p, uint64_t fence) {
+static void gw_add(uint64_t addr, uint64_t size, VkBuffer buf, VkDeviceSize off, uint8_t *p, uint64_t fence, int cpu_known) {
     pthread_mutex_lock(&g_gwmu);
     for (size_t i = 0; i < g_ngw; i++) if (g_gw[i].addr == addr && g_gw[i].size == size) {
         --g_ngw;
@@ -176,7 +176,7 @@ static void gw_add(uint64_t addr, uint64_t size, VkBuffer buf, VkDeviceSize off,
         if (!next) die("Vulkan: cannot track live GPU buffer writes");
         g_gw = next; g_cgw = capacity;
     }
-    g_gw[g_ngw++] = (gw_t){addr, size, buf, off, p, fence};
+    g_gw[g_ngw++] = (gw_t){addr, size, buf, off, p, fence, cpu_known};
     pthread_mutex_unlock(&g_gwmu);
     g_wgen++;
 }
@@ -208,9 +208,12 @@ static void gw_wait_prior(uint64_t addr, uint64_t size) {
     pthread_mutex_unlock(&g_gwmu);
     if (wait) mtl_wait(wait, UINT64_MAX);
 }
-static void buffer_written(uint64_t addr, uint64_t size, VkBuffer buffer, VkDeviceSize offset, uint8_t *mapped) {
-    gw_add(addr, size, buffer, offset, mapped, g_fence + 1);
+static void buffer_publish(uint64_t addr, uint64_t size, VkBuffer buffer, VkDeviceSize offset, uint8_t *mapped, int cpu_known) {
+    gw_add(addr, size, buffer, offset, mapped, g_fence + 1, cpu_known);
     post_add((post_t){3, (void *)(uintptr_t)addr, 0, 0, 0, 0, mapped, size});
+}
+static void buffer_written(uint64_t addr, uint64_t size, VkBuffer buffer, VkDeviceSize offset, uint8_t *mapped) {
+    buffer_publish(addr, size, buffer, offset, mapped, 0);
 }
 static void gw_expire(uint64_t fence) {   // completion: the submission's writes are in guest memory now, and its rings go
     pthread_mutex_lock(&g_gwmu);
@@ -1569,6 +1572,68 @@ static VkDeviceSize copy_in(uint64_t addr, uint64_t size, VkDeviceSize align) { 
 }
 static uint64_t g_tex_miss[4];   // texture slots read as the black dummy: 0 no handle bound, 1 handle not registered, 2 texture not created, 3 no view (logged with the frame stats)
 int nvn_dpool_base(const void *pool, int texture);   // shared recorder's host-table numbering
+// Index widening/scanning and descriptor-handle decoding happen on the CPU.
+// Finish only an actual GPU dependency, before allocating this command's sets
+// or buffers: a submission cut here would invalidate those allocations later.
+static void cpu_ready(uint64_t addr, uint64_t size) {
+    if (!size) return;
+    for (int i = 0; i < P.n; i++) {
+        const vtex *v = P.ct[i];
+        if (v && v->linrow && (P.cdrawn[i] || P.clr_c[i]) &&
+            overlaps(addr, size, (uintptr_t)v->mem, (uint64_t)v->linrow * v->h)) { pass_end(); break; }
+    }
+    gw_wait_prior(addr, size);
+    int gpu = 0;
+    pthread_mutex_lock(&g_gwmu);
+    for (size_t i = 0; i < g_ngw && !gpu; i++) {
+        const gw_t *w = &g_gw[i];
+        if (w->cpu_known || !overlaps(addr, size, w->addr, w->size)) continue;
+        uint64_t at = addr > w->addr ? addr : w->addr;
+        uint64_t left = size - (at - addr), wn = w->size - (at - w->addr);
+        if (left > wn) left = wn;
+        // Later inline updates/fills can completely replace these GPU bytes.
+        // Their mapped snapshots are known without submitting any GPU work.
+        while (left) {
+            uint64_t covered = 0;
+            for (size_t j = i + 1; j < g_ngw; j++) {
+                const gw_t *k = &g_gw[j];
+                if (k->cpu_known && at >= k->addr && at - k->addr < k->size) {
+                    uint64_t n = k->size - (at - k->addr);
+                    if (n > covered) covered = n;
+                }
+            }
+            if (!covered) { gpu = 1; break; }
+            if (covered >= left) break;
+            at += covered; left -= covered;
+        }
+    }
+    if (!gpu) for (size_t i = 0; i < g_ngw; i++) {
+        const gw_t *w = &g_gw[i];
+        if (!w->cpu_known || !overlaps(addr, size, w->addr, w->size)) continue;
+        uint64_t lo = addr > w->addr ? addr : w->addr;
+        uint64_t n = size - (lo - addr), wn = w->size - (lo - w->addr);
+        if (n > wn) n = wn;
+        memcpy((void *)(uintptr_t)lo, w->p + (lo - w->addr), n);
+    }
+    pthread_mutex_unlock(&g_gwmu);
+    if (gpu) { mtl_wait(mtl_sub_commit(), UINT64_MAX); mtl_sub_begin(); }
+}
+static void uniform_ready(int stage, int reg, int64_t off, uint32_t count) {
+    if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16 || off < 0 || !count) return;
+    const p_bind_buf *u = &S.ubo[stage][reg];
+    if (!u->addr || (uint64_t)off >= u->size || u->addr > UINT64_MAX - (uint64_t)off) return;
+    uint64_t size = 8ull * (count - 1) + 4;
+    if (size > u->size - (uint64_t)off) size = u->size - (uint64_t)off;
+    cpu_ready(u->addr + off, size);
+}
+static void shader_cpu_ready(const shader_t *s, int stage) {
+    if (!s) return;
+    for (int i = 0; i < s->nb; i++) {
+        const sbind *b = &s->b[i];
+        if (b->kind == K_TEXU) uniform_ready(stage, b->reg, b->off, b->count);
+        if (b->skind == S_SAMPU) uniform_ready(stage, b->sreg, b->soff, b->count);
+    }
+}
 // Same ABI as Metal's TEXU/SAMPU: handles occupy 8-byte elements, with the
 // texture ID in the low 20 bits and sampler ID in the next 12 bits. These IDs
 // are relative to the pools bound at replay time, unlike recorded slot binds.
@@ -1912,6 +1977,8 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (S.bst[2] || S.bst[3] || S.bst[4]) RED_ONCE(32, "geometry / tessellation stages are bound: not drawn with them yet");
     if (vk_skip() & SK_DRAW) SKIP(4);
     if (!vs || !vs->mod || (fs && !fs->mod)) SKIP(1);
+    if (di && !di->ind && di->count > 0) cpu_ready(di->ibuf, (uint64_t)di->count * (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4));
+    shader_cpu_ready(vs, 0); shader_cpu_ready(fs, 1);
     if (!pass_begin()) SKIP(2);
     if ((dw && dw->ind) || (di && di->ind)) { RED_ONCE(30, "indirect draws are not implemented yet"); SKIP(3); }
     int prim = dw ? dw->prim : di->prim;
@@ -2086,6 +2153,7 @@ static void dispatch(const p_dispatch *d) {
     }
     shader_t *cs = pc[h].cs; if (!cs || !cs->mod) { RED_ONCE(64, "compute program without a usable compute shader: dispatch skipped"); return; }
     pass_end();
+    shader_cpu_ready(cs, 5);
     if (!prepare_storage(&cs, NULL)) return;
     if (!cs->cpp) {
         VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &cs->dsl, 0, NULL}; VKCHECK(vkCreatePipelineLayout(g_dev, &li, NULL, &cs->cpl));
@@ -2342,7 +2410,7 @@ static void buffer_update(uint64_t addr, const void *data, uint64_t n) {
     // Preserve CPU-side descriptor-handle decoding for inline updates. The
     // ordered completion copy also overrides older GPU writes to these bytes.
     memcpy((void *)(uintptr_t)addr, data, n);
-    buffer_written(addr, n, C->ring, offset, C->ringp + offset);
+    buffer_publish(addr, n, C->ring, offset, C->ringp + offset, 1);
 }
 static void buffer_clear(const p_clear_buf *clear) {
     uint64_t n = clear->size & ~3ull;
@@ -2350,7 +2418,7 @@ static void buffer_clear(const p_clear_buf *clear) {
     VkDeviceSize offset = ring_alloc(n, 16);
     if (offset == VK_WHOLE_SIZE) return;
     for (uint64_t i = 0; i < n; i += 4) memcpy(C->ringp + offset + i, &clear->value, 4);
-    buffer_written(clear->addr, n, C->ring, offset, C->ringp + offset);
+    buffer_publish(clear->addr, n, C->ring, offset, C->ringp + offset, 1);
 }
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post_add((post_t){1, (void *)val, mode, v}); }
 void mtl_sub_counter(uint64_t addr, uint32_t type) { post_add((post_t){2, NULL, 0, 0, addr, type}); }
@@ -2449,7 +2517,7 @@ static void mtl_exec_(const uint8_t *p) {
                 p_bind_handles tmp; const p_bind_handles *b = bind_rec(h.op, a, &tmp);
                 if ((unsigned)b->stage >= 6 || (unsigned)b->n > 32) die("Vulkan: invalid NVN binding record");
                 uint64_t hh[32]; memcpy(hh, b->h, 8 * b->n);
-                if (b->defer && b->src) memcpy(hh, (const void *)(uintptr_t)b->src, 8 * b->n);   // BindTexturesDeferred: the handles as they are now
+                if (b->defer && b->src) { cpu_ready(b->src, 8 * b->n); memcpy(hh, (const void *)(uintptr_t)b->src, 8 * b->n); }   // BindTexturesDeferred: the handles as they are now
                 uint64_t *dst = (h.op == OP_BIND_TEX || h.op == OP_BIND_TEX1) ? S.tex[b->stage] : h.op == OP_BIND_SAMP ? S.samp[b->stage] : S.img[b->stage];
                 int lim = (h.op == OP_BIND_TEX || h.op == OP_BIND_TEX1) ? NTEX : h.op == OP_BIND_SAMP ? 128 : 32;
                 if (b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) memcpy(dst + b->first, hh, 8 * b->n);

@@ -10,7 +10,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** the Vulkan backend reused GPU storage only for fully covered reads, otherwise copied stale guest bytes. Copies and fills ran on the CPU before earlier GPU writes completed; texture readbacks were published only to the completion thread. A fixed write table discarded live entries.
 - **Fix:** keep a growable ordered list of live GPU-backed ranges. Compose partial intersections into a fresh ring snapshot with transfer dependencies, preserving untouched CPU bytes. Copies, fills, inline updates and the actual rows of texture readbacks publish that backing to later GPU consumers and ordered completion copies. Wait for prior submissions before taking their CPU snapshot, and reopen the render pass when resolving a draw's buffers ended it.
 - **Found on:** synthetic Vulkan replay (`dm/gfx/nvn/vulkan/tests/t_replay.c`), 2026-11-04: `ordered_buffers`, `readback_gpu_consumer`, `buffer_range_lifetime` and updated-index draws. Exact words and padding pass on Android SwiftShader with dynamic rendering and legacy render passes; the previous implementation fails the overlapping-write and readback consumers.
-- **Open:** GPU-produced indices or handles inspected by the CPU and pool lifetime need further qualification. Graphics-stage publication and storage aliases are covered below. This increment does not establish full buffer parity. See the [parity matrix](../nvn-vulkan-parity.md).
+- **Open:** Pool lifetime needs further qualification. CPU consumers, graphics-stage publication and storage aliases are covered below. This increment does not establish full buffer parity. See the [parity matrix](../nvn-vulkan-parity.md).
+
+### Vulkan CPU consumers of GPU-produced buffers
+
+- **Symptom:** a draw disappears when compute writes its indices, or samples a missing texture when compute writes its texture/sampler handles.
+- **Cause:** the executor scans indices and decodes handles on the CPU while the newest bytes still live in a pending GPU buffer. The GPU-to-GPU ownership path alone cannot make those CPU reads current.
+- **Fix:** preflight index and uniform-handle reads before allocating a draw or dispatch's descriptors and storage. Wait for overlapping prior submissions; submit and wait for unresolved current GPU writes, preserving replay state. Deferred handle records resolve their bytes at execution time. Inline updates and fills retain CPU-known snapshots: apply them in order without a wait when they cover the requested bytes, even when several later updates collectively replace an earlier GPU range.
+- **Found on:** synthetic Vulkan replay, 2026-11-04. GPU-generated 8/16/32-bit indices draw the expected triangle within/across submissions. Uniform texture/sampler arrays and deferred texture handles select the expected pixels; overwritten GPU handles require no extra submission. Both dynamic and legacy rendering pass on Android SwiftShader. The previous implementation skips the indexed triangle and samples black for generated handles.
+- **Open:** indirect/count draws and CPU texture operations need their own consumers and lifetime tests.
 
 ### Vulkan vertex and fragment storage writes
 
