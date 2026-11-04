@@ -1305,12 +1305,12 @@ static void lin_writeback(vtex *v) {
     buffer_written((uintptr_t)v->mem, n, C->ring, o, C->ringp + o);
     if (!g_lin_wb++) LOG("vk: linear render target %ux%u format %d goes back to its storage after each pass (serial %llu)", v->w, v->h, (int)v->f.f, (unsigned long long)v->serial);
 }
-static int g_pass_image_writes;
+static int g_pass_shader_writes;
 static void pass_end(void) {
     if (!P.open) { int pend = P.clr_d || P.clr_s; for (int i = 0; i < 8; i++) pend |= P.clr_c[i]; if (pend) pass_begin(); }   // clears with no draw after them still happen
     if (P.open) {
         rp_end(C->cb); P.open = 0;
-        if (g_pass_image_writes) { barrier_all(C->cb); g_pass_image_writes = 0; }
+        if (g_pass_shader_writes) { barrier_all(C->cb); g_pass_shader_writes = 0; }
         // what the pass wrote is read by later passes, samples and copies; their vertex work may start before it ends
         VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
         vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
@@ -1623,7 +1623,7 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
     for (int a = 0; a < P.n && g_fb_n < 8; a++) if (want[a]) { fbsnap_t *e = fb_snap_for(P.ct[a], a); if (e) { g_fb_src[g_fb_n] = P.ct[a]; g_fb_view[g_fb_n++] = e->view; } }
     if (need) { barrier_all(cb); pass_begin(); }
 }
-static gw_t g_wb[16]; static int g_nwb;   // the storage buffers the last compute descriptor set bound (write_set), which its dispatch writes
+static gw_t g_wb[128]; static int g_nwb;   // writable buffers of this draw or dispatch, published only after command encoding
 // The descriptor set is populated before the draw/dispatch. Only transfer ownership
 // to the GPU after a command using it has actually been recorded.
 static vtex *g_bound_images[6][32];
@@ -1657,7 +1657,6 @@ static int bind_storage(VkDescriptorSet ds, const sbind *b, int stage) {
     return 1;
 }
 static VkDescriptorSet write_set(shader_t *s, int stage) {
-    if (stage == 5) g_nwb = 0;
     // Every statically used descriptor must be populated before submitting this pipeline.
     for (int i = 0; i < s->nb; ++i) {
         const sbind *b = &s->b[i];
@@ -1692,14 +1691,15 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                 else if (u->addr && n) { VkDeviceSize o = copy_in(u->addr, n, 256); if (o != VK_WHOLE_SIZE) *d = (VkDescriptorBufferInfo){C->ring, o, n}; }
             } else if (b->kind == K_C1 && s->c1_len) { VkDeviceSize o = ring_put(s->c1, s->c1_len, 256); if (o != VK_WHOLE_SIZE) *d = (VkDescriptorBufferInfo){C->ring, o, s->c1_len}; }
             else if (b->kind == K_SUPPORT) *d = (VkDescriptorBufferInfo){g_support_buf, 0, 4096};
-            else if ((b->kind == K_SBUF || b->kind == K_UBOP) && b->reg >= 0 && b->reg < 16) {   // a copy, or the GPU's own earlier write; a dispatch's are written back (dispatch)
+            else if ((b->kind == K_SBUF || b->kind == K_UBOP) && b->reg >= 0 && b->reg < 16) {   // preserve prior GPU writes, then publish writable bindings after the command
                 const p_bind_buf *u = b->kind == K_SBUF ? &S.ssbo[stage][b->reg] : &S.ubo[stage][b->reg];
                 VkBuffer gb = VK_NULL_HANDLE; VkDeviceSize go = 0; uint8_t *gp = NULL;
                 if (u->addr && u->size && gw_find(u->addr, u->size, 256, &gb, &go, &gp)) *d = (VkDescriptorBufferInfo){gb, go, u->size};
                 else if (u->addr && u->size) { VkDeviceSize o = copy_in(u->addr, u->size, 256); if (o != VK_WHOLE_SIZE) { *d = (VkDescriptorBufferInfo){C->ring, o, u->size}; gb = C->ring; go = o; gp = C->ringp + o; } }
-                if (stage == 5 && gb && g_nwb < 16) g_wb[g_nwb++] = (gw_t){u->addr, u->size, gb, go, gp, 0};
-                if (stage != 5) { static const shader_t *seen[8]; static int nseen; int k = 0; while (k < nseen && seen[k] != s) k++;
-                                  if (k == nseen && nseen < 8) { seen[nseen++] = s; LOG("[RED] vk: shader %s (stage %d) binds storage buffer c%d at %#llx size %llu: what a draw writes to it is lost", s->key, stage, b->reg, (unsigned long long)u->addr, (unsigned long long)u->size); } }
+                if (gb && b->type == BT_SSBO && !b->read_only) {
+                    if (g_nwb == sizeof g_wb / sizeof *g_wb) die("Vulkan: too many writable buffer bindings");
+                    g_wb[g_nwb++] = (gw_t){u->addr, u->size, gb, go, gp, 0};
+                }
             } else if (b->kind == K_DRVCB && b->off == DMSH_PUSH_BANK) {
                 VkDeviceSize align = b->type == BT_UBO ? g_props.limits.minUniformBufferOffsetAlignment : g_props.limits.minStorageBufferOffsetAlignment;
                 VkDeviceSize offset = ring_put(S.push[stage == 5], DMSH_PUSH_SIZE, align);
@@ -1776,6 +1776,8 @@ static int draw_begin(void) {
     return 1;
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) {
+    g_nwb = 0;
+    if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
     if (!S.bst[0]) SKIP(0);
     shader_t *vs = NULL, *fs = NULL;
     for (int st = 0; st < 2; st++) {   // the vertex shader of the program bound to the vertex stage, the fragment shader of the one bound to the fragment stage (cached by program and serial)
@@ -1898,8 +1900,13 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
         }
     }
     #undef IDX
-    g_pass_image_writes |= mark_image_writes(0);
-    if (fs) g_pass_image_writes |= mark_image_writes(1);
+    for (int i = 0; i < g_nwb; i++) {
+        gw_t *w = &g_wb[i];
+        buffer_written(w->addr, w->size, w->buf, w->off, w->p);
+    }
+    g_pass_shader_writes |= g_nwb != 0;
+    g_pass_shader_writes |= mark_image_writes(0);
+    if (fs) g_pass_shader_writes |= mark_image_writes(1);
     g_stat_draws++;
 }
 // Resolve the 12 argument bytes at execution time. A shader may supply just X,
@@ -1970,6 +1977,7 @@ static void dispatch(const p_dispatch *d) {
         g_dispatch_offset = prepare_dispatch_indirect(d->ind, &g_dispatch_args);
         if (g_dispatch_offset == VK_WHOLE_SIZE) return;
     }
+    g_nwb = 0;
     VkDescriptorSet ds = write_set(cs, 5); if (!ds) return;
     if (g_plog) LOG("plog:  dispatch cs %s %dx%dx%d, %d storage buffers", cs->key, d->x, d->y, d->z, g_nwb);
     vkCmdBindPipeline(C->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cs->cpp);

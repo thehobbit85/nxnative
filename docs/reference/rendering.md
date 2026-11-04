@@ -10,7 +10,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** the Vulkan backend reused GPU storage only for fully covered reads, otherwise copied stale guest bytes. Copies and fills ran on the CPU before earlier GPU writes completed; texture readbacks were published only to the completion thread. A fixed write table discarded live entries.
 - **Fix:** keep a growable ordered list of live GPU-backed ranges. Compose partial intersections into a fresh ring snapshot with transfer dependencies, preserving untouched CPU bytes. Copies, fills, inline updates and the actual rows of texture readbacks publish that backing to later GPU consumers and ordered completion copies. Wait for prior submissions before taking their CPU snapshot, and reopen the render pass when resolving a draw's buffers ended it.
 - **Found on:** synthetic Vulkan replay (`dm/gfx/nvn/vulkan/tests/t_replay.c`), 2026-11-04: `ordered_buffers`, `readback_gpu_consumer`, `buffer_range_lifetime` and updated-index draws. Exact words and padding pass on Android SwiftShader with dynamic rendering and legacy render passes; the previous implementation fails the overlapping-write and readback consumers.
-- **Open:** storage writes from graphics stages, simultaneous aliases within one command, and GPU-produced indices or handles inspected by the CPU require separate ownership support. This increment does not establish full buffer parity. See the [parity matrix](../nvn-vulkan-parity.md).
+- **Open:** simultaneous aliases within one command and GPU-produced indices or handles inspected by the CPU require separate ownership support. Graphics-stage publication is covered by the next entry. This increment does not establish full buffer parity. See the [parity matrix](../nvn-vulkan-parity.md).
+
+### Vulkan vertex and fragment storage writes
+
+- **Symptom:** a vertex or fragment program updates a storage buffer, but a following dispatch and the fenced guest memory retain its old values (`what a draw writes to it is lost`).
+- **Cause:** descriptor setup tracked writable storage buffers only for compute dispatches. Draws neither published their backing nor established shader-write dependencies at pass boundaries.
+- **Fix:** gather writable bindings across both graphics stages, publish them only after an actual draw, and order the writes before subsequent commands. Read-only bindings do not schedule completion writes. The same ownership and completion mechanism serves compute and graphics.
+- **Found on:** synthetic `graphics_storage` in the Vulkan replay, 2026-11-04. Three successive draws atomically increment distinct vertex and pixel words, validate the previous fragment value in rendered pixels, and feed compute consumers both within and across submissions. Final words and guards pass on Android SwiftShader with dynamic and legacy rendering; the old backend returns vertex value 10 instead of 13.
+- **Open:** simultaneous overlapping descriptors still need shared backing; this test uses independent vertex and fragment ranges.
 
 ### Vulkan texture uploads visible to sampling
 

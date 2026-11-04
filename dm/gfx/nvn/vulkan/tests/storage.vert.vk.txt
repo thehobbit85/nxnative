@@ -1,0 +1,2 @@
+stage vs
+b 0 ssbo 1 sbuf 0 -1 - -1
