@@ -108,6 +108,10 @@ $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 .PHONY: nro
 nro: $(B)/t_nro
 	$(B)/t_nro
+.PHONY: android-nro-build
+android-nro-build: $(B)/t_nro_android
+$(B)/t_nro_android: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h ../android_text.h ../../android/compat/sha256.c ../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ t_nro.c ../../android/compat/sha256.c
 # the cheat engine (hle_cheats.c, compiled into the test with stubs for the loader, the heap and the keys)
 $(B)/t_cheats: t_cheats.c ../hle_cheats.c ../dm.h ../dm_input.h ../host_memory.h ../android_text.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_cheats.c
