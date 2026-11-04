@@ -2,6 +2,11 @@
 // the calling thread, as it does in the windowless Mac frontend.
 #include "front.h"
 
+#ifdef DM_ANDROID_CLI
+int dm_main(int argc, char **argv);
+int main(int argc, char **argv) { return dm_main(argc, argv); }
+#endif
+
 void front_run(void (*guest)(void)) { guest(); }
 void *front_metal_layer(void) { return NULL; }
 int front_screen_max_fps(void) { return 0; }
