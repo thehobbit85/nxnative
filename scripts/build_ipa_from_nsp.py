@@ -2508,13 +2508,15 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
     PROG.stage('Android Vulkan shaders')
     keys = sorted(shader_keys(g))
     exporter = repo / 'dm/android/tools/spv_android.py'
-    key = fingerprint(pkg_key, keys, ('files', chain_files(repo) + [exporter] + profile_files(g)),
+    contract_tool = repo / 'dm/android/tools/target_contract.py'
+    patches = [g.table('patches.py')] if g.table('patches.py').is_file() else []
+    key = fingerprint(pkg_key, keys, ('files', chain_files(repo) + [exporter, contract_tool] + profile_files(g) + patches),
                       ('stat', repo / 'dm/gfx/tools/dmsh_xlate_bin'), env=env)
     out = sh / 'vk'; manifest = out / 'manifest.json'
     try:
         saved = json.loads(manifest.read_text())
         expected = {k + suffix for k in keys for suffix in ('.spv', '.vk.txt')}
-        if saved['inputs'] == key and set(saved['files']) == expected and all(
+        if saved['provenance'] == hashlib.sha256((out / 'export-contract.json').read_bytes()).hexdigest() and saved['inputs'] == key and set(saved['files']) == expected and all(
                 hashlib.sha256((out / name).read_bytes()).hexdigest() == digest for name, digest in saved['files'].items()):
             PROG.end(f'{len(keys)} shader stages, reused (inputs and products unchanged)')
             return out
@@ -2526,7 +2528,7 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
     run([py, exporter, sh / 'pkg', tmp, '--keys-file', wanted], logs / 'android_shaders.log', env=env)
     files = {k + suffix: hashlib.sha256((tmp / (k + suffix)).read_bytes()).hexdigest()
              for k in keys for suffix in ('.spv', '.vk.txt')}
-    (tmp / 'manifest.json').write_text(json.dumps({'inputs': key, 'files': files}, indent=2) + '\n')
+    (tmp / 'manifest.json').write_text(json.dumps({'inputs': key, 'files': files, 'provenance': hashlib.sha256((tmp / 'export-contract.json').read_bytes()).hexdigest()}, indent=2) + '\n')
     swap_in(tmp, out)
     PROG.end(f'{len(keys)} validated shader stages')
     return out

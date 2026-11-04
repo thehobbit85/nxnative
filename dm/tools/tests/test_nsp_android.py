@@ -67,6 +67,7 @@ class AndroidTarget(unittest.TestCase):
                 out = Path(cmd[3]); out.mkdir()
                 (out / (key + '.spv')).write_bytes(b'shader')
                 (out / (key + '.vk.txt')).write_text('stage vs\n')
+                (out / 'export-contract.json').write_text('{}')
                 calls.append(cmd)
             with mock.patch.object(nsp, 'run', export), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'profile_files', return_value=[]):
                 out = nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source1')

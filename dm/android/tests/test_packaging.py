@@ -70,7 +70,7 @@ class Packaging(unittest.TestCase):
             if fail == 'data': raise OSError('fixture archive write failure')
             return digest
         with patch.object(pack, 'configure_tools', side_effect=configure), patch.object(pack, 'run', side_effect=run), patch.object(pack, 'write_data_file', side_effect=write), \
-             patch.object(pack, 'game_files', return_value=[('romfs/romfs.img', str(source))]), patch.object(pack, 'APK_GAME_LIMIT', limit):
+             patch.object(pack, 'game_files', return_value=[('romfs/romfs.img', str(source))]), patch.object(pack, 'target_manifest', return_value=b'fixture contract'), patch.object(pack, 'APK_GAME_LIMIT', limit):
             version = [] if automatic_version else ['--version-code', '101']
             bundled = ['--bundle'] if bundle else []
             pack.main(['0100633007D48000', str(build), str(output / 'Game.apk'), *bundled, '--library', str(library), *version, *options])

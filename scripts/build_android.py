@@ -66,7 +66,7 @@ def main():
             if not path.is_file() or not os.access(path, os.X_OK):
                 raise ValueError('Android NDK is missing executable ' + str(path))
         package_cmd = [sys.executable, str(ROOT / 'dm/android/tools/make_apk.py'), a.id, str(build), str(a.out.resolve()),
-                       '--library', str(output / profile / 'libdmhost.so'), *packaging]
+                       '--library', str(output / profile / 'libdmhost.so'), '--profile', profile, *packaging]
         subprocess.run([*package_cmd, '--check-tools'], check=True)
         if a.check_tools: return
         output.mkdir(parents=True, exist_ok=True)
