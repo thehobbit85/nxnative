@@ -76,6 +76,13 @@
 - **Fix:** check the ELF64 little-endian AArch64 shared-library header, explicit file/folder arguments, the main module, Android rewrite metadata and paired shader files before SDK compilation. Reject APK paths that collide with source assets or the development signing key. Empty shader directories remain valid for synthetic guests without graphics programs; full shader semantics and runtime capability checks belong to the exporter and renderer.
 - **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic prepared-folder and wrong-ABI fixtures in `test_packaging.py`.
 
+### Android APK rebuilt despite unchanged inputs
+
+- **Symptom:** repeated Android builds compile the same Java menu, recompress the same game assets and sign a new APK even when native and shader outputs were reused.
+- **Cause:** the donor APK packer had no input fingerprint or verified-product reuse check.
+- **Fix:** follow the Mac packer's shared selection/key approach: use the same file lists for hashing and packaging, including saves, auto-selected icons and cheat build metadata. Hash input contents, options, packer/Java sources and SDK tools; inventory the installed JDK runtime. A versioned receipt records the input digest and signed APK/companion hashes. Reuse requires all hashes to match. Recheck inputs before publication, and publish the receipt before the final APK rename so an interrupted publication cannot falsely reuse an older APK. A damaged content-named companion can be atomically restored; valid older archives remain untouched. Automatic version codes are assigned only when rebuilding.
+- **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic packaging fixtures. Checks cover same-size input changes, tools/runtime, saves, metadata, corrupted products/receipts, concurrent input changes and failed final publication. This reuse receipt is not a complete runtime capability manifest.
+
 ### Interrupted Android asset updates
 
 - **Symptom:** a failed or interrupted APK asset import leaves a mix of old and new game files; removed modules, shaders or DLC survive updates. A different companion ZIP with the same version and file lengths can be accepted.
