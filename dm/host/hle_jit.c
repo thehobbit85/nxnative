@@ -10,14 +10,15 @@
 #include <TargetConditionals.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <sys/mman.h>
-#include <libkern/OSCacheControl.h>
+#include "jit_memory.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 
 typedef struct { uint64_t offset, size; } jit_range;   // nn::jit::CodeRange: offset and size in the code (rx) or data (ro) memory
 // The plugin's view of its memory (the JITConfiguration yuzu names): the game's code and data memory, the transfer memory, and the service's own mappings of the first two.
-// Here sys_* are user_*: one mapping (the plugin writes its code through sys_rx: EmuSystemJITPlugin's GenerateCode keeps +0x30, and Control(0) hands +0 to the code it writes)
+// The plugin writes through sys_rx; the game executes user_rx. Apple uses one
+// MAP_JIT address; Android supplies distinct RW and RX aliases of shared pages.
 typedef struct { jit_range user_rx, user_ro, tmem, sys_rx, sys_ro; } jit_config;
 // The SDK's environment (GetImpl(handle) is the handle itself, sdk+0x2e5680): +0 the service object, +8 code memory address, +0x10 its size, +0x18 data memory address, +0x20 its size;
 // GetJitEnvironmentInfo copies +8..+0x28 (sdk+0x2e69e0). The host's handle points to the same layout, then its own fields
@@ -25,6 +26,7 @@ typedef struct {
     void *svc; uint64_t rx, rx_size, ro, ro_size;
     jit_config cfg;
     module_t *plugin;
+    dm_jit_memory code;
     uint64_t (*gen)(int *ret, jit_range *c0_out, jit_range *c1_out, jit_config *cfg, uint64_t cmd, const void *in, size_t in_size, const jit_range *c0_in,
                     const jit_range *c1_in, const void *data, size_t data_size, void *out, size_t out_size);
     uint64_t (*ctl)(int *ret, jit_config *cfg, uint64_t cmd, const void *in, size_t in_size, void *out, size_t out_size);
@@ -167,7 +169,7 @@ static void jit_map_image(uint8_t *at, const char *dir) {
     if (read(fd, at, g_img_size) != (ssize_t)g_img_size) die("jit: cannot read %s", path);
     close(fd);
     if (mprotect(at, g_img_size, PROT_READ | PROT_EXEC)) die("jit: cannot seal the image at %p", at);
-    sys_icache_invalidate(at, g_img_size);
+    __builtin___clear_cache((char *)at, (char *)at + g_img_size);
 #endif
 }   // pre: a module's patch area in front of its base (patch_off < 0)
 static void jit_capture(jit_env *e, uint64_t cmd, const void *in, size_t in_size, const jit_range *c0_in, const uint8_t d32[32], size_t data_size, const void *out, size_t out_size,
@@ -237,18 +239,14 @@ HLE_FORCE("_ZN2nn3jit20CreateJitEnvironmentEPNS0_9JitHandleERKNS0_27JitEnvironme
     jit_env *e = calloc(1, sizeof *e);
     pthread_mutex_init(&e->mu, NULL);
     e->plugin = m;
-    uint8_t *rx = NULL;
-#if TARGET_OS_IPHONE
-    die("jit::CreateJitEnvironment: iOS runs no code generated at run time");
-#else
-    rx = mmap(NULL, rx_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
-    if (rx == MAP_FAILED) die("jit: MAP_JIT mapping of %#llx bytes failed", (unsigned long long)rx_size);
-#endif
+    if (dm_jit_memory_create(&e->code, rx_size)) die("jit: executable mapping of %#llx bytes failed: %s", (unsigned long long)rx_size, strerror(errno));
+    uint8_t *rx = e->code.rx;
     uint8_t *ro = mmap(NULL, ro_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (ro == MAP_FAILED) die("jit: data memory of %#llx bytes", (unsigned long long)ro_size);
     e->rx = (uint64_t)rx; e->rx_size = rx_size; e->ro = (uint64_t)ro; e->ro_size = ro_size;
     // On Horizon the work buffer's code and data parts become code memory the game no longer reaches, and the transfer memory part the plugin's state
     e->cfg = (jit_config){{e->rx, rx_size}, {e->ro, ro_size}, {(uint64_t)(work + rx_size + ro_size), tmem_size}, {e->rx, rx_size}, {e->ro, ro_size}};
+    e->cfg.sys_rx.offset = (uint64_t)e->code.rw;
     nro_load_alone(m);
     // As the service loads a plugin (yuzu LoadPlugin): its _init, GetVersion (1), ResolveBasicSymbols, SetupDiagnostics (off), Configure, OnPrepared
     void *gv = module_sym(m, "nnjitpluginGetVersion"), *rb = module_sym(m, "nnjitpluginResolveBasicSymbols"), *sd = module_sym(m, "nnjitpluginSetupDiagnostics"),
@@ -265,7 +263,7 @@ HLE_FORCE("_ZN2nn3jit20CreateJitEnvironmentEPNS0_9JitHandleERKNS0_27JitEnvironme
     ((void (*)(uint32_t *))cf)(&flags);
     ((void (*)(jit_config *))op)(&e->cfg);
     *out = e; g_jit_env = e;
-    LOG("jit::CreateJitEnvironment: plugin %s (SHA-256 %s…, %u bytes) loaded; code memory %p + %#llx (MAP_JIT), data memory %p + %#llx, plugin state %p + %#llx (the work buffer's last part)",
+    LOG("jit::CreateJitEnvironment: plugin %s (SHA-256 %s…, %u bytes) loaded; code memory %p + %#llx, data memory %p + %#llx, plugin state %p + %#llx (the work buffer's last part)",
         m->name, hx, n, rx, (unsigned long long)rx_size, ro, (unsigned long long)ro_size, (void *)e->cfg.tmem.offset, (unsigned long long)tmem_size);
     return 0;
 }
@@ -277,7 +275,7 @@ HLE_FORCE("_ZN2nn3jit21DestroyJitEnvironmentENS0_9JitHandleE", "unload the plugi
     if (e->plugin) {
         if (e->plugin->fini) ((void (*)(void))(e->plugin->base + e->plugin->fini))();
         e->plugin->loaded = 0;
-        munmap((void *)e->rx, e->rx_size);
+        dm_jit_memory_destroy(&e->code);
     }   // a served image stays mapped in the layout
     munmap((void *)e->ro, e->ro_size); if (g_jit_env == e) g_jit_env = NULL;
     pthread_mutex_destroy(&e->mu); free(e);
@@ -346,8 +344,8 @@ HLE_FORCE("_ZN2nn3jit7ControlENS0_9JitHandleEmPKvmPvm", "the plugin's nnjitplugi
 
 // GenerateCode(&code_out, &data_out, handle, command, in, in_size, code_in, data_in, data, data_size, out, out_size): the ranges are offsets in the code and data memory;
 // data (at most 32 bytes) goes to the plugin zero-padded to 32, as the SDK sends it. After the plugin wrote code, the SDK invalidates the instruction cache over code_out and cleans the
-// data cache over data_out (sdk+0x2e6bcc); here the plugin wrote through the same mapping, so invalidating the code range is all
-HLE_FORCE("_ZN2nn3jit12GenerateCodeEPNS0_9CodeRangeES2_NS0_9JitHandleEmPKvmRKS1_S7_S5_mPvm", "the plugin's nnjitpluginGenerateCode, writing into the MAP_JIT code memory",
+// data cache over data_out (sdk+0x2e6bcc). Publish writes through the plugin's view to the guest's executable view.
+HLE_FORCE("_ZN2nn3jit12GenerateCodeEPNS0_9CodeRangeES2_NS0_9JitHandleEmPKvmRKS1_S7_S5_mPvm", "the plugin's nnjitpluginGenerateCode, writing into shared code memory",
           int, h_jit_Generate, jit_range *c0_out, jit_range *c1_out, jit_env *e, uint64_t cmd, const void *in, size_t in_size, const jit_range *c0_in, const jit_range *c1_in,
           const void *data, size_t data_size, void *out, size_t out_size) {
     uint8_t d32[32] = {0}; memcpy(d32, data, data_size < 32 ? data_size : 32);
@@ -356,16 +354,12 @@ HLE_FORCE("_ZN2nn3jit12GenerateCodeEPNS0_9CodeRangeES2_NS0_9JitHandleEmPKvmRKS1_
     if (!e->plugin) return jit_serve(e, c0_out, c1_out, cmd, in, in_size, c0_in, d32, data_size, out, out_size);
     uint64_t t0 = now_ns();
     pthread_mutex_lock(&e->mu);
-#if !TARGET_OS_IPHONE
-    pthread_jit_write_protect_np(0);
-#endif
+    dm_jit_memory_write(1);
     uint64_t w = e->gen(&ret, &o0, &o1, &e->cfg, cmd, in, in_size, c0_in, c1_in, d32, data_size, out, out_size);
-#if !TARGET_OS_IPHONE
-    pthread_jit_write_protect_np(1);
-#endif
+    dm_jit_memory_write(0);
     if (!w && !ret && o0.size) {
         if (!range_ok(&o0, e->rx_size)) die("jit::GenerateCode: the plugin returned code range %#llx + %#llx beyond the code memory", (unsigned long long)o0.offset, (unsigned long long)o0.size);
-        sys_icache_invalidate((void *)(e->rx + o0.offset), o0.size);
+        dm_jit_memory_publish(&e->code, o0.offset, o0.size);
     }
     uint64_t dt = now_ns() - t0; unsigned c = cmd < 8 ? (unsigned)cmd : 0;
     uint64_t k = ++e->ncalls[c]; e->nbytes[c] += o0.size; e->ns[c] += dt;

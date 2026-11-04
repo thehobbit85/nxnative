@@ -19,6 +19,7 @@ class ActorPriority(unittest.TestCase):
     def test_sentinel_fault_and_guard_preserve_valid_priorities(self):
         path = REPO/'dm/games/01006BB00C6F0000/patches.py'
         spec = importlib.util.spec_from_file_location('actor_patch', path)
+        assert spec and spec.loader
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         words, sites, puts = [], {}, {}
         ctx = SimpleNamespace(here=lambda: 0x20000+4*len(words), emit=words.append,

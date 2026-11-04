@@ -6,13 +6,15 @@ typedef struct avc_frame {
     int64_t pts;
     uint8_t nv12[];
 } avc_frame;
+int mavc_bt709(const mavc *a, int h) { return a->output_standard ? a->output_standard == 1 : h >= 720; }
+int mavc_fullrange(const mavc *a) { return a->output_full; }
 static void close_session(mavc *a) {
     media_close(&a->stream); a->fed_picture = 0;
 }
 void mavc_drop(mavc *a) {
     close_session(a); // start the next stream with fresh CSD even when flushed before the first output
     while (a->first) { avc_frame *next = a->first->next; free(a->first); a->first = next; }
-    a->last = NULL; a->nq = 0;
+    a->last = NULL; a->nq = 0; a->output_standard = a->output_full = 0;
 }
 void mavc_free(mavc *a) { if (a) { mavc_drop(a); free(a->au); free(a); } }
 void mavc_set_rgba(mavc *a) { a->rgba = 1; }
@@ -100,6 +102,7 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts) {
     }
     avc_frame *f = a->first;
     if (!f) return 0;
+    a->output_standard = f->standard; a->output_full = f->full;
     int cw = f->w < w ? f->w : w, ch = f->h < h ? f->h : h, cs = (f->w + 1) & ~1;
     const uint8_t *uv = f->nv12 + (size_t)f->w*f->h;
     if (a->rgba) {

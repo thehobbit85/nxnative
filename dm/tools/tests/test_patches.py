@@ -136,7 +136,7 @@ class ExternalRegistry(unittest.TestCase):
         return p
 
     def registry(self, roots=None):
-        ns = dict(__file__=str(self.tools / 'patch_nso.py'), os=os, glob=glob, importlib=importlib)
+        ns: dict = dict(__file__=str(self.tools / 'patch_nso.py'), os=os, glob=glob, importlib=importlib)
         with mock.patch.dict(os.environ, DM_GAMES_DIR=os.pathsep.join(map(str, roots or [self.external]))):
             exec(REGISTRY_CODE, ns)
         return ns['PATCHES'], ns['PATCH_WHERE']

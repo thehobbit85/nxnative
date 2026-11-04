@@ -824,6 +824,40 @@ class SplitShaders(Base):
 
 
 class RewriteWorkers(Base):
+    def test_android_rewrites_shared_captured_nro_without_booting_it_on_mac(self):
+        directory = self.tmp / 'nro_v65536'; directory.mkdir()
+        manifest = 'plugin\t' + 'ab' * 32 + '\t3\tregistered.nrr\tcapture\n'
+        (directory / 'nro.tsv').write_text(manifest)
+        (directory / 'plugin.nro').write_bytes(b'NRO')
+        out = self.tmp / 'patched_android_v65536'
+        def collect(py, repo, romfs, destination, env, logs):
+            # Collection reads the shared capture, never an Android-specific copy.
+            self.assertEqual((destination / 'nro.tsv').read_text(), manifest)
+            return {'plugin': destination / 'plugin.nro'}
+        def patch(cmd, **kw):
+            self.assertEqual(cmd[-2:], ['--thread-slots', 'android'])
+            (Path(cmd[3]) / (cmd[4] + '.patched.bin')).write_bytes(Path(cmd[2]).read_bytes() + b'-android')
+            return mock.Mock(returncode=0, poll=lambda: 0)
+        g = game.Game(self.src)
+        with mock.patch.object(nsp, 'collect_nros', collect), mock.patch.object(nsp, 'patch_files', return_value=[]), \
+             mock.patch.object(nsp.subprocess, 'Popen', side_effect=patch) as popen, mock.patch.object(nsp.time, 'sleep'), \
+             mock.patch.object(nsp, 'capture_nro', side_effect=AssertionError('Android code must never boot in the Mac host')):
+            for _ in range(2):
+                self.assertIs(nsp.rewrite(Path(sys.executable), REPO, self.ex / 'ExeFS', out,
+                                         {'DM_GAME': str(self.src)}, self.tmp / 'logs', g, thread_slots='android'), g)
+                self.assertEqual((out / 'plugin.patched.bin').read_bytes(), b'NRO-android')
+                self.assertEqual((out / 'nro.tsv').read_text(), manifest)
+            self.assertEqual(popen.call_count, 2)  # main + plugin, with the second build reused
+
+    def test_android_refuses_registered_nro_missing_from_shared_capture(self):
+        directory = self.tmp / 'nro_v65536'; directory.mkdir()
+        (directory / 'missing.tsv').write_text('ab' * 32 + '\tregistered.nrr\n')
+        with mock.patch.object(nsp, 'collect_nros', return_value={}), mock.patch.object(nsp.subprocess, 'Popen') as popen:
+            with self.assertRaisesRegex(nsp.BuildError, 'shared Mac preparation'):
+                nsp.rewrite(Path(sys.executable), REPO, self.ex / 'ExeFS', self.tmp / 'patched_android_v65536', {},
+                            self.tmp / 'logs', game.Game(self.src), thread_slots='android')
+            popen.assert_not_called()
+
     def test_explicit_workers_override_the_automatic_module_budget(self):
         g = game.Game(self.src)
         for value, expected in (('1', '1'), ('3', '3'), ('', '14')):
