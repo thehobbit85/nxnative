@@ -87,6 +87,15 @@ class Packaging(unittest.TestCase):
                 self.assertEqual(trace, [])
                 self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in apk.parent.iterdir()}, before)
 
+    def test_separate_apk_binds_expected_assets_without_bundling_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            apk = self.package_with_fake_sdk(Path(tmp), b'external data', bundle=False)
+            with zipfile.ZipFile(apk) as archive:
+                self.assertNotIn('assets/game/files.txt', archive.namelist())
+                self.assertFalse(any(n.startswith('assets/game/p/') for n in archive.namelist()))
+                row = archive.read('assets/game/external-files.txt').decode().strip().split('\t')
+                self.assertEqual(row, ['romfs/romfs.img', '13', '=d', hashlib.sha256(b'external data').hexdigest()])
+
     def test_changed_input_or_tool_invalidates_reuse(self):
         for change in ('same-size data', 'version', 'tool', 'runtime', 'save', 'new save'):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
@@ -294,6 +303,7 @@ class Packaging(unittest.TestCase):
                     if args[3] == 'shell':
                         command = args[4].replace(device, str(ext))
                         if command.startswith('am force-stop '): return
+                        if 'com.nxnative.AssetDeploy' in command: return # Java verifier/publication has its own native fixtures.
                         subprocess.run(['sh', '-c', 'umask 007; ' + command], check=True)
                     else:
                         self.assertEqual(args[3], 'push')
@@ -302,7 +312,8 @@ class Packaging(unittest.TestCase):
                 a = SimpleNamespace(sdk=None, id='0100633007D48000', test=False, serial='emulator-fixture',
                                     from_device=str(source) if remote else None, build='', patched=None, romfs=None, aoc=None)
                 files = [(str(p.relative_to(source)), str(p)) for p in source.rglob('asset')]
-                with patch.object(pack, 'run', side_effect=run), patch.object(pack, 'game_files', return_value=files):
+                with patch.object(pack, 'run', side_effect=run), patch.object(pack, 'game_files', return_value=files), \
+                     patch.object(pack, 'installed_apk', return_value='/data/app/fixture/base.apk'):
                     pack.deploy(a)
                 for path in ext.rglob('*'):
                     if path == sentinel: continue
@@ -323,6 +334,18 @@ class Packaging(unittest.TestCase):
                 self.assertGreater(len(data.infolist()), 1)
                 self.assertTrue(all(i.file_size <= 2 << 20 for i in data.infolist()))
                 self.assertEqual(b''.join(data.read(i) for i in data.infolist()), src.read_bytes())
+
+    def test_apk_update_during_deploy_aborts_before_publication(self):
+        a = SimpleNamespace(sdk=None, id='0100633007D48000', test=True, serial='emulator-fixture',
+                            from_device=None, build='', patched=None, romfs=None, aoc=None)
+        with patch.object(pack, 'game_files', return_value=[]), patch.object(pack, 'run') as run, \
+             patch.object(pack, 'installed_apk', side_effect=['/data/app/old path/base.apk', '/data/app/new/base.apk']):
+            with self.assertRaisesRegex(ValueError, 'APK changed'):
+                pack.deploy(a)
+        commands = [c.args[-1] for c in run.call_args_list]
+        self.assertEqual(sum('com.nxnative.AssetDeploy' in c for c in commands), 1)
+        self.assertIn('--check', commands[0])
+        self.assertIn("CLASSPATH='/data/app/old path/base.apk'", commands[0])
 
     def test_selected_version_uses_android_modules_and_romfs_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,7 +371,8 @@ class Packaging(unittest.TestCase):
             (root / 'patched_android/main.fixups.tsv').write_text('# TP_SLOT\t2\n')
             for test in (False, True):
                 for remote in (False, True):
-                    with self.subTest(test=test, remote=remote), patch.object(pack, 'run') as run:
+                    with self.subTest(test=test, remote=remote), patch.object(pack, 'run') as run, \
+                         patch.object(pack, 'installed_apk', return_value='/data/app/fixture/base.apk'):
                         args = ['0100633007D48000', tmp, '--deploy', '--serial', 'emulator-5554']
                         if test:
                             args.append('--test')

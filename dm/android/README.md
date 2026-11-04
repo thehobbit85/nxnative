@@ -36,7 +36,7 @@ python3 scripts/build_ipa_from_nsp.py <game-folder> -k <prod.keys> --platform an
 
 It shares extraction, profile selection and shader discovery with Apple builds, exports validated SPIR-V, rewrites modules with the Android thread ABI, and builds a development APK. Apple capture/probe modules remain in `patched_<version>/`; Android execution uses `patched_android_<version>/`. These are not interchangeable. Guest Vulkan/OpenGL targets fail explicitly until their Android backends exist. The current shader preparation still requires a Mac, the pinned translator and the shared Metal compiler tools; targeting Android does not yet make every preparation stage portable.
 
-`--romfs separate` builds a small APK and prints the deployment command. Install it first, then supply an explicit adb serial to that command. Deployment stages game assets before replacing them, leaving internal saves/settings alone. Updating an existing installation needs space for both old and staged assets. Native RomFS images are supported directly; unpacking them into a second directory is unnecessary.
+`--romfs separate` builds a small APK with an expected-asset manifest and prints the deployment command. Install it first, then supply an explicit adb serial to that command. Deployment verifies the staged files against the installed APK and uses the menu's recoverable installation transaction. A different build's data is rejected; the menu enables Play only for its matching installed identity. Old APKs without this manifest must be rebuilt before using the current deployment tool. Updating an existing installation needs space for both old and staged assets. Native RomFS images are supported directly; unpacking them into a second directory is unnecessary. Run one deployment per application at a time. See [separate-data deployment](../../docs/reference/packing.md#separate-android-deployment-mixes-asset-generations).
 
 For a prepared folder, the standalone wrapper below remains available. It contains `patched_android/*.patched.bin` and their rewriter TSV files, `shader/vk/*.spv` and `*.vk.txt`, optional `font/`, and one `extract/*/RomFS` directory or `RomFS.img`. `--patched` and `--romfs` select an explicit version. Export shaders with `dm/android/tools/spv_android.py <shader-package> <new-output-directory> --keys-file <keys-file>`; the main builder does this automatically and checks product hashes before incremental reuse.
 
@@ -68,6 +68,8 @@ java -cp /tmp/nx-android-java-tests com.nxnative.GameAssetsTest
 javac --release 11 -d /tmp/nx-android-java-tests dm/android/app/java/com/nxnative/{GameAssets,AssetInstall}.java dm/android/tests/{GameManifest,AssetInstall}Test.java
 java -cp /tmp/nx-android-java-tests com.nxnative.GameManifestTest
 java -cp /tmp/nx-android-java-tests com.nxnative.AssetInstallTest
+javac --release 11 -d /tmp/nx-android-java-tests dm/android/app/java/com/nxnative/{GameAssets,AssetInstall,AssetDeploy}.java dm/android/tests/AssetDeployTest.java
+java -cp /tmp/nx-android-java-tests com.nxnative.AssetDeployTest
 ```
 
 The cheat menu writes the shared host's stable keys (including duplicate-name suffixes), and deployment with `--test` selects the separate test app's asset directory.
@@ -80,4 +82,4 @@ python3 scripts/build_android.py 0100633007D48000 <scratch>/fixture <scratch>/fi
 python3 dm/android/tests/app_smoke.py --serial emulator-5554 --apk <scratch>/fixture.apk --output <scratch>/results
 ```
 
-The profile selects build configuration only; every module and asset is generated. The smoke test is restricted to an emulator. It checks production SDK startup, save create/read/write/commit, DLC enumeration, shared-font loading, public NVN presentation, native input delivered to guest HID, no frames while paused, resume without guest restart, window recreation, and save retention across a process kill and APK reinstall. It leaves the fixture paused and writes JSON, logs and a screenshot. Physical GPU behavior, commercial gameplay, 16 KiB kernels and sustained audio under load remain separate qualification work.
+The profile selects build configuration only; every module and asset is generated. The smoke test is restricted to an emulator and also accepts a separate-data APK after its matching assets have been deployed. It checks production SDK startup, save create/read/write/commit, DLC enumeration, shared-font loading, public NVN presentation, native input delivered to guest HID, no frames while paused, resume without guest restart, window recreation, and save retention across a process kill and APK reinstall. It leaves the fixture paused and writes JSON, logs and a screenshot. Physical GPU behavior, commercial gameplay, 16 KiB kernels and sustained audio under load remain separate qualification work.
