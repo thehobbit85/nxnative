@@ -823,6 +823,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D All-Stars: Super Mario 64](../../dm/games/010049900F546001/README.md) : command 3 at boot turns 4,235 precompiled MIPS blocks into 14.2 MB of code in 27 ms; command 4 compiles a handful of blocks in play. Its code needs nothing from the rewriter (no x18, SVC, system register or PC-relative literal in 3.55 million instructions).
 
 
+### JIT plugin reload loses initial data
+
+- **Symptom:** a second `CreateJitEnvironment` after `DestroyJitEnvironment` crashes in `nro_load_alone`, or the plugin retains bss state from its previous environment.
+- **Cause:** isolated plugin loading restored `pristine` data without creating the first-load snapshot, and did not clear bss. Ordinary `nn::ro` loading already did both.
+- **Fix:** both loader paths use `nro_reset_data` under the module lock, copying initialized data lazily before the first relocation/init and restoring data plus zeroing bss on later loads. The plugin remains outside the game's symbol activation list. Concurrent generation also snapshots diagnostic byte/time counters under the request lock before logging them, preventing reads racing another request's updates. Log/capture options are initialized once with `pthread_once`, including when the first requests arrive concurrently.
+- **Found on:** the synthetic `dm/host/tests/t_jit.c` Android/Mac lifecycle fixture. [Super Mario 64](../../dm/games/010049900F546001/README.md) is a known consumer of this plugin API; this failure was not observed in a new commercial-game run.
+- **Check:** `make -C dm/host/tests GAME=<id> jit`, or NDK cross-build `android-jit-build` and run `t_jit_android`. The fixture exercises the actual guest API for eight environments, generated A64 replacement on a persistent thread, concurrent serialized requests, result/range contracts, init/fini ordering and unmapping before caller-owned work memory is freed. `t_nro` checks the shared normal-loader path.
+
 ### `nn::jit` served from an image on iOS
 
 - **Symptom:** `[RED] jit::GenerateCode command <n>: request <key> … is not in the image …: capture it on the Mac (DM_JIT_CAPTURE) and rebuild the image`, then the game crashes there (the iPhone, or the Mac with `DM_JIT_SERVE`).

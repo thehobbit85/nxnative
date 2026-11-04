@@ -34,7 +34,16 @@ typedef struct {
     uint64_t ncalls[8], nbytes[8], ns[8];   // GenerateCode per command (0-7)
 } jit_env;
 
-static int jit_log_all(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_JIT_LOG"); v = e && atoi(e); } return v; }
+static pthread_once_t g_jit_options_once = PTHREAD_ONCE_INIT;
+static int g_jit_log_all;
+static const char *g_jit_capture_dir;
+static void jit_options_init(void) {
+    const char *e = getenv("DM_JIT_LOG");
+    g_jit_log_all = e && atoi(e);
+    g_jit_capture_dir = getenv("DM_JIT_CAPTURE");
+}
+static int jit_log_all(void) { pthread_once(&g_jit_options_once, jit_options_init); return g_jit_log_all; }
+static const char *jit_capture_dir(void) { pthread_once(&g_jit_options_once, jit_options_init); return g_jit_capture_dir; }
 
 // The plugin's helpers, which it looks up by name (nnjitpluginResolveBasicSymbols; on Horizon the service's own). Called from the plugin, so plain host functions
 static void jit_panic(const char *msg) { LOG("[RED] JIT plugin PanicForPlugin: %s", msg ? msg : "(null)"); die("JIT plugin panic"); }
@@ -58,7 +67,6 @@ static int range_ok(const jit_range *r, uint64_t size) { return r->offset <= siz
 // a larger input only its size, in_sha). Each request is written once, as <dir>/<key>.jit: the request, the layout it was made in (every module, the code,
 // data and transfer memory: the code holds absolute addresses into them), the code and the output buffer. dm/tools/jit_capture.py builds the image the iOS app serves from
 int dm_guest_as_contains(uintptr_t a);
-static const char *jit_capture_dir(void) { static const char *d; static int set; if (!set) { d = getenv("DM_JIT_CAPTURE"); set = 1; } return d; }
 // A host address: in a module, the guest block, or the code / data / transfer memory of the environment (masked in the data words)
 static jit_env *g_jit_env;
 static int host_addr(uint64_t v) {
@@ -363,13 +371,14 @@ HLE_FORCE("_ZN2nn3jit12GenerateCodeEPNS0_9CodeRangeES2_NS0_9JitHandleEmPKvmRKS1_
     }
     uint64_t dt = now_ns() - t0; unsigned c = cmd < 8 ? (unsigned)cmd : 0;
     uint64_t k = ++e->ncalls[c]; e->nbytes[c] += o0.size; e->ns[c] += dt;
+    uint64_t bytes = e->nbytes[c], ns = e->ns[c];
     pthread_mutex_unlock(&e->mu);
     if (k <= 16 || jit_log_all() || !(k & (k - 1)))
         LOG("jit::GenerateCode #%llu command %llu: in %p + %#zx, code in %#llx + %#llx, data %zu bytes %016llx %016llx, out %#zx → %d, code %#llx + %#llx, data %#llx + %#llx, %.2f ms (command %llu so far: %llu bytes, %.1f ms)",
             (unsigned long long)k, (unsigned long long)cmd, in, in_size, (unsigned long long)c0_in->offset, (unsigned long long)c0_in->size, data_size,
             (unsigned long long)__builtin_bswap64(*(uint64_t *)d32), (unsigned long long)__builtin_bswap64(*(uint64_t *)(d32 + 8)), out_size, ret,
             (unsigned long long)o0.offset, (unsigned long long)o0.size, (unsigned long long)o1.offset, (unsigned long long)o1.size, dt / 1e6,
-            (unsigned long long)cmd, (unsigned long long)e->nbytes[c], e->ns[c] / 1e6);
+            (unsigned long long)cmd, (unsigned long long)bytes, ns / 1e6);
     if (w) { LOG("[RED] jit::GenerateCode: the plugin's wrapper failed (command %llu)", (unsigned long long)cmd); die("jit::GenerateCode failed (the SDK aborts)"); }
     if (ret) LOG("[RED] jit::GenerateCode command %llu: the plugin returned %d (the service fails the request)", (unsigned long long)cmd, ret);
     if (jit_capture_dir()) jit_capture(e, cmd, in, in_size, c0_in, d32, data_size, out, out_size, ret, &o0, &o1);
