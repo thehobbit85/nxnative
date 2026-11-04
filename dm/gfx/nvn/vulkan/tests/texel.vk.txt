@@ -1,0 +1,10 @@
+stage cs
+tg 1 1 1
+b 0 tbuf 2 tbuf 0 -1 - -1 num=0
+b 1 tbuf 1 tbuf 2 -1 - -1 num=1
+b 2 utb 1 tex 3 -1 - -1 num=2
+b 3 stb 1 img 0 -1 - -1 num=2
+b 4 stb 1 img 1 -1 - -1 ro num=2
+b 5 ssbo 1 sbuf 0 -1 - -1
+b 6 ssbo 1 sbuf 1 -1 - -1
+b 7 ubo 1 drvcb -1 24 - -1
