@@ -15,6 +15,14 @@ spec.loader.exec_module(nsp)
 
 
 class AndroidTarget(unittest.TestCase):
+    def test_android_metadata_options_are_checked_before_extraction(self):
+        for options, error in ((['--platform', 'ios', '--android-keystore', 'key'], 'Android'),
+                               (['--platform', 'ios', '--android-version-code', '7'], 'Android'),
+                               (['--platform', 'android', '--android-version-code', '0'], 'version code')):
+            with self.subTest(options=options):
+                args = nsp.parse_args(options)
+                with self.assertRaisesRegex(nsp.BuildError, error): nsp.main(args)
+
     def test_cli_selects_android_and_rejects_xcode(self):
         args = nsp.parse_args(['--platform', 'android', '--prepare-xcode'])
         with self.assertRaisesRegex(nsp.BuildError, 'prepare-xcode'):
