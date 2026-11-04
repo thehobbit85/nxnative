@@ -15,6 +15,7 @@ static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless
 static prog_t driver_program = {.nstage = 1};
 static prog_t alias_program = {.nstage = 1};
 static prog_t texel_program = {.nstage = 1};
+static prog_t texel_graphics_program = {.nstage = 2};
 static prog_t separate_program[4]={{.nstage=2},{.nstage=2},{.nstage=2},{.nstage=2}};
 static prog_t storage_program = {.nstage = 2};
 static prog_t buffer_program = {.nstage = 1};
@@ -30,6 +31,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &texel_graphics_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x49 : 0x4a; return 1; }
     if (p == &texel_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x48; return 1; }
     for(int i=0;i<4;i++) if(p==&separate_program[i]) { assert(stage<2);memset(key,0,8);key[7]=stage?0x44+i:1;return 1; }
     if (p == &alias_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x43; return 1; }
@@ -1202,7 +1204,62 @@ static void typed_buffers(void) {
     }
     puts("Typed float/int/uint buffer views, arrays, sizes, image/SSBO atomics, prior GPU writes and following consumers passed");
 }
+static void typed_graphics(void) {
+    tex_t output = {.serial = 0xf800, .d = {.width = 8, .height = 8, .depth = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d, &output.L);
+    for (int split = 0; split < 2; split++) {
+        uint32_t counters[66], consumer[64] = {0}, source = 0;
+        for (int i = 0; i < 66; i++) counters[i] = 100;
+        counters[0] = counters[65] = 0xabcdef01;
+        tex_t image = {.serial = 0xf810 + split*2, .mem = (uint8_t *)(counters+1), .d = {.width = 64, .height = 1, .depth = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_BUFFER, .format = NVN_FORMAT_R32UI}};
+        tex_t sample = image; sample.serial++; sample.mem = (uint8_t *)&source; sample.d.width = 1;
+        nvn_tex_layout(&image.d, &image.L); nvn_tex_layout(&sample.d, &sample.L);
+        mtl_reg_tex(970, &image, NULL); mtl_reg_tex(971, &sample, NULL);
+        uint64_t handles[2] = {0,0}; uint8_t pixels[3][256] = {0};
+        mtl_pool_add(handles, sizeof handles); mtl_queue_activate(970); mtl_sub_begin();
+        for (int draw = 0; draw < 3; draw++) {
+            list_t list = {0};
+            // Produce the TEXU handle on the GPU; the draw's CPU preflight
+            // must resolve it before allocating its typed view and storage.
+            if (!draw) {
+                uint32_t values[4] = {971,0,0,0}; push_constants(&list, 1, 240, values, sizeof values);
+                RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &groups, .stages = 0x20);
+                RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)&handles[1], .size = 8);
+                RECORD(OP_DISPATCH, p_dispatch, .x = 2, .y = 1, .z = 1);
+            }
+            struct { uint64_t addr, size; uint32_t value, pad; } update = {(uintptr_t)&source,4,21u*(draw+1),0};
+            put(&list, OP_UPDATE_UB, &update, sizeof update);
+            RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
+            RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &texel_graphics_program, .stages = 3);
+            RECORD(OP_BIND_IMG, p_bind_handles, .stage = 1, .first = 0, .n = 1, .h = {970});
+            RECORD(OP_BIND_IMG, p_bind_handles, .stage = 0, .first = 0, .n = 1, .h = {970});
+            RECORD(OP_BIND_UBO, p_bind_buf, .stage = 1, .index = 7, .addr = (uintptr_t)handles, .size = sizeof handles);
+            RECORD(OP_BIND_UBO, p_bind_buf, .stage = 0, .index = 7, .addr = (uintptr_t)handles, .size = sizeof handles);
+            RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+            RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels[draw], .r = {.width = 8, .height = 8, .depth = 1});
+            put(&list, OP_END, NULL, 0); mtl_exec(list.bytes);
+            if (split) { mtl_sub_commit(); mtl_sub_begin(); }
+        }
+        list_t list = {0};
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &buffer_program, .stages = 0x20);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)(counters+1), .size = 256);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 1, .addr = (uintptr_t)consumer, .size = sizeof consumer);
+        RECORD(OP_DISPATCH, p_dispatch, .x = 64, .y = 1, .z = 1);
+        put(&list, OP_END, NULL, 0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (int i = 0; i < 64; i++) { assert(counters[i+1] == (i<3?109u:106u)); assert(consumer[i] == (i<3?1109u:1106u)); }
+        assert(counters[0] == 0xabcdef01 && counters[65] == 0xabcdef01);
+        for (int draw = 0; draw < 3; draw++) for (int i = 0; i < 64; i++) {
+            uint8_t want[4] = {21*(draw+1),0,0,255}; assert(!memcmp(pixels[draw]+4*i, want, 4));
+        }
+        mtl_pool_del(handles); mtl_reg_tex(970, NULL, NULL); mtl_reg_tex(971, NULL, NULL);
+        mtl_tex_release(&image); mtl_tex_release(&sample); mtl_queue_forget(970);
+    }
+    mtl_tex_release(&output);
+    puts("Shared vertex/fragment typed-buffer atomics, GPU-produced uniform handles, ordered updates and compute consumers passed");
+}
 int main(void) {
+    if (getenv("DM_VK_TEST_TEXEL_GRAPHICS")) { typed_graphics(); return 0; }
+    typed_graphics();
     if (getenv("DM_VK_TEST_TEXEL")) { typed_buffers(); return 0; }
     typed_buffers();
     if (getenv("DM_VK_TEST_DESCRIPTOR_POOLS")) { descriptor_lifetime(); return 0; }
