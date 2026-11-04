@@ -62,6 +62,13 @@
 - **Fix:** reserve a conservative bound before adding each file, spill oversized data into bounded chunks in a ZIP64-capable sidecar, and reconstruct chunks with offset and length checks. Remove the old image only after a directory update completes. Prepare both shared fonts and set the shared DLC path. Keep application title IDs distinct from aliased build-profile IDs so their installed data cannot collide.
 - **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), with synthetic large-file, image-to-directory, font and DLC checks. Java reconstruction also runs on the Android emulator with a forced-ZIP64 fixture; this does not claim a full multi-gigabyte sidecar UI import was tested.
 
+### Android build paths split by Make
+
+- **Symptom:** an Android build reports a missing NDK compiler or a truncated build target when the game folder, native output or NDK path contains spaces.
+- **Cause:** GNU Make's dependency and object variables are word lists; shell recipes also split unquoted compiler paths. Passing one correctly quoted `BUILD_ROOT=` argument from Python does not preserve that path inside Make.
+- **Fix:** `scripts/build_android.py` gives Make stable symlink aliases for affected NDK and output paths. Aliases live in a private temporary directory; actual objects and libraries stay in the requested output folder. Stable alias names preserve compiler stamps and incremental native reuse. Direct Make calls retain the path restriction.
+- **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic wrapper builds. `test_build_wrapper.py` executes Make with spaced paths and shell characters and checks that a second build reuses the native output.
+
 ### Interrupted Android asset updates
 
 - **Symptom:** a failed or interrupted APK asset import leaves a mix of old and new game files; removed modules, shaders or DLC survive updates. A different companion ZIP with the same version and file lengths can be accepted.
