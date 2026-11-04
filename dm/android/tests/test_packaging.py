@@ -3,6 +3,7 @@ from pathlib import Path
 import importlib.util
 import struct
 import io
+import hashlib
 import zipfile
 import tempfile
 import shutil
@@ -19,7 +20,7 @@ spec.loader.exec_module(pack)
 
 
 class Packaging(unittest.TestCase):
-    def package_with_fake_sdk(self, root, payload, fail=None, options=()):
+    def package_with_fake_sdk(self, root, payload, fail=None, options=(), limit=1):
         build = root / 'build'; build.mkdir(exist_ok=True)
         output = root / 'output with spaces'; output.mkdir(exist_ok=True)
         library = build / 'libdmhost.so'; library.write_bytes(b'fixture library')
@@ -45,12 +46,24 @@ class Packaging(unittest.TestCase):
                 if args[1] == 'sign': shutil.copyfile(args[-1], args[args.index('--out') + 1])
         write_data = pack.write_data_file
         def write(*args):
-            write_data(*args)
+            digest = write_data(*args)
             if fail == 'data': raise OSError('fixture archive write failure')
+            return digest
         with patch.object(pack, 'configure_tools'), patch.object(pack, 'run', side_effect=run), patch.object(pack, 'write_data_file', side_effect=write), \
-             patch.object(pack, 'game_files', return_value=[('romfs/romfs.img', str(source))]), patch.object(pack, 'APK_GAME_LIMIT', 1):
+             patch.object(pack, 'game_files', return_value=[('romfs/romfs.img', str(source))]), patch.object(pack, 'APK_GAME_LIMIT', limit):
             pack.main(['0100633007D48000', str(build), str(output / 'Game.apk'), '--bundle', '--library', str(library), '--version-code', '101', *options])
         return output / 'Game.apk'
+
+    def test_asset_manifest_identifies_contents_even_for_same_size_updates(self):
+        for limit in (1, 1000000):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as tmp:
+                for payload in (b'old data', b'new data', b''):
+                    apk = self.package_with_fake_sdk(Path(tmp), payload, limit=limit)
+                    with zipfile.ZipFile(apk) as archive: row = archive.read('assets/game/files.txt').decode().rstrip('\n').split('\t')
+                    self.assertEqual(len(row), 4)
+                    self.assertEqual(row[3], hashlib.sha256(payload).hexdigest())
+                    self.assertEqual(row[1], str(len(payload)))
+                    self.assertEqual(row[2] == '=d', limit == 1)
 
     def test_manifest_keeps_game_version_separate_from_install_version(self):
         with tempfile.TemporaryDirectory() as tmp:

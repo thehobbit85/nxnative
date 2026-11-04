@@ -47,18 +47,30 @@ public class MenuActivity extends Activity {
     private Button playButton;
     private boolean playKeyDown;
     private TextView status; private android.widget.ProgressBar bar; private volatile boolean unpacking;
+    private GameAssets.Manifest manifest;
+    private String preparationError;
+    private static boolean installationActive; // Accessed on the UI thread, including worker completion callbacks.
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         prefs = getSharedPreferences("menu", MODE_PRIVATE);
-        seedFiles();
+        try {
+            File ext = getExternalFilesDir(null);
+            if (ext == null) throw new java.io.IOException("Game storage is unavailable");
+            if (!installationActive) AssetInstall.recover(ext);
+            try (InputStream in = getAssets().open("game/files.txt")) { manifest = GameAssets.Manifest.read(in); }
+            catch (java.io.FileNotFoundException e) { /* Separate-assets APK. */ }
+        } catch (Exception e) { preparationError = e.getMessage() != null ? e.getMessage() : e.toString(); }
+        if (preparationError == null) seedFiles();
         if (!prefs.contains("lang")) {
             try (BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("default-language.txt"), StandardCharsets.UTF_8))) {
                 prefs.edit().putString("lang", r.readLine()).apply();
             } catch (Exception e) { /* No packaged language override. */ }
         }
         buildUi();
+        if (installationActive) { waitForInstallation(); return; }
+        if (preparationError != null) { preparationFailed(preparationError); dataButton.setVisibility(View.GONE); return; }
         if (needsUnpack()) { if (pendingData() != null) askData(null); else unpack(); return; }
         boolean forced = new File(getFilesDir(), "show_menu").delete();
         if (prefs.getBoolean("skip", false) && !forced && b == null && gameFilesPresent()) play();
@@ -99,65 +111,75 @@ public class MenuActivity extends Activity {
     }
     // ---- The game inside the APK ----
     private long versionCode() { try { return getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode(); } catch (Exception e) { return 0; } }
-    private boolean bundled() { try (InputStream in = getAssets().open("game/files.txt")) { return true; } catch (Exception e) { return false; } }
+    private boolean bundled() { return manifest != null; }
     private static File gameFile(File root, String name) throws java.io.IOException {
         return GameAssets.path(root, name);
     }
-    private void finishUnpack(File ext) throws java.io.IOException {
-        boolean image = false;
-        try (BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("game/files.txt"), StandardCharsets.UTF_8))) {
-            String line; while ((line = r.readLine()) != null) if (line.startsWith("romfs/romfs.img\t")) image = true;
-        }
-        GameAssets.finishRomfs(ext, image);
-        try (OutputStream o = new FileOutputStream(new File(ext, ".unpacked"))) { o.write((versionCode() + "\n").getBytes(StandardCharsets.UTF_8)); }
-    }
-
     private boolean needsUnpack() {
+        if (preparationError != null) return true;
         if (!bundled()) return false;
-        File mark = new File(getExternalFilesDir(null), ".unpacked");
-        try (BufferedReader r = new BufferedReader(new InputStreamReader(new java.io.FileInputStream(mark), StandardCharsets.UTF_8))) { return !String.valueOf(versionCode()).equals(r.readLine()); }
+        try { return !manifest.identity.equals(AssetInstall.identity(getExternalFilesDir(null))); }
         catch (Exception e) { return true; }
     }
+    private void waitForInstallation() {
+        playButton.setEnabled(false); status.setVisibility(View.VISIBLE); status.setText("Preparing game files...");
+        status.postDelayed(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            if (installationActive) waitForInstallation(); else recreate();
+        }, 500);
+    }
+    private void preparationFailed(String error) {
+        playButton.setEnabled(false); status.setVisibility(View.VISIBLE); bar.setVisibility(View.GONE);
+        status.setText("Could not prepare the game: " + error); status.setTextColor(Color.rgb(255, 120, 120));
+        dataButton.setText("Retry preparation"); dataButton.setOnClickListener(v -> unpack()); dataButton.setVisibility(View.VISIBLE);
+    }
+    private String recoverInstallation(Exception error) {
+        String message = error.getMessage() != null ? error.getMessage() : error.toString();
+        try {
+            AssetInstall.recover(getExternalFilesDir(null));
+            if (!needsUnpack()) return null; // All roots committed; only cleanup had failed.
+        } catch (Exception recovery) { message += "; recovery failed: " + recovery.getMessage(); }
+        return message;
+    }
     private void unpack() {
-        unpacking = true; playButton.setEnabled(false);
+        if (installationActive || manifest == null) return;
+        installationActive = unpacking = true; playButton.setEnabled(false); dataButton.setVisibility(View.GONE);
         status.setVisibility(View.VISIBLE); bar.setVisibility(View.VISIBLE);
+        status.setTextColor(Color.WHITE);
         status.setText("Preparing game files (this may take a few minutes)...");
         new Thread(() -> {
             String err = null;
             try {
-                List<String[]> files = new ArrayList<>(), later = new ArrayList<>(); long total = 0;
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("game/files.txt"), StandardCharsets.UTF_8))) {
-                    String l; while ((l = r.readLine()) != null) { String[] f = l.split("\t"); if (f.length >= 2) { (f.length > 2 && f[2].equals("=d") ? later : files).add(f); total += Long.parseLong(f[1]); } }
-                }
                 File ext = getExternalFilesDir(null);
-                for (String root : new String[]{"dm", "romfs", "vk", "font", "aoc"}) new File(ext, root).mkdirs();
-                if (ext.getUsableSpace() < total + (200L << 20)) throw new Exception(String.format(Locale.ROOT, "Not enough storage: %.1f GB free is required.", total / 1e9));
-                new File(ext, ".unpacked").delete(); new File(ext, ".pending_data").delete();
+                AssetInstall.recover(ext); AssetInstall.remove(new File(ext, ".nx-install"));
+                if (manifest.total > ext.getUsableSpace() - (200L << 20)) throw new Exception(String.format(Locale.ROOT, "Not enough storage: %.1f GB free is required.", manifest.total / 1e9));
+                File stage = AssetInstall.prepare(ext, manifest.identity);
+                long total = 0; boolean later = false;
+                for (GameAssets.Entry f : manifest.entries.values()) { if (f.data) later = true; else total += f.size; }
                 long done = 0; byte[] buf = new byte[1 << 20]; int lastPct = -1;
-                for (String[] f : later) total -= Long.parseLong(f[1]);
-                for (String[] f : files) {
-                    File to = gameFile(ext, f[0]); to.getParentFile().mkdirs();
-                    // the file is its pieces in order (game/p/<hash>, each stored once in the APK); a line without pieces is the file itself at game/<path>
-                    String[] parts = f.length > 2 ? f[2].split(" ") : new String[] { null };
+                for (GameAssets.Entry f : manifest.entries.values()) {
+                    if (f.data) continue;
+                    File to = gameFile(stage, f.name); to.getParentFile().mkdirs();
+                    java.security.MessageDigest hash = GameAssets.digest(); long written = 0;
                     try (OutputStream out = new FileOutputStream(to)) {
-                        for (String part : parts) try (InputStream in = getAssets().open(part != null ? "game/p/" + part : "game/" + f[0], AssetManager.ACCESS_STREAMING)) {
-                            int n; while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); done += n;
+                        for (String part : f.pieces) try (InputStream in = getAssets().open("game/p/" + part, AssetManager.ACCESS_STREAMING)) {
+                            int n; while ((n = in.read(buf)) > 0) {
+                                if (n > f.size - written) throw new Exception("Oversized game asset: " + f.name);
+                                out.write(buf, 0, n); hash.update(buf, 0, n); done += n; written += n;
                                 int pct = (int) (done * 100 / Math.max(1, total));
                                 if (pct != lastPct) { lastPct = pct; final int p = pct; final long d = done, t = total; runOnUiThread(() -> { bar.setProgress(p);
                                     status.setText(String.format(Locale.ROOT, "Preparing game files: %d%% (%.1f of %.1f GB)", p, d / 1e9, t / 1e9)); }); } }
                         }
                     }
-                    if (to.length() != Long.parseLong(f[1])) throw new Exception("Incomplete game asset: " + f[0]);
+                    if (written != f.size || !GameAssets.hex(hash.digest()).equals(f.hash)) throw new Exception("Game asset size or digest differs: " + f.name);
                 }
-                if (!later.isEmpty()) {   // the rest is in the data file beside the APK: listed for the import, which asks for that file
-                    StringBuilder sb = new StringBuilder(versionCode() + "\n"); for (String[] f : later) sb.append(f[0]).append('\t').append(f[1]).append('\n');
-                    try (OutputStream o = new FileOutputStream(new File(ext, ".pending_data"))) { o.write(sb.toString().getBytes(StandardCharsets.UTF_8)); }
-                } else finishUnpack(ext);
-            } catch (Exception e) { err = e.getMessage() != null ? e.getMessage() : e.toString(); }
+                if (later) AssetInstall.write(new File(stage, ".pending_data"), manifest.identity);
+                else AssetInstall.publish(ext, manifest.identity, AssetInstall::move);
+            } catch (Exception e) { err = recoverInstallation(e); }
             final String fe = err;
             runOnUiThread(() -> {
-                unpacking = false;
-                if (fe != null) { status.setText("Could not prepare the game: " + fe); status.setTextColor(Color.rgb(255, 120, 120)); return; }
+                installationActive = unpacking = false;
+                if (fe != null) { preparationFailed(fe); return; }
                 if (pendingData() != null) { askData(null); return; }
                 status.setText("Game ready."); bar.setVisibility(View.GONE); playButton.setEnabled(true); playButton.requestFocus();
             });
@@ -169,17 +191,20 @@ public class MenuActivity extends Activity {
         try (BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("game/datos.txt"), StandardCharsets.UTF_8))) { return r.readLine().split("\t")[0]; }
         catch (Exception e) { return "datos.zip"; }
     }
-    private List<String[]> pendingData() {   // the files still to come from the data file, when the APK part is done for this version
-        File p = new File(getExternalFilesDir(null), ".pending_data"); List<String[]> out = new ArrayList<>();
-        try (BufferedReader r = new BufferedReader(new InputStreamReader(new java.io.FileInputStream(p), StandardCharsets.UTF_8))) {
-            if (!String.valueOf(versionCode()).equals(r.readLine())) return null;
-            String l; while ((l = r.readLine()) != null) { String[] f = l.split("\t"); if (f.length == 2) out.add(f); }
+    private List<GameAssets.Entry> pendingData() {
+        if (manifest == null) return null;
+        File stage = new File(getExternalFilesDir(null), ".nx-install"); List<GameAssets.Entry> out = new ArrayList<>();
+        try {
+            if (!manifest.identity.equals(AssetInstall.read(new File(stage, ".pending_data"))) ||
+                !manifest.identity.equals(AssetInstall.read(new File(stage, ".identity")))) return null;
+            for (GameAssets.Entry f : manifest.entries.values()) if (f.data) out.add(f);
         } catch (Exception e) { return null; }
         return out.isEmpty() ? null : out;
     }
     private void askData(String problem) {
         playButton.setEnabled(false); status.setVisibility(View.VISIBLE); bar.setVisibility(View.GONE);
         status.setTextColor(problem != null ? Color.rgb(255, 120, 120) : Color.WHITE);
+        dataButton.setText("Choose data file"); dataButton.setOnClickListener(v -> pickData());
         status.setText((problem != null ? problem + "\n" : "") + "One more step: the game needs a separate data file. Tap \"Choose data file\" and select " + dataName()
                        + " (copied alongside the APK). Import it once, then you may delete that file.");
         dataButton.setVisibility(View.VISIBLE); dataButton.requestFocus();
@@ -194,15 +219,17 @@ public class MenuActivity extends Activity {
         if (req == 7 && res == RESULT_OK && data != null && data.getData() != null) importData(data.getData());
     }
     private void importData(android.net.Uri uri) {
-        List<String[]> want = pendingData(); if (want == null) return;
-        java.util.Map<String, Long> left = new java.util.HashMap<>(); long total = 0; for (String[] f : want) { left.put(f[0], Long.parseLong(f[1])); total += Long.parseLong(f[1]); }
+        List<GameAssets.Entry> want = pendingData(); if (want == null || installationActive) return;
+        java.util.Map<String, Long> left = new java.util.HashMap<>(); java.util.Map<String, String> hashes = new java.util.HashMap<>(); long total = 0;
+        for (GameAssets.Entry f : want) { left.put(f.name, f.size); hashes.put(f.name, f.hash); total += f.size; }
         final long tot = total;
-        unpacking = true; dataButton.setVisibility(View.GONE); bar.setVisibility(View.VISIBLE); status.setTextColor(Color.WHITE);
+        installationActive = unpacking = true; dataButton.setVisibility(View.GONE); bar.setVisibility(View.VISIBLE); status.setTextColor(Color.WHITE);
         status.setText("Copying game data...");
         new Thread(() -> {
             String err = null; File ext = getExternalFilesDir(null);
             try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(new java.io.BufferedInputStream(getContentResolver().openInputStream(uri), 1 << 20))) {
-                GameAssets.DataImport assets = new GameAssets.DataImport(ext, left);
+                File stage = AssetInstall.prepare(ext, manifest.identity);
+                GameAssets.DataImport assets = new GameAssets.DataImport(stage, left, hashes);
                 java.util.zip.ZipEntry e; long done = 0; byte[] buf = new byte[1 << 20]; int lastPct = -1; boolean checked = false;
                 while ((e = zin.getNextEntry()) != null) {
                     String name = e.getName();
@@ -223,13 +250,12 @@ public class MenuActivity extends Activity {
                 }
                 if (!checked) throw new Exception("this is not the data file for this game.");
                 if (!assets.complete()) throw new Exception("Game assets are missing from the data archive.");
-                finishUnpack(ext);
-                new File(ext, ".pending_data").delete();
-            } catch (Exception ex) { err = ex.getMessage() != null ? ex.getMessage() : ex.toString(); }
+                AssetInstall.publish(ext, manifest.identity, AssetInstall::move);
+            } catch (Exception ex) { err = recoverInstallation(ex); }
             final String fe = err;
             runOnUiThread(() -> {
-                unpacking = false;
-                if (fe != null) { askData("Could not copy game data: " + fe); return; }
+                installationActive = unpacking = false;
+                if (fe != null) { if (pendingData() != null) askData("Could not copy game data: " + fe); else preparationFailed(fe); return; }
                 status.setText("Game ready. You can now delete " + dataName() + "."); bar.setVisibility(View.GONE); playButton.setEnabled(true); playButton.requestFocus();
             });
         }).start();

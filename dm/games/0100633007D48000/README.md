@@ -53,6 +53,7 @@ The separate asset deployment uses the merged RomFS image directly. Synthetic AP
 - [Vulkan texture uploads visible to sampling](../../../docs/reference/rendering.md#vulkan-texture-uploads-visible-to-sampling): restored the Android player, HUD, title background and scene effects.
 
 - [Android assets and large RomFS images](../../../docs/reference/packing.md#android-assets-and-large-romfs-images): shared builder and APK review, with synthetic font/DLC and archive checks.
+- [Interrupted Android asset updates](../../../docs/reference/packing.md#interrupted-android-asset-updates): staged installation, content checks and recovery qualified with synthetic assets.
 
 - [Vulkan export preserves packaged shader stages](../../../docs/reference/shaders.md#vulkan-export-preserves-packaged-shader-stages): Android export validates all 1,812 stages, including one geometry asset; runtime geometry support remains open.
 

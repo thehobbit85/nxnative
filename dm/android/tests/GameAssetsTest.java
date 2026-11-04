@@ -12,7 +12,8 @@ public final class GameAssetsTest {
         image.getParentFile().mkdirs(); Files.write(image.toPath(), new byte[]{9});
         GameAssets.finishRomfs(root, false);
         if (image.exists()) throw new AssertionError("stale image shadows directory update");
-        GameAssets.DataImport data = new GameAssets.DataImport(root, Map.of("romfs/romfs.img", 5L));
+        String hash = GameAssets.hex(GameAssets.digest().digest(new byte[]{1,2,3,4,5}));
+        GameAssets.DataImport data = new GameAssets.DataImport(root, Map.of("romfs/romfs.img", 5L), Map.of("romfs/romfs.img", hash));
         data.copy("romfs/romfs.img.nxpart/0000000000000000", new ByteArrayInputStream(new byte[]{1,2,3}));
         if (data.complete()) throw new AssertionError("accepted partial image");
         try {
@@ -29,7 +30,8 @@ public final class GameAssetsTest {
             catch (java.io.IOException expected) { }
         }
         if (args.length > 0) {
-            GameAssets.DataImport archive = new GameAssets.DataImport(root, Map.of("romfs/romfs.img", 5000000L));
+            String zipHash = GameAssets.hex(GameAssets.digest().digest("abcde".repeat(1000000).getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+            GameAssets.DataImport archive = new GameAssets.DataImport(root, Map.of("romfs/romfs.img", 5000000L), Map.of("romfs/romfs.img", zipHash));
             try (java.util.zip.ZipInputStream zip = new java.util.zip.ZipInputStream(new java.io.FileInputStream(args[0]))) {
                 java.util.zip.ZipEntry entry;
                 while ((entry = zip.getNextEntry()) != null) archive.copy(entry.getName(), zip);
