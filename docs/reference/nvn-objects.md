@@ -296,6 +296,7 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** give every queue initialization a serial. Save and restore draw state and render-target state when submissions switch queues, resolve composite programs again, and invalidate encoder caches. Finalization discards that queue's saved state. Reusing the queue's storage starts with defaults and cannot recover old guest pointers.
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), launcher-to-X-2 handoff.
 - **Check:** `t_queue_origin` tests independent state, switching back, finalization and address reuse with a poisoned old program pointer, alongside its real GPU culling tests.
+- **Android integration:** the Vulkan replay implements the same queue lifecycle. Its `tests/t_replay.c` alternates queues with distinct render targets and copy strides, finalizes a program while one queue is inactive, and checks fenced pixel readback after switching back. The public recorded-transfer fixture also exercises queue creation, submission, finish and finalization through the current registry.
 
 ### Finalized programs leave every queue's bindings
 

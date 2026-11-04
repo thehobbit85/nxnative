@@ -308,6 +308,38 @@ static void queue_lifetime(void) {
     puts("Vulkan queue targets, copy strides and finalized program bindings passed");
 }
 
+// Device origin controls viewport placement even when the queue captured a different raster origin.
+static void queue_viewport_origin(void) {
+    tex_t output = {.serial = 0x8100, .d = {.width = 4, .height = 4, .depth = 1, .levels = 1,
+                    .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d, &output.L);
+    for (int device = 0; device < 2; device++) for (int queue = 0; queue < 2; queue++) {
+        uint32_t zero[8] = {0}; uint8_t pixels[64] = {0}; list_t list = {0};
+        va_st va[] = {{.fmt = NVN_FORMAT_RGBA32F}, {.fmt = NVN_FORMAT_RGBA32UI}, {.fmt = NVN_FORMAT_RGBA32I}};
+        p_bind_vattr attr = {.n = 3}; memcpy(attr.st, va, sizeof va);
+        RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &output, .r = {.width = 4, .height = 4, .depth = 1}, .mask = 15, .c.f = {0, 0, 1, 1});
+        RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &numeric_program, .stages = 3);
+        put(&list, OP_BIND_VATTR, &attr, sizeof attr);
+        RECORD(OP_BIND_VSTREAM, p_bind_vstream, .n = 1, .st = {{.stride = 0}});
+        RECORD(OP_BIND_VBUF1, p_bind_vbuf1, .index = 0, .size = 16, .addr = (uintptr_t)zero);
+        RECORD(OP_BIND_UBO_SMALL, p_bind_ubo_small, .stage = 0, .index = 0, .size = sizeof zero, .addr = (uintptr_t)zero);
+        RECORD(OP_VIEWPORTS, p_viewports, .n = 1, .v = {{0, 0, 4, 2}});
+        RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+        RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels, .r = {.width = 4, .height = 4, .depth = 1});
+        put(&list, OP_END, NULL, 0);
+        mtl_set_origin_lower_left(device); mtl_queue_activate(110 + queue); mtl_set_queue_origin_lower_left(queue);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
+            int drawn = device ? y >= 2 : y < 2;
+            const uint8_t expected[] = {0, drawn ? 255 : 0, drawn ? 0 : 255, 255};
+            assert(!memcmp(pixels + (y * 4 + x) * 4, expected, 4));
+        }
+    }
+    mtl_queue_forget(110); mtl_queue_forget(111);
+    puts("Vulkan viewport placement follows device origin independently of queue raster origin");
+}
+
 int main(void) {
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
@@ -318,5 +350,6 @@ int main(void) {
     registered_images();
     strided_layers();
     queue_lifetime();
+    queue_viewport_origin();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
