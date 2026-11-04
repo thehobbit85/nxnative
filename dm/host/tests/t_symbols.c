@@ -1,6 +1,6 @@
-// Exercise the real HLE, forced-takeover and stub indexes with synthetic Mach-O sections; no game files required.
+// Exercise HLE, forced-takeover and stub indexes with controlled records and
+// actual Mach-O/ELF registration sections; no game files required.
 #include "../hle.h"
-#include <mach-o/getsect.h>
 #include <assert.h>
 #include <signal.h>
 #include <sys/resource.h>
@@ -10,18 +10,24 @@
 static hle_ent entries[4];
 static hle_force_ent forces[3];
 static int have_sections;
-static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, const char *sect, unsigned long *size) {
-    (void)mh; assert(!strcmp(seg, "__DATA"));
+HLE("fixture_import", unsigned, actual_import, unsigned value) { return value + 7; }
+HLE_FORCE("fixture_force", "registration conformance fixture", unsigned, actual_force, unsigned value) { return value + 11; }
+static const void *real_section(const char *sect, unsigned long *size) {
+    if (!strcmp(sect, "swhle")) return DM_SECTION_DATA(swhle, size);
+    assert(!strcmp(sect, "swforce")); return DM_SECTION_DATA(swforce, size);
+}
+static const void *test_section(const char *sect, unsigned long *size) {
+    if (have_sections == 2) return real_section(sect, size);
     *size = 0;
     if (!have_sections) return NULL;
-    if (!strcmp(sect, "swhle")) { *size = sizeof entries; return (uint8_t *)entries; }
-    assert(!strcmp(sect, "swforce")); *size = sizeof forces; return (uint8_t *)forces;
+    if (!strcmp(sect, "swhle")) { *size = sizeof entries; return entries; }
+    assert(!strcmp(sect, "swforce")); *size = sizeof forces; return forces;
 }
-#define getsectiondata test_section
+#undef DM_SECTION_DATA
+#define DM_SECTION_DATA(name, size) test_section(#name, size)
 #include "../hle.c"
 #include "../loader.c"
 void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
-#undef getsectiondata
 
 struct dm_flags g_flag;
 uint64_t unimpl_stubs[MAX_STUB];
@@ -93,6 +99,16 @@ int main(void) {
     assert(force_lookup(names[0]) == &values[0] && g_force_hits[0] == 2);
     expect_abort(1);
 
+    // Use sections emitted by the actual linker too: synthetic arrays alone
+    // cannot catch a broken ELF section name, bounds or retained registration.
+    reset_sections(); have_sections = 2; force_init();
+    assert(hle_implements("fixture_import"));
+    unsigned (*imported)(unsigned) = (void *)resolve_import(NULL, "fixture_import");
+    unsigned (*forced)(unsigned) = force_lookup("fixture_force");
+    assert(imported == actual_import && forced == actual_force);
+    assert(imported(3) == 10 && forced(3) == 14);
+    assert(!hle_implements("fixture_force") && !force_lookup("fixture_import"));
+
     // Fill through every growth boundary, then query in reverse using different pointers to the same names.
     static char missing[MAX_STUB][32];
     for (unsigned i = 0; i < MAX_STUB; i++) {
@@ -106,6 +122,6 @@ int main(void) {
     }
     assert(g_nstub == MAX_STUB); expect_abort(0);
     reset_sections();
-    puts("Symbol indexes: collisions, duplicate precedence/rejection, misses, wrappers and 4096 reusable stubs: OK");
+    puts("Symbol indexes: platform sections, collisions, duplicate precedence/rejection, misses, wrappers and 4096 reusable stubs: OK");
     return 0;
 }
