@@ -6,11 +6,33 @@ Set ANDROID_NDK_HOME, ANDROID_SDK_ROOT and JAVA_HOME. See dm/android/README.md.
 """
 from pathlib import Path
 import argparse
+import hashlib
 import os
+import re
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+ALIASES = Path('/tmp') / f'nxnative-android-paths-{os.getuid()}'
+
+
+def make_path(path):
+    """GNU Make splits path lists on spaces; stable aliases preserve the native cache.
+
+    Only the symlink lives in /tmp. Objects/codecs stay in the requested build
+    folder, and a later invocation uses the same compiler and output paths.
+    """
+    if re.fullmatch(r'[A-Za-z0-9_./+-]+', str(path)): return path
+    aliases = ALIASES
+    aliases.mkdir(mode=0o700, exist_ok=True)
+    if aliases.is_symlink() or aliases.stat().st_uid != os.getuid() or aliases.stat().st_mode & 0o077:
+        raise ValueError('Android path alias directory must be private: ' + str(aliases))
+    alias = aliases / hashlib.sha256(os.fsencode(path)).hexdigest()[:24]
+    try: alias.symlink_to(path, target_is_directory=True)
+    except FileExistsError:
+        if not alias.is_symlink() or alias.readlink() != path:
+            raise ValueError('Android path alias has a different target: ' + str(alias)) from None
+    return alias
 
 
 def main():
@@ -23,15 +45,22 @@ def main():
     a, packaging = p.parse_known_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or pass --ndk')
     if a.jobs < 1: p.error('--jobs must be positive')
+    if not re.fullmatch(r'[0-9a-fA-F]{16}', a.id): p.error('id must be a 16-digit title ID')
+    if a.profile and not re.fullmatch(r'[0-9a-fA-F]{16}', a.profile): p.error('profile must be a 16-digit title ID')
+    ndk = Path(a.ndk).expanduser().resolve()
+    if not ndk.is_dir(): p.error('Android NDK folder does not exist: ' + str(ndk))
     build = a.build.resolve(); output = (a.build_root or build / 'android-host').resolve()
-    profile = a.profile or a.id
+    profile = (a.profile or a.id).upper()
     try:
+        output.mkdir(parents=True, exist_ok=True)
         subprocess.run(['make', '-C', str(ROOT / 'dm/android'), 'GAME=' + profile,
-                        'NDK=' + str(Path(a.ndk).resolve()), 'BUILD_ROOT=' + str(output), '-j' + str(a.jobs)], check=True)
+                        'NDK=' + str(make_path(ndk)), 'BUILD_ROOT=' + str(make_path(output)), '-j' + str(a.jobs)], check=True)
         subprocess.run([sys.executable, str(ROOT / 'dm/android/tools/make_apk.py'), a.id, str(build), str(a.out.resolve()),
                         '--library', str(output / profile / 'libdmhost.so'), *packaging], check=True)
     except subprocess.CalledProcessError as e:
         p.exit(e.returncode or 1, '[RED] Android build or packaging failed\n')
+    except (OSError, ValueError) as e:
+        p.exit(1, '[RED] ' + str(e) + '\n')
 
 
 if __name__ == '__main__':
