@@ -11,6 +11,7 @@ uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); r
 uint64_t guest_ns(void) { return now_ns(); }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
+static prog_t alias_program = {.nstage = 1};
 static prog_t storage_program = {.nstage = 2};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
@@ -25,6 +26,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &alias_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x43; return 1; }
     if (p == &storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x41 + stage; return 1; }
     if (p == &buffer_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x40; return 1; }
     if (p == &draw_parameters_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x39 + stage; return 1; }
@@ -865,7 +867,51 @@ static void graphics_storage(void) {
     mtl_tex_release(&target);
     puts("Vertex and fragment storage writes survive successive draws, compute consumers and fences");
 }
+static void simultaneous_aliases(void) {
+    for(int mode=0;mode<8;mode++) {
+        uint32_t storage[260], result[6]={0xcafebabe,0,0,0,0,0xcafebabe};
+        for(int i=0;i<260;i++) storage[i]=0xcafebabe;
+        const uint32_t deltas[]={0,64,1,3,4,7,63,65};
+        uint32_t delta=deltas[mode];
+        list_t list={0};push_constants(&list,1,240,&delta,sizeof delta);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&alias_program,.stages=0x20);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(storage+1),.size=mode?512:256);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)(storage+1+delta),.size=mode?256:512);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=2,.addr=(uintptr_t)(result+1),.size=16);
+        RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        const uint32_t expected[]={1001,2002,3003};
+        for(int i=0;i<3;i++) if(result[i+1]!=expected[i]) {
+            fprintf(stderr,"simultaneous aliases mode%d word%d: %u expected %u\n",mode,i,result[i+1],expected[i]);abort();
+        }
+        for(int i=0;i<260;i++) assert(storage[i]==(i==1+delta?1001:i==2+delta?2002:i==3+delta?3004:0xcafebabe));
+        assert(result[4]==192&&result[0]==0xcafebabe&&result[5]==0xcafebabe);
+    }
+    puts("Overlapping storage bindings share writes and atomics within one dispatch");
+}
+static void graphics_storage_alias(void) {
+    tex_t target={.serial=0xb101,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&target.d,&target.L);
+    uint32_t storage[68],result[65]={0};for(int i=0;i<68;i++) storage[i]=10;
+    list_t list={0};uint32_t expected=10;push_constants(&list,0,240,&expected,sizeof expected);
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&storage_program,.stages=3);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)(storage+1),.size=12);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=1,.index=0,.addr=(uintptr_t)(storage+2),.size=256);
+    RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&buffer_program,.stages=0x20);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(storage+1),.size=260);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)result,.size=sizeof result);
+    RECORD(OP_DISPATCH,p_dispatch,.x=65,.y=1,.z=1);
+    put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for(int i=1;i<=65;i++) { uint32_t want=i==2||i==3?12:11;assert(storage[i]==want&&result[i-1]==want+1000); }
+    assert(storage[0]==10&&storage[66]==10&&storage[67]==10);
+    mtl_tex_release(&target);
+    puts("Vertex and fragment atomics share partially overlapping storage bindings");
+}
 int main(void) {
+    graphics_storage_alias();
+    simultaneous_aliases();
     graphics_storage();
     readback_gpu_consumer();
     buffer_range_lifetime();

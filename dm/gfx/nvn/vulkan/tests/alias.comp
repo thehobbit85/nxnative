@@ -1,0 +1,19 @@
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) coherent buffer First { uint words[]; } first;
+layout(set=0,binding=1,std430) coherent buffer Second { uint words[]; } second;
+layout(set=0,binding=2,std430) buffer Result { uint words[]; } result;
+layout(set=0,binding=3,std140) uniform Push { uvec4 rows[16]; } constants;
+void main() {
+    uint delta=constants.rows[15].x;
+    result.words[3]=first.words.length()+second.words.length();
+    first.words[delta]=1001;
+    memoryBarrierBuffer();
+    result.words[0]=second.words[0];
+    second.words[1]=2002;
+    memoryBarrierBuffer();
+    result.words[1]=first.words[delta+1];
+    first.words[delta+2]=3003;
+    memoryBarrierBuffer();
+    result.words[2]=atomicAdd(second.words[2],1);
+}

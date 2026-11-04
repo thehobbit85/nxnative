@@ -48,8 +48,8 @@
 
 - [x] Add vertex and fragment SSBO writes followed by compute readers; check three successive atomic draws, guards, raster output and submission splits.
 - [x] Implement graphics-stage write ownership and barriers, honoring read-only reflection.
-- [ ] Add two overlapping SSBO descriptors used by one dispatch and verify coherent aliases.
-- [ ] Implement per-stage ownership and barriers, then unify simultaneous overlapping bindings without losing byte aliases or alignment.
+- [x] Add overlapping SSBO descriptors used by one dispatch and both graphics stages; verify words, atomics, guards and runtime-array lengths.
+- [x] Unify simultaneous storage bindings, preserving word-offset aliases with private SPIR-V block layouts and aligned descriptors. Validate shared source block types and representative exported shaders.
 - [ ] Cover CPU consumers of GPU-produced indices/handles, pool finalization, new pools at reused addresses and outstanding fences.
 - [ ] Run synthetic Metal/Vulkan comparisons and commit the validated behavior.
 

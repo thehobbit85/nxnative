@@ -16,14 +16,14 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/0000000000000033.spv $(B)/shaders/0000000000000034.spv $(B)/shaders/0000000000000035.spv $(B)/shaders/0000000000000036.spv \
          $(B)/shaders/0000000000000037.spv $(B)/shaders/0000000000000038.spv \
          $(B)/shaders/0000000000000039.spv $(B)/shaders/000000000000003a.spv $(B)/shaders/0000000000000040.spv \
-         $(B)/shaders/0000000000000041.spv $(B)/shaders/0000000000000042.spv
+         $(B)/shaders/0000000000000041.spv $(B)/shaders/0000000000000042.spv $(B)/shaders/0000000000000043.spv
 profile:
 	$(MAKE) -C $(HOST) GAME=$(GAME) game_profile
 $(B)/shaders/0000000000000040.spv: tests/buffer.comp tests/buffer.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/buffer.vk.txt $(@:.spv=.vk.txt)
-$(B)/t_replay: $(SRC) spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
+$(B)/t_replay: $(SRC) spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile
@@ -85,7 +85,7 @@ recorded-transfer-test: $(B)/t_recorded_transfer
 	$(B)/t_recorded_transfer
 recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
-$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
+$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
 
@@ -143,3 +143,19 @@ $(B)/shaders/0000000000000042.spv: tests/storage.frag tests/storage.frag.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/storage.frag.vk.txt $(@:.spv=.vk.txt)
+
+$(B)/shaders/0000000000000043.spv: tests/alias.comp tests/alias.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/alias.vk.txt $(@:.spv=.vk.txt)
+
+# This small host tool validates buffer-block rebasing without an Android device.
+BUILD_CC ?= cc
+SPIRV_VAL ?= spirv-val
+$(B)/t_buffer_bias: tests/t_buffer_bias.c spv_buffer_bias.h
+	mkdir -p $(B)
+	$(BUILD_CC) -O1 -g -Wall -Werror $(BUILD_CFLAGS) $< -o $@
+.PHONY: buffer-bias-check
+buffer-bias-check: $(B)/t_buffer_bias $(B)/shaders/0000000000000043.spv
+	$(B)/t_buffer_bias $(B)/shaders/0000000000000043.spv $(B)/buffer-biased.spv
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/buffer-biased.spv
