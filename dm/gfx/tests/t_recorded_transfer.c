@@ -16,8 +16,9 @@ static void load_bootstrap(void) {
     assert(bootstrap);
     NVNT_nvnDeviceGetProcAddress get_proc = API(nvnDeviceGetProcAddress);
     for (size_t i = 0; i < NVN_NFUNC; i++) {
-        assert(bootstrap(nvn_names[i]) == nvn_thunk[i]);
-        assert((void *)get_proc(NULL, nvn_names[i]) == nvn_thunk[i]);
+        void *entry = nvn_counting() ? nvn_thunk[i] : nvn_thunk_fast[i];
+        assert(bootstrap(nvn_names[i]) == entry);
+        assert((void *)get_proc(NULL, nvn_names[i]) == entry);
     }
 }
 
