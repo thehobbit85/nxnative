@@ -18,6 +18,7 @@
 #include "spv_vertex_fetch.h"
 #include "spv_output_defaults.h"
 #include "spv_draw_parameters.h"
+#include "spv_buffer_bias.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -951,14 +952,17 @@ typedef struct vin_module {
     VkShaderModule module;
     struct vin_module *next;
 } vin_module;
-typedef struct {
+typedef struct shader shader_t;
+struct shader {
+    shader_t *buffer_variants, *next_buffer_variant;
+    uint32_t buffer_bias[64]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
     VkShaderModule mod; VkDescriptorSetLayout dsl;
     sbind b[64]; int nb; uint8_t vin[32]; uint32_t vin_mask;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
     uint8_t *c1; uint32_t c1_len; uint32_t tg[3];
     VkPipelineLayout cpl; VkPipeline cpp;   // compute shaders: their layout and pipeline (dispatch)
-} shader_t;
+};
 static shader_t **g_sh; static int g_nsh;
 static int g_depth_zero;   // NVN depth mode (mtl_set_depth_zero, defined with the replay state)
 static const char *g_vkdir;
@@ -1118,6 +1122,36 @@ static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
     return spv;
 }
 
+static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
+    uint32_t bindings[64]; int any=0;
+    for (int i=0;i<s->nb;i++) { bindings[i]=s->b[i].binding;any|=s->buffer_bias[i]!=0; }
+    if (!spv || !any) return spv;
+    size_t words; const char *reason;
+    uint32_t *biased=spv_buffer_bias(spv,*bytes/4,bindings,s->buffer_bias,s->nb,&words,&reason);
+    free(spv);
+    if (!biased) LOG("[RED] vk: shader %s buffer rebasing failed: %s",s->key,reason);
+    else *bytes=words*4;
+    return biased;
+}
+static uint32_t *stage_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
+    if (s->stage==0) spv=vertex_spv(spv,bytes,s);
+    else if (!g_draw_parameters) {
+        size_t nn;int ok;uint32_t *w2=spv_draw_parameters(spv,*bytes/4,&nn,&ok);
+        if (!ok) { LOG("[RED] vk: shader %s draw-parameter lowering failed",s->key);free(spv);return NULL; }
+        if (w2) { free(spv);spv=w2;*bytes=nn*4; }
+    }
+    spv=shader_bias_spv(spv,bytes,s);
+    if (!spv) return NULL;
+    uint32_t set=s->stage==1?1:0;
+    for (size_t i=5;i<*bytes/4;) {
+        uint32_t op=spv[i]&0xffff,len=spv[i]>>16;
+        if (!len) break;
+        if (op==71 && len>=4 && spv[i+2]==34) spv[i+3]=set;
+        i+=len;
+    }
+    return spv;
+}
+
 // Reuse one module across PSOs that fetch the same locations in the same classes.
 // Only a new class combination reopens the vertex artifact; its bytes live for this call.
 static VkShaderModule vertex_variant(shader_t *s, uint64_t mask) {
@@ -1127,6 +1161,7 @@ static VkShaderModule vertex_variant(shader_t *s, uint64_t mask) {
     uint32_t *spv = read_file(path, &ns);
     if (!spv) { LOG("[RED] vk: cannot reopen vertex shader %s", s->key); return VK_NULL_HANDLE; }
     spv = vertex_spv(spv, &ns, s);
+    spv = shader_bias_spv(spv, &ns, s);
     if (!spv) return VK_NULL_HANDLE;
     const char *reason;
     uint32_t *variant = spv_vertex_fetch(spv, ns / 4, mask, s->vin, &words, &reason);
@@ -1181,16 +1216,9 @@ static shader_t *shader_get(const uint8_t md[8]) {
         }
     }
     free(txt);
-    if (s->stage == 0) { s->depth_zero = g_depth_zero; spv = vertex_spv(spv, &ns, s); }
-    else if (!g_draw_parameters) {
-        size_t nn; int ok; uint32_t *w2=spv_draw_parameters(spv,ns/4,&nn,&ok);
-        if (!ok) { LOG("[RED] vk: shader %s draw-parameter lowering failed",s->key);free(spv);return s; }
-        if (w2) { free(spv);spv=w2;ns=nn*4; }
-    }
+    s->depth_zero=g_depth_zero;
+    spv=stage_spv(spv,&ns,s);
     if (!spv) return s;
-    // the fragment stage's resources move to set 1 (DescriptorSet decorations, operand 34)
-    uint32_t set = s->stage == 1 ? 1 : 0;
-    for (size_t i = 5; i < ns / 4;) { uint32_t w = spv[i], op = w & 0xffff, len = w >> 16; if (!len) break; if (op == 71 && len >= 4 && spv[i + 2] == 34) spv[i + 3] = set; i += len; }
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, ns, spv};
     VkResult r = vkCreateShaderModule(g_dev, &mi, NULL, &s->mod); free(spv);
     if (r != VK_SUCCESS) { LOG("[RED] vk: shader %s rejected (%d)", key, (int)r); s->mod = VK_NULL_HANDLE; }
@@ -1200,6 +1228,27 @@ static shader_t *shader_get(const uint8_t md[8]) {
     for (int i = 0; i < s->nb; i++) lb[i] = (VkDescriptorSetLayoutBinding){s->b[i].binding, DT[s->b[i].type], s->b[i].count, sf, NULL};
     VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, (uint32_t)s->nb, lb};
     VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &s->dsl));
+    return s;
+}
+static shader_t *buffer_variant(shader_t *base, const uint32_t bias[64]) {
+    int any=0;for(int i=0;i<base->nb;i++) any|=bias[i]!=0;
+    if (!any) return base;
+    for(shader_t *s=base->buffer_variants;s;s=s->next_buffer_variant)
+        if(!memcmp(s->buffer_bias,bias,sizeof s->buffer_bias)) return s->mod?s:NULL;
+    shader_t *s=malloc(sizeof *s);
+    if(!s) return NULL;
+    *s=*base;s->buffer_variants=NULL;s->vertex_variants=NULL;s->cpp=VK_NULL_HANDLE;s->cpl=VK_NULL_HANDLE;s->mod=VK_NULL_HANDLE;
+    memcpy(s->buffer_bias,bias,sizeof s->buffer_bias);
+    s->next_buffer_variant=base->buffer_variants;base->buffer_variants=s;
+    char path[1024];size_t bytes;
+    snprintf(path,sizeof path,"%s/%s.spv",g_vkdir,s->key);
+    uint32_t *spv=read_file(path,&bytes);
+    if(!spv) return NULL;
+    spv=stage_spv(spv,&bytes,s);
+    if(!spv) return NULL;
+    VkShaderModuleCreateInfo mi={VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,NULL,0,bytes,spv};
+    VkResult r=vkCreateShaderModule(g_dev,&mi,NULL,&s->mod);free(spv);
+    if(r!=VK_SUCCESS) { s->mod=VK_NULL_HANDLE;LOG("[RED] vk: shader %s rebased buffer module rejected (%d)",s->key,r);return NULL; }
     return s;
 }
 static VkDescriptorSetLayout g_empty_dsl;
@@ -1623,6 +1672,75 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
     for (int a = 0; a < P.n && g_fb_n < 8; a++) if (want[a]) { fbsnap_t *e = fb_snap_for(P.ct[a], a); if (e) { g_fb_src[g_fb_n] = P.ct[a]; g_fb_view[g_fb_n++] = e->view; } }
     if (need) { barrier_all(cb); pass_begin(); }
 }
+// All storage descriptors of a command are resolved together. Overlapping
+// ranges share one backing allocation, so writes and atomics through either
+// descriptor see the same bytes, including across vertex and fragment sets.
+static gw_t g_storage[128]; static size_t g_nstorage;
+static const p_bind_buf *storage_binding(const sbind *b, int stage) {
+    if (b->type != BT_SSBO || b->count != 1 || b->reg < 0 || b->reg >= 16) return NULL;
+    return b->kind == K_SBUF ? &S.ssbo[stage][b->reg] : b->kind == K_UBOP ? &S.ubo[stage][b->reg] : NULL;
+}
+static int storage_order(const void *a, const void *b) {
+    uint64_t x = ((const gw_t *)a)->addr, y = ((const gw_t *)b)->addr;
+    return (x > y) - (x < y);
+}
+static int prepare_storage(shader_t **first, shader_t **second) {
+    g_nstorage = 0;
+    shader_t *stages[] = {*first, second ? *second : NULL};
+    for (int st = 0; st < 2; st++) {
+        shader_t *s = stages[st]; if (!s) continue;
+        for (int i = 0; i < s->nb; i++) {
+            const p_bind_buf *u = storage_binding(&s->b[i], s->stage);
+            if (!u || !u->addr || !u->size) continue;
+            if (u->size > UINT64_MAX - u->addr) return 0;
+            if (g_nstorage == sizeof g_storage / sizeof *g_storage) die("Vulkan: too many storage bindings");
+            g_storage[g_nstorage++] = (gw_t){.addr=u->addr, .size=u->size};
+        }
+    }
+    qsort(g_storage, g_nstorage, sizeof *g_storage, storage_order);
+    size_t n = 0;
+    for (size_t i = 0; i < g_nstorage; i++) {
+        gw_t *r = &g_storage[i];
+        if (n && overlaps(g_storage[n-1].addr, g_storage[n-1].size, r->addr, r->size)) {
+            gw_t *prev = &g_storage[n-1];
+            uint64_t end = r->addr + r->size;
+            if (end > prev->addr + prev->size) prev->size = end - prev->addr;
+        } else g_storage[n++] = *r;
+    }
+    g_nstorage = n;
+    VkDeviceSize align = g_props.limits.minStorageBufferOffsetAlignment;
+    for (size_t i = 0; i < n; i++) {
+        gw_t *r = &g_storage[i];
+        if (gw_find(r->addr, r->size, align, &r->buf, &r->off, &r->p)) continue;
+        VkDeviceSize offset = copy_in(r->addr, r->size, align);
+        if (offset == VK_WHOLE_SIZE) return 0;
+        r->buf = C->ring; r->off = offset; r->p = C->ringp + offset;
+    }
+    for (int st=0;st<2;st++) {
+        shader_t *s=stages[st];if(!s) continue;
+        uint32_t bias[64]={0};
+        for (int b=0;b<s->nb;b++) {
+            const p_bind_buf *u=storage_binding(&s->b[b],s->stage);
+            if(!u || !u->addr || !u->size) continue;
+            for(size_t i=0;i<n;i++) if(u->addr>=g_storage[i].addr && u->addr-g_storage[i].addr<g_storage[i].size) {
+                bias[b]=(uint32_t)((u->addr-g_storage[i].addr)%align);break;
+            }
+        }
+        shader_t *variant=buffer_variant(s,bias);
+        if(!variant) return 0;
+        if(st) *second=variant;else *first=variant;
+    }
+    return 1;
+}
+static int prepared_storage(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off, uint8_t **p) {
+    for (size_t i = 0; i < g_nstorage; i++) {
+        const gw_t *r = &g_storage[i];
+        if (r->buf && addr >= r->addr && addr - r->addr < r->size && size <= r->size - (addr - r->addr)) {
+            *buf = r->buf; *off = r->off + addr - r->addr; *p = r->p + (addr - r->addr); return 1;
+        }
+    }
+    return 0;
+}
 static gw_t g_wb[128]; static int g_nwb;   // writable buffers of this draw or dispatch, published only after command encoding
 // The descriptor set is populated before the draw/dispatch. Only transfer ownership
 // to the GPU after a command using it has actually been recorded.
@@ -1694,7 +1812,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
             else if ((b->kind == K_SBUF || b->kind == K_UBOP) && b->reg >= 0 && b->reg < 16) {   // preserve prior GPU writes, then publish writable bindings after the command
                 const p_bind_buf *u = b->kind == K_SBUF ? &S.ssbo[stage][b->reg] : &S.ubo[stage][b->reg];
                 VkBuffer gb = VK_NULL_HANDLE; VkDeviceSize go = 0; uint8_t *gp = NULL;
-                if (u->addr && u->size && gw_find(u->addr, u->size, 256, &gb, &go, &gp)) *d = (VkDescriptorBufferInfo){gb, go, u->size};
+                if (u->addr && u->size && (prepared_storage(u->addr, u->size, &gb, &go, &gp) || gw_find(u->addr, u->size, 256, &gb, &go, &gp))) *d = (VkDescriptorBufferInfo){gb, go, u->size};
                 else if (u->addr && u->size) { VkDeviceSize o = copy_in(u->addr, u->size, 256); if (o != VK_WHOLE_SIZE) { *d = (VkDescriptorBufferInfo){C->ring, o, u->size}; gb = C->ring; go = o; gp = C->ringp + o; } }
                 if (gb && b->type == BT_SSBO && !b->read_only) {
                     if (g_nwb == sizeof g_wb / sizeof *g_wb) die("Vulkan: too many writable buffer bindings");
@@ -1740,6 +1858,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                     }
                 }
             }
+            d->offset -= s->buffer_bias[i]; d->range += s->buffer_bias[i];
             x->descriptorType = b->type == BT_UBO ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; x->pBufferInfo = d;
         } else if (b->type == BT_CIS) {
             VkDescriptorImageInfo images[32];
@@ -1797,6 +1916,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if ((dw && dw->ind) || (di && di->ind)) { RED_ONCE(30, "indirect draws are not implemented yet"); SKIP(3); }
     int prim = dw ? dw->prim : di->prim;
     if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP || prim == NVN_DRAW_PRIMITIVE_PATCHES) { RED_ONCE(31, "primitive %d not implemented yet", prim); SKIP(4); }
+    if (!prepare_storage(&vs, &fs)) SKIP(6);
     pso_key k; memset(&k, 0, sizeof k);
     k.origin_ll = g_queue_origin_ll;
     k.vs = vs; k.fs = fs; k.prim = prim; k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
@@ -1965,6 +2085,8 @@ static void dispatch(const p_dispatch *d) {
         for (unsigned i = 0; i < p->nstage; i++) { uint8_t md[8]; if (!prog_key(p, i, md)) continue; shader_t *sh = shader_get(md); if (sh->stage == 5) pc[h].cs = sh; }
     }
     shader_t *cs = pc[h].cs; if (!cs || !cs->mod) { RED_ONCE(64, "compute program without a usable compute shader: dispatch skipped"); return; }
+    pass_end();
+    if (!prepare_storage(&cs, NULL)) return;
     if (!cs->cpp) {
         VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &cs->dsl, 0, NULL}; VKCHECK(vkCreatePipelineLayout(g_dev, &li, NULL, &cs->cpl));
         VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs->mod, "main", NULL}, cs->cpl, VK_NULL_HANDLE, -1};
