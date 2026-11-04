@@ -967,8 +967,11 @@ static VkSampler samp_get(int sid) {
 
 // ---------- Shaders and pipelines ----------
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
+static int sampler_source(const char *kind) {
+    return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
+}
 typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg; int32_t off, soff, view, num; } sbind;
 typedef struct vin_module {
     uint64_t mask;
@@ -1234,7 +1237,8 @@ static shader_t *shader_get(const uint8_t md[8]) {
                       !strcmp(ty, "stb") ? BT_STB : !strcmp(ty, "simg") ? BT_SIMG : !strcmp(ty, "tex") ? BT_TEX : BT_SAMP;
             e->kind = !strcmp(kind, "cbuf") ? K_CBUF : !strcmp(kind, "c1") ? K_C1 : !strcmp(kind, "support") ? K_SUPPORT : !strcmp(kind, "drvcb") ? K_DRVCB : !strcmp(kind, "tex") ? K_TEX :
                       !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : !strcmp(kind, "tex_ubo") ? K_TEXU : K_UNK;
-            e->skind = !strcmp(sk, "samp") ? S_SAMP : !strcmp(sk, "samp_tex") ? S_SAMP_TEX : !strcmp(sk, "samp_id") ? S_SAMP_ID : !strcmp(sk, "samp_ubo") ? S_SAMPU : S_NONE;
+            e->skind = sampler_source(sk);
+            if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
             if (e->kind == K_UNK) LOG("[RED] vk: shader %s binding %d has kind %s, not implemented (reads zero)", key, b, kind);
         }
     }
@@ -1667,16 +1671,20 @@ static uint32_t uniform_handle(int stage, int reg, int64_t off) {
 }
 static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     uint64_t handle = 0;
-    if (b->kind == K_TEX && b->reg >= 0 && b->reg < NTEX) handle = S.tex[stage][b->reg];
+    if (b->kind == K_TEX && b->reg >= 0 && (uint32_t)b->reg + element < NTEX) handle = S.tex[stage][b->reg + element];
     else if (b->kind == K_TEXU && b->off >= 0) {
         uint32_t raw = uniform_handle(stage, b->reg, b->off + 8ll * element);
         uint32_t tid = raw & 0xfffff;
         handle = tid ? (uint64_t)tid + S.tex_base : 0;
     }
     uint64_t sid = 0;
-    if (b->skind == S_SAMP && b->sreg >= 0 && b->sreg < 128) sid = S.samp[stage][b->sreg] >> 20;
-    else if (b->skind == S_SAMP_TEX) sid = handle >> 20;
-    else if (b->skind == S_SAMP_ID && b->sreg >= 0) sid = b->sreg;
+    uint32_t sampler_element = b->type == BT_SAMP ? element : 0; // a paired texture array may share one fixed sampler slot
+    if (b->skind == S_SAMP && b->sreg >= 0 && (uint32_t)b->sreg + sampler_element < 128) sid = S.samp[stage][b->sreg + sampler_element] >> 20;
+    else if (b->skind == S_SAMP_TEX) {
+        if (b->type == BT_SAMP && b->sreg >= 0 && (uint32_t)b->sreg + element < NTEX) sid = S.tex[stage][b->sreg + element] >> 20;
+        else sid = handle >> 20;
+    }
+    else if (b->skind == S_SAMP_ID && b->sreg >= 0) sid = b->sreg + (b->type == BT_SAMP ? element : 0);
     else if (b->skind == S_SAMPU && b->soff >= 0) {
         sid = uniform_handle(stage, b->sreg, b->soff + 8ll * element) >> 20;
         if (sid) sid += S.samp_base;
@@ -1739,7 +1747,7 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
     int want[8] = {0}, any = 0;
     for (int i = 0; i < fs->nb; i++) {
         const sbind *b = &fs->b[i];
-        if (b->type != BT_CIS || (b->kind != K_TEX && b->kind != K_TEXU) || b->count > 32) continue;
+        if ((b->type != BT_CIS && b->type != BT_TEX) || (b->kind != K_TEX && b->kind != K_TEXU) || b->count > 32) continue;
         for (uint32_t element = 0; element < b->count; ++element) {
         int tid = (int)(sampled_handle(1, b, element) & 0xfffff); if (!tid) continue;
         treg_t tr; vtex *v = registered_texture(tid, &tr); if (!v) continue;
@@ -1865,7 +1873,8 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
     for (int i = 0; i < s->nb; ++i) {
         const sbind *b = &s->b[i];
         if (b->type == BT_SIMG) continue;
-        if (b->type == BT_CIS && b->count <= 32 && (b->kind == K_TEXU || (b->kind == K_TEX && b->count == 1))) continue;
+        if ((b->type == BT_CIS || b->type == BT_TEX) && b->count <= 32 && (b->kind == K_TEXU || b->kind == K_TEX)) continue;
+        if (b->type == BT_SAMP && b->count <= 32 && b->skind != S_NONE) continue;
         if (b->count != 1 || (b->type != BT_UBO && b->type != BT_SSBO && b->type != BT_CIS)) {
             RED_ONCE(22, "cannot populate descriptor %u type %d count %u (shader %s)", b->binding, b->type, b->count, s->key);
             return VK_NULL_HANDLE;
@@ -1948,24 +1957,29 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
             d->offset -= s->buffer_bias[i]; d->range += s->buffer_bias[i];
             if (b->type == BT_SSBO && d->range > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "biased storage range exceeds the device descriptor limit"); return VK_NULL_HANDLE; }
             x->descriptorType = b->type == BT_UBO ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; x->pBufferInfo = d;
-        } else if (b->type == BT_CIS) {
-            VkDescriptorImageInfo images[32];
+        } else if (b->type == BT_CIS || b->type == BT_TEX || b->type == BT_SAMP) {
+            VkDescriptorImageInfo images[32] = {0};
             for (uint32_t element = 0; element < b->count; ++element) {
                 uint64_t handle = sampled_handle(stage, b, element);
-                int ok; vtex *tv;
-                VkImageView view = tex_slot(handle, b, &ok, &tv);
-                if (!view) return VK_NULL_HANDLE;
-                if (stage == 1 && tv) for (int q = 0; q < g_fb_n; q++) if (tv == g_fb_src[q]) { view = g_fb_view[q]; break; }   // same-pass feedback: the snapshot (fb_prepare)
-                pthread_mutex_lock(&g_rmu); VkSampler sampler = samp_get((int)(handle >> 20)); pthread_mutex_unlock(&g_rmu);
-                if (!ok && b->num) {
+                int ok = 0; vtex *tv = NULL;
+                if (b->type != BT_SAMP) {
+                    VkImageView view = tex_slot(handle, b, &ok, &tv);
+                    if (!view) return VK_NULL_HANDLE;
+                    if (stage == 1 && tv) for (int q = 0; q < g_fb_n; q++) if (tv == g_fb_src[q]) { view = g_fb_view[q]; break; }   // same-pass feedback: the snapshot (fb_prepare)
+                    images[element].imageView = view; images[element].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                }
+                if (b->type != BT_TEX) {
+                    pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20)); pthread_mutex_unlock(&g_rmu);
+                }
+                if (b->type == BT_CIS && !ok && b->num) {
                     static VkSampler nearest;
                     if (!nearest) { VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; VKCHECK(vkCreateSampler(g_dev, &si, NULL, &nearest)); }
-                    sampler = nearest;
+                    images[element].sampler = nearest;
                 }
-                images[element] = (VkDescriptorImageInfo){sampler, view, VK_IMAGE_LAYOUT_GENERAL};
             }
+            VkDescriptorType type = b->type == BT_CIS ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : b->type == BT_TEX ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
             VkWriteDescriptorSet array = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0,
-                b->count, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, images, NULL, NULL};
+                b->count, type, images, NULL, NULL};
             vkUpdateDescriptorSets(g_dev, 1, &array, 0, NULL);
             continue;
         }

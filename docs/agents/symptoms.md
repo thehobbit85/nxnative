@@ -785,6 +785,8 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- an exported shader with separate texture/sampler descriptors loses its image shape or fails with an unsupported sampler kind, and the executor rejects the draw's descriptor array. → [Separate Vulkan texture and sampler descriptors](../reference/shaders.md#separate-vulkan-texture-and-sampler-descriptors)
+- a read-only storage input is treated as a GPU writer and copied back to guest memory. → [Read-only Vulkan storage blocks retain ownership](../reference/shaders.md#read-only-vulkan-storage-blocks-retain-ownership)
 - the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`). → [One scrambled archive indexed by the NRO](../reference/shaders.md#one-scrambled-archive-indexed-by-the-nro)
 - the split finds only a small part of a game's shaders, with no `[RED]` line, and its RomFS holds files that start `NARC` (`.narc`, `.nptl`, `.ntex` on Mario Tennis Aces). → [Packed shader banks in loose NARC files](../reference/shaders.md#packed-shader-banks-in-loose-narc-files)
 - the split finds no shaders in `main` or RomFS, while reporting control sections in `main` with no code area. The game has `.sp4` resources and loose `.nvnbin` files rather than BNSH archives or whole GLSLC outputs. → [Sumo Ninty_NX shaders and MuxFDMR streams](../reference/shaders.md#sumo-ninty_nx-shaders-and-muxfdmr-streams)

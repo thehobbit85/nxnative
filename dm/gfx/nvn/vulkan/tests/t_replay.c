@@ -14,6 +14,7 @@ uint64_t guest_ns(void) { return now_ns(); }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
 static prog_t alias_program = {.nstage = 1};
+static prog_t separate_program[4]={{.nstage=2},{.nstage=2},{.nstage=2},{.nstage=2}};
 static prog_t storage_program = {.nstage = 2};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
@@ -28,6 +29,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    for(int i=0;i<4;i++) if(p==&separate_program[i]) { assert(stage<2);memset(key,0,8);key[7]=stage?0x44+i:1;return 1; }
     if (p == &alias_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x43; return 1; }
     if (p == &storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x41 + stage; return 1; }
     if (p == &buffer_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x40; return 1; }
@@ -1040,7 +1042,67 @@ static void retired_texture_pool(void) {
     assert(!munmap(pool,page));
     puts("Pool retirement preserves submitted draws, invalidates warm/cold IDs and requires registration after address reuse");
 }
+static void separate_descriptors(void) {
+    tex_t images[2],output={.serial=0xd002,.d={.width=4,.height=4,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d,&output.L);
+    for(int i=0;i<2;i++) {
+        images[i]=(tex_t){.serial=0xd000+i,.d={.width=1,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_3D,.format=NVN_FORMAT_RGBA8}};
+        nvn_tex_layout(&images[i].d,&images[i].L);mtl_reg_tex(2053+i,&images[i],NULL);
+    }
+    samp_par edge={0},border={.ws=NVN_WRAP_MODE_CLAMP_TO_BORDER,.border={1,1,1,1}};
+    mtl_reg_samp(513,&edge);mtl_reg_samp(514,&border);
+    uint64_t handles[8]={0},samplers[8]={0};mtl_pool_add(handles,sizeof handles);mtl_pool_add(samplers,sizeof samplers);
+    float positions[]={-1,-1,3,-1,-1,3},white[]={1,1,1,1};
+    for(int mode=0;mode<4;mode++) for(int pass=0;pass<10;pass++) {
+        uint8_t pixels[64]={0};list_t list={0};
+        struct { uint32_t image,sampler;float coordinate;uint32_t pad; } params={pass&1,(pass>>1)&1,pass&4?1.5f:0.5f,0};
+        // Keep the other array element valid while this one is missing.
+        mtl_reg_tex(2053,pass>=8?NULL:&images[0],NULL);
+        for(int i=0;i<2;i++) {
+            p_clear_tex clear={.tex=&images[i],.r={.width=1,.height=1,.depth=1},.mask=15};clear.c.f[i+1]=1;clear.c.f[3]=1;
+            put(&list,OP_CLEAR_TEX,&clear,sizeof clear);
+        }
+        if(mode==1) {
+            memset(handles,0,sizeof handles);memset(samplers,0,sizeof samplers);
+            uint32_t values[4]={5,0,6,0};push_constants(&list,1,240,values,sizeof values);
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&handles[2],.size=16);
+            RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
+            values[0]=1u<<20;values[2]=2u<<20;push_constants(&list,1,240,values,sizeof values);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&samplers[3],.size=16);
+            RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
+        }
+        RECORD(OP_SET_TEX_POOL,p_set_pool,.pool=&texture_pool);
+        RECORD(OP_SET_SAMP_POOL,p_set_pool,.pool=&alternate_sampler_pool);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=1,.index=7,.addr=(uintptr_t)handles,.size=sizeof handles);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=1,.index=8,.addr=(uintptr_t)samplers,.size=sizeof samplers);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=1,.index=9,.addr=(uintptr_t)&params,.size=sizeof params);
+        RECORD(OP_BIND_TEX,p_bind_handles,.stage=1,.first=3,.n=2,.h={2053,2054});
+        RECORD(OP_BIND_TEX,p_bind_handles,.stage=1,.first=10,.n=2,.h={513ull<<20,514ull<<20});
+        RECORD(OP_BIND_SAMP,p_bind_handles,.stage=1,.first=5,.n=2,.h={513ull<<20,514ull<<20});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&separate_program[mode],.stages=3);
+        push_constants(&list,0,240,white,sizeof white);
+        va_st va={.fmt=NVN_FORMAT_RG32F};p_bind_vattr attr={.n=1};memcpy(attr.st,&va,sizeof va);put(&list,OP_BIND_VATTR,&attr,sizeof attr);
+        RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=1,.st={{.stride=8}});
+        RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sizeof positions,.addr=(uintptr_t)positions);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=4,.height=4,.depth=1});
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        uint8_t want[4]={0,params.image?0:255,params.image?255:0,255};if((pass&6)==6) memset(want,255,4);
+        if(pass==8) want[1]=0;
+        for(int i=0;i<16;i++) if(memcmp(pixels+4*i,want,4)) {
+            fprintf(stderr,"separate descriptors mode%d pass%d pixel%d: %u,%u,%u,%u\n",mode,pass,i,pixels[4*i],pixels[4*i+1],pixels[4*i+2],pixels[4*i+3]);abort();
+        }
+    }
+    mtl_pool_del(handles);mtl_pool_del(samplers);
+    for(int i=0;i<2;i++) { mtl_reg_tex(2053+i,NULL,NULL);mtl_tex_release(&images[i]); }
+    mtl_tex_release(&output);
+    puts("Separate texture/sampler arrays use independent slots, GPU uniform handles, texture-packed and fixed sampler IDs");
+}
 int main(void) {
+    if(getenv("DM_VK_TEST_SEPARATE")) { separate_descriptors();return 0; }
+    separate_descriptors();
     if(getenv("DM_VK_TEST_RETIRE")) { retired_texture_pool();return 0; }
     retired_texture_pool();
     const char *buffers=getenv("DM_VK_TEST_BUFFERS");
