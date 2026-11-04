@@ -997,6 +997,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - Apple's performance HUD (`DM_METAL_HUD=1`) says `Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler for more fine grained compilations` during play, with a dip in the frame-rate graph at that moment, for example when a new room first issues a scissored clear. → [The host's own shaders compiled from source at run time](../reference/shaders.md#the-hosts-own-shaders-compiled-from-source-at-run-time)
 - a raw global memory read of a memory pool made after the shader's arguments were encoded gets 0, though the pool exists when the GPU runs it; a task shader that reads both ends of a range this way loops `(0 - 1) >> 5` times and hangs the GPU. The memory report's `raw pool table words at commit` line counts the words that were out of date. → [Raw pool table words that predate the pools](../reference/shaders.md#raw-pool-table-words-that-predate-the-pools)
 - Android shader export aborts with `unsupported Vulkan stage: gs` even when the game's observed draws use vertex and fragment shaders. → [Vulkan export preserves packaged shader stages](../reference/shaders.md#vulkan-export-preserves-packaged-shader-stages)
+- Android export stops with `no guest resource for descriptor 1 ('fp_t_tcb_3A')`. → [Vulkan export removes unused descriptor declarations](../reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations)
 
 ## Cheats on a Switch
 

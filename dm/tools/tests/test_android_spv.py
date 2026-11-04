@@ -41,6 +41,34 @@ OpFunctionEnd
 
 
 class AndroidShaderTests(unittest.TestCase):
+    @unittest.skipUnless(all(shutil.which(t) for t in ('spirv-as', 'spirv-val', 'spirv-opt')), 'requires SPIRV-Tools')
+    def test_unused_descriptor_without_metal_metadata_is_removed(self):
+        # The raw translator keeps unreferenced globals; SPIRV-Cross omits them
+        # from Metal's argument buffer. Live bindings must keep their numbers.
+        source = COMPUTE.replace('OpDecorate %dst Binding 7',
+                                 'OpDecorate %dst Binding 7\nOpDecorate %unused DescriptorSet 0\n'
+                                 'OpDecorate %unused Binding 1')
+        source = source.replace('%dst = OpVariable %ptr UniformConstant',
+                                '%dst = OpVariable %ptr UniformConstant\n%unused = OpVariable %ptr UniformConstant')
+        source = source.replace('OpName %dst "output_image"',
+                                'OpName %dst "output_image"\nOpName %unused "unused_image"')
+        reflection = {'bindings': [{'msl_name': 'output_image', 'kind': 'img', 'reg': 3}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            spv = Path(tmp) / 'unused.spv'
+            subprocess.run(['spirv-as', '--target-env', 'vulkan1.1', '-o', spv, '-'],
+                           input=source.replace('Unknown', 'Rgba32f'), text=True, check=True)
+            raw = spv.read_bytes()
+            with self.assertRaisesRegex(ValueError, 'unused_image'):
+                vk.vk_reflect(raw, reflection)
+            prepared = vk.export_spirv(raw, shutil.which('spirv-opt'))
+            spv.write_bytes(prepared)
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', spv], check=True)
+            bindings = vk.vk_reflect(prepared, reflection)
+            self.assertEqual([(b['binding'], b['kind'], b['reg']) for b in bindings], [(7, 'img', 3)])
+            self.assertTrue(any(vk.opcode(i) == 99 for i in vk.decode(prepared)[1]))
+            with self.assertRaisesRegex(ValueError, 'output_image'):
+                vk.vk_reflect(prepared, {'bindings': []})
+
     def test_packaged_geometry_stage_is_preserved_without_claiming_runtime_support(self):
         for stage in ('gs', 'hs', 'ds'):
             self.assertEqual(vk.vk_txt({'stage': stage, 'bindings': []}), f'stage {stage}\n')

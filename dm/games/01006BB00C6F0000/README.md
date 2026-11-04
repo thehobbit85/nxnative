@@ -64,6 +64,8 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 General host changes first needed here; each applies to every game:
 
+- [Vulkan export removes unused descriptor declarations](../../../docs/reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations): resolved the captured Android reflection failure; full export and gameplay validation remain open.
+
 - **Lower-left window origin** (`g_origin_ll`), **copies drawn as passes** (`copy_t2t_draw`), **compute `c0` with the dispatch size** (`encode_args_`, `nvn_refl.m`), **stencil in depth-stencil copies**: [Lower-left window origin](../../../docs/reference/rendering.md#lower-left-window-origin), [Copies a blit cannot do, drawn](../../../docs/reference/rendering.md#copies-a-blit-cannot-do-drawn), [Compute `c0`: dispatch size and uniform buffer table](../../../docs/reference/shaders.md#compute-c0-dispatch-size-and-uniform-buffer-table), [Depth-stencil copies carry the stencil](../../../docs/reference/rendering.md#depth-stencil-copies-carry-the-stencil).
 - **Per-depth-mode vertex entry points** (`vs_depth`, `main0_z`, `mtl_set_depth_zero`): [04, section 5](../../../docs/agents/04-graphics.md#5-depth-convention).
 - **The NVN present crops by the vi layer crop** (`present_crop` in `hle_nvn.c`): [The NVN present crops by the vi layer crop](../../../docs/reference/rendering.md#the-nvn-present-crops-by-the-vi-layer-crop).
@@ -76,7 +78,7 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- Android shader preparation: the XCI base plus v131072 update extract through the shared builder, but Vulkan export stops with `no guest resource for descriptor 1 ('fp_t_tcb_3A')`. The missing resource metadata needs investigation; no Android APK or Android gameplay result is established for this build.
+- Android shader preparation: the XCI base plus v131072 update extract through the shared builder. The captured unused-descriptor failure is resolved. The full Vulkan export is being revalidated; no Android APK or Android gameplay result is established for this build.
 
 - **`SR_Y_DIRECTION`.** 2,487 of its pixel shaders read the window's Y-direction system register, which is −1 under a lower-left origin. The Ryujinx recompiler answers a constant +1 (a TODO in `InstEmitMove.cs`; LASRecomp answers −1). In the room shader the value only scales a depth slope under `abs()`; other shaders may use its sign (`dFdy`-based effects). Answering it per profile means a translator change, i.e. every game's chain.
 - **Two pixel shaders do not translate** (`9d8f6b8543355374`, `9338e3f1b597fe7c`: variants 0 and 1 of one program in `postprocess.bfsha` @0x252000; SPIRV-Cross throws on a null pointer). No run so far has loaded either.

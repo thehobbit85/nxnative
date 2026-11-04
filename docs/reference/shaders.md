@@ -2122,3 +2122,11 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Cause:** a shader package can contain geometry or tessellation assets that a particular route never binds; the exporter treated the runtime's narrower stage support as an asset-format restriction.
 - **Fix:** preserve validated SPIR-V and the actual stage (`gs`, `hs`, `ds`) in its sidecar, and report the runtime limitation explicitly. Executing those stages remains open; successful export does not establish that a game using them will render correctly.
 - **Found on:** [Hollow Knight 1.5.12620](../../dm/games/0100633007D48000/README.md), whose 1,812-stage package contains one geometry shader.
+
+### Vulkan export removes unused descriptor declarations
+
+- **Symptom:** Android export stops with `no guest resource for descriptor 1 ('fp_t_tcb_3A')`.
+- **Cause:** raw SPIR-V can retain declared textures with no instruction reading them. SPIRV-Cross omits those resources from Metal's argument buffer, so the shared Metal reflection correctly has no entry for them. Joining every raw declaration to that reflection fails.
+- **Fix:** run SPIRV-Tools' `--eliminate-dead-variables` before validation and reflection. Live bindings keep their original numbers, and a live resource without metadata still fails with the shader key. No placeholder binding or skipped shader is introduced.
+- **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md), shader `82a7369f8ff88909`: the failing texture has only a name, decorations and an `OpVariable`, with no loads. The cleaned module validates and resolves all nine live descriptors.
+- **Check:** `test_android_spv.py` retains an image write and its binding while removing an unused image absent from Metal metadata; omitting the live image's metadata still fails.
