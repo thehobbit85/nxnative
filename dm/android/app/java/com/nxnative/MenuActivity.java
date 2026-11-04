@@ -40,6 +40,7 @@ import java.util.Set;
 public class MenuActivity extends Activity {
     private SharedPreferences prefs;
     private Spinner mode, fps, fit, lang;
+    private String[] languageCodes;
     private CheckBox showFps, skip;
     private final List<CheckBox> cheatBoxes = new ArrayList<>();
     private boolean launched;
@@ -52,6 +53,11 @@ public class MenuActivity extends Activity {
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         prefs = getSharedPreferences("menu", MODE_PRIVATE);
         seedFiles();
+        if (!prefs.contains("lang")) {
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("default-language.txt"), StandardCharsets.UTF_8))) {
+                prefs.edit().putString("lang", r.readLine()).apply();
+            } catch (Exception e) { /* No packaged language override. */ }
+        }
         buildUi();
         if (needsUnpack()) { if (pendingData() != null) askData(null); else unpack(); return; }
         boolean forced = new File(getFilesDir(), "show_menu").delete();
@@ -69,6 +75,8 @@ public class MenuActivity extends Activity {
         File save = new File(getFilesDir(), "save");
         String[] have = save.list();
         if (have == null || have.length == 0) copyAssetDir("save", save);
+        File env = new File(getExternalFilesDir(null), "env.txt");
+        if (!env.exists()) copyAsset("default.env", env);
         copyAsset("cheats.txt", new File(getFilesDir(), "cheats.txt"));
         copyAssetDir("cheats", new File(getFilesDir(), "cheats"));
         copyAsset("cheats-build.txt", new File(getFilesDir(), "cheats-build.txt"));
@@ -93,7 +101,7 @@ public class MenuActivity extends Activity {
     private long versionCode() { try { return getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode(); } catch (Exception e) { return 0; } }
     private boolean bundled() { try (InputStream in = getAssets().open("game/files.txt")) { return true; } catch (Exception e) { return false; } }
     private static File gameFile(File root, String name) throws java.io.IOException {
-        if (!name.matches("(?:dm|romfs|vk|font)/.+") || name.contains("\\"))
+        if (!name.matches("(?:dm|romfs|vk|font|aoc)/.+") || name.contains("\\"))
             throw new java.io.IOException("Invalid game asset path: " + name);
         File result = new File(root, name).getCanonicalFile();
         if (!result.getPath().startsWith(root.getCanonicalPath() + File.separator))
@@ -118,7 +126,7 @@ public class MenuActivity extends Activity {
                     String l; while ((l = r.readLine()) != null) { String[] f = l.split("\t"); if (f.length >= 2) { (f.length > 2 && f[2].equals("=d") ? later : files).add(f); total += Long.parseLong(f[1]); } }
                 }
                 File ext = getExternalFilesDir(null);
-                for (String root : new String[]{"dm", "romfs", "vk", "font"}) new File(ext, root).mkdirs();
+                for (String root : new String[]{"dm", "romfs", "vk", "font", "aoc"}) new File(ext, root).mkdirs();
                 if (ext.getUsableSpace() < total + (200L << 20)) throw new Exception(String.format(Locale.ROOT, "Not enough storage: %.1f GB free is required.", total / 1e9));
                 new File(ext, ".unpacked").delete(); new File(ext, ".pending_data").delete();
                 long done = 0; byte[] buf = new byte[1 << 20]; int lastPct = -1;
@@ -272,9 +280,11 @@ public class MenuActivity extends Activity {
         fps = spinner(col, "Frame rate", new String[]{"60 (default)", "30 (save battery)"}, prefs.getInt("fps", 60) == 30 ? 1 : 0);
         fit = spinner(col, "Picture", new String[]{"Keep aspect ratio (black bars)", "Stretch to fill"}, prefs.getBoolean("stretch", false) ? 1 : 0);
         String sys = systemLang();
-        String[] langs = {"es-419", "en-US", "system"};
+        String selectedLang = prefs.getString("lang", "system");
+        languageCodes = new String[]{"es-419", "en-US", "system", selectedLang};
+        String[] langs = languageCodes;
         int ls = 2; for (int i = 0; i < langs.length; i++) if (langs[i].equals(prefs.getString("lang", "system"))) ls = i;
-        lang = spinner(col, "Game language", new String[]{"Spanish (Latin America)", "English", "System language (" + sys + ")"}, ls);
+        lang = spinner(col, "Game language", new String[]{"Spanish (Latin America)", "English", "System language (" + sys + ")", selectedLang}, ls);
         showFps = new CheckBox(this); showFps.setText("Show frame rate"); showFps.setTextColor(Color.WHITE); showFps.setChecked(prefs.getBoolean("showfps", false));
         col.addView(showFps);
         List<String> cheats = cheatNames();
@@ -307,7 +317,7 @@ public class MenuActivity extends Activity {
     private void save() {
         Set<String> on = new HashSet<>(); StringBuilder list = new StringBuilder();
         for (CheckBox box : cheatBoxes) if (box.isChecked()) { String key = box.getText().toString(); on.add(key); list.append(key).append('\n'); }
-        String[] langs = {"es-419", "en-US", "system"};
+        String[] langs = languageCodes;
         prefs.edit().putInt("opmode", mode.getSelectedItemPosition() == 1 ? 1 : 0).putInt("fps", fps.getSelectedItemPosition() == 1 ? 30 : 60)
              .putBoolean("stretch", fit.getSelectedItemPosition() == 1).putString("lang", langs[lang.getSelectedItemPosition()])
              .putBoolean("showfps", showFps.isChecked()).putStringSet("cheat_keys", on).putBoolean("skip", skip.isChecked()).apply();

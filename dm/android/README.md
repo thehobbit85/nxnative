@@ -23,7 +23,17 @@ See [Android parity](../../docs/android-parity.md) and [NVN-to-Vulkan parity](..
 
 Set `ANDROID_SDK_ROOT` to an SDK with build-tools and an Android platform installed, and `JAVA_HOME` to a JDK. Build-tools 35.0.0 / platform 35 were used for this integration. The manifest and dex minimum are API 30; the target SDK remains the donor's API 33. This is a local development APK, not a store release.
 
-The prepared folder contains `patched_android/*.patched.bin` and their rewriter TSV files, `shader/vk/*.spv` and `*.vk.txt`, optional `font/`, and one `extract/*/RomFS`. Export shaders with `dm/android/tools/spv_android.py` after the existing shader translation stage. This milestone does not add Android as a complete NSP pipeline target to `build_ipa_from_nsp.py`.
+The main builder accepts Android for NVN games, including NSP and XCI input folders:
+
+```sh
+python3 scripts/build_ipa_from_nsp.py <game-folder> -k <prod.keys> --platform android
+```
+
+It shares extraction, profile selection and shader discovery with Apple builds, exports validated SPIR-V, rewrites modules with the Android thread ABI, and builds a development APK. Apple capture/probe modules remain in `patched_<version>/`; Android execution uses `patched_android_<version>/`. These are not interchangeable. Guest Vulkan/OpenGL targets fail explicitly until their Android backends exist. The current shader preparation still requires a Mac, the pinned translator and the shared Metal compiler tools; targeting Android does not yet make every preparation stage portable.
+
+`--romfs separate` builds a small APK and prints the deployment command. Install it first, then supply an explicit adb serial to that command. Deployment stages game assets before replacing them, leaving internal saves/settings alone. Updating an existing installation needs space for both old and staged assets. Native RomFS images are supported directly; unpacking them into a second directory is unnecessary.
+
+For a prepared folder, the standalone wrapper below remains available. It contains `patched_android/*.patched.bin` and their rewriter TSV files, `shader/vk/*.spv` and `*.vk.txt`, optional `font/`, and one `extract/*/RomFS` directory or `RomFS.img`. `--patched` and `--romfs` select an explicit version. Export shaders with `dm/android/tools/spv_android.py <shader-package> <new-output-directory> --keys-file <keys-file>`; the main builder does this automatically and checks product hashes before incremental reuse.
 
 ```sh
 python3 scripts/build_android.py <title-ID> <prepared-folder> <output.apk> --bundle

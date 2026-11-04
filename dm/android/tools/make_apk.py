@@ -71,7 +71,7 @@ def build(a):
         if not 1 <= vc <= 2100000000: raise ValueError('version code must be between 1 and 2100000000')
         open(os.path.join(w, 'AndroidManifest.xml'), 'w').write(MANIFEST.format(pkg=package(a.id, a.test), vc=vc, vn='0.1.' + str(vc), label=escape(label, {'"': '&quot;'})))
         res = os.path.join(w, 'res', 'mipmap'); os.makedirs(res)
-        icon = (glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')) or [None])[0]
+        icon = a.icon or (glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')) or [None])[0]
         if icon: shutil.copyfile(icon, os.path.join(res, 'icon.jpg'))
         else: Path(res, 'icon.xml').write_text('<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#24344B"/><corners android:radius="24dp"/></shape>')
         run(os.path.join(BT, 'aapt2'), 'compile', '--dir', os.path.join(w, 'res'), '-o', os.path.join(w, 'res.zip'))
@@ -83,8 +83,10 @@ def build(a):
         with zipfile.ZipFile(base, 'a', zipfile.ZIP_DEFLATED) as z:
             z.write(os.path.join(w, 'classes.dex'), 'classes.dex')
             z.write(lib, 'lib/arm64-v8a/libdmhost.so')
+            if a.language: z.writestr('assets/default-language.txt', a.language)
+            if a.env_file: z.write(a.env_file, 'assets/default.env')
             if a.cheats:
-                fixups = Path(a.build, 'patched_android', 'main.fixups.tsv').read_text()
+                fixups = (Path(a.patched or Path(a.build, 'patched_android')) / 'main.fixups.tsv').read_text()
                 match = re.search(r'^# BUILD_ID\t([0-9a-fA-F]{16,64})', fixups, re.M)
                 if not match:
                     raise ValueError('main.fixups.tsv has no build_id for the supplied cheats')
@@ -100,17 +102,17 @@ def build(a):
                 listing = []; stored = set(); raw = 0; dz = None; dname = os.path.splitext(os.path.basename(a.out))[0] + '-datos.zip'; dn = dbytes = 0
                 apk_file = z.fp
                 assert apk_file is not None
-                for rel, src in game_files(a.build):
+                for rel, src in game_files(a.build, a.patched, a.romfs, a.aoc):
                     if dz is None and apk_file.tell() > APK_GAME_LIMIT:   # the APK is full: the rest goes whole into the data file the menu asks for (see the header)
                         dz = zipfile.ZipFile(os.path.join(os.path.dirname(os.path.abspath(a.out)), dname), 'w', zipfile.ZIP_DEFLATED, allowZip64=False)
                         dz.writestr('nxdatos.txt', f'{package(a.id, a.test)}\t{vc}\n')
                     if dz is not None:
                         dz.write(src, rel); listing.append(f'{rel}\t{os.path.getsize(src)}\t=d'); dn += 1; dbytes += os.path.getsize(src); continue
-                    d = open(src, 'rb').read(); names = []
-                    for off, n in pieces(d):
-                        k = hashlib.sha1(d[off:off + n]).hexdigest()[:24]; names.append(k)
-                        if k not in stored: stored.add(k); z.writestr(zipfile.ZipInfo('assets/game/p/' + k, (2020, 1, 1, 0, 0, 0)), d[off:off + n], zipfile.ZIP_DEFLATED); raw += n
-                    listing.append(f'{rel}\t{len(d)}\t' + ' '.join(names))
+                    names = []
+                    for piece in asset_pieces(src):
+                        k = hashlib.sha1(piece).hexdigest()[:24]; names.append(k)
+                        if k not in stored: stored.add(k); z.writestr(zipfile.ZipInfo('assets/game/p/' + k, (2020, 1, 1, 0, 0, 0)), piece, zipfile.ZIP_DEFLATED); raw += len(piece)
+                    listing.append(f'{rel}\t{os.path.getsize(src)}\t' + ' '.join(names))
                 z.writestr('assets/game/files.txt', '\n'.join(listing) + '\n')
                 print(f'game: {len(listing)} files, {len(stored)} pieces, {raw / 1e9:.2f} GB stored once')
                 if dz is not None:
@@ -142,44 +144,71 @@ def pieces(d):   # (offset, length) ranges that cover the file: an archive of (u
                     return out
     return [(0, len(d))]
 
-def game_files(b):   # (path in the app's external folder, source) for every game file
+def asset_pieces(src):
+    with open(src, 'rb') as f:
+        if str(src).endswith('.img'):
+            while chunk := f.read(2 << 20):
+                yield chunk
+        else:
+            data = f.read()
+            for offset, size in pieces(data):
+                yield data[offset:offset + size]
+
+
+def game_files(b, patched=None, romfs=None, aoc=None):   # (path in the app's external folder, source) for every game file
     vk = os.path.join(b, 'shader', 'vk'); out = []
+    patched = str(patched or os.path.join(b, 'patched_android'))
     if not os.path.isdir(vk): raise ValueError('missing shader/vk: export Android shaders first')
-    if not glob.glob(os.path.join(b, 'patched_android', '*.patched.bin')): raise ValueError('missing patched_android modules: rewrite with --thread-slots android first')
-    for module in Path(b, 'patched_android').glob('*.patched.bin'):
+    if not glob.glob(os.path.join(patched, '*.patched.bin')): raise ValueError('missing patched_android modules: rewrite with --thread-slots android first')
+    for module in Path(patched).glob('*.patched.bin'):
         metadata = module.with_name(module.name.replace('.patched.bin', '.fixups.tsv'))
         if not metadata.is_file() or not re.search(r'^# TP_SLOT\t2$', metadata.read_text(), re.M):
             raise ValueError(str(module) + ': not an Android rewrite; run patch_nso.py --thread-slots android')
-    for f in sorted(glob.glob(os.path.join(b, 'patched_android', '*.patched.bin')) + glob.glob(os.path.join(b, 'patched_android', '*.tsv'))): out.append(('dm/' + os.path.basename(f), f))
+    for f in sorted(glob.glob(os.path.join(patched, '*.patched.bin')) + glob.glob(os.path.join(patched, '*.tsv'))): out.append(('dm/' + os.path.basename(f), f))
     for f in sorted(glob.glob(os.path.join(vk, '*.spv')) + glob.glob(os.path.join(vk, '*.vk.txt'))): out.append(('vk/' + os.path.basename(f), f))
     for f in sorted(glob.glob(os.path.join(b, 'font', '*'))): out.append(('font/' + os.path.basename(f), f))
-    romfs = glob.glob(os.path.join(b, 'extract', '*', 'RomFS'))
-    if len(romfs) != 1: raise ValueError('expected one extract/*/RomFS folder')
-    romfs = romfs[0]
-    for root, _, fs in os.walk(romfs):
-        for f in sorted(fs): p = os.path.join(root, f); out.append(('romfs/' + os.path.relpath(p, romfs), p))
+    choices = [str(romfs)] if romfs else glob.glob(os.path.join(b, 'extract', '*', 'RomFS')) + glob.glob(os.path.join(b, 'extract', '*', 'RomFS.img'))
+    if len(choices) != 1: raise ValueError('select one extracted RomFS with --romfs')
+    romfs = choices[0]
+    if not os.path.exists(romfs): raise ValueError('missing RomFS: ' + romfs)
+    if os.path.isfile(romfs): out.append(('romfs/romfs.img', romfs))
+    else:
+        for root, _, fs in os.walk(romfs):
+            for f in sorted(fs): p = os.path.join(root, f); out.append(('romfs/' + os.path.relpath(p, romfs), p))
+    if aoc:
+        for root, _, fs in os.walk(aoc):
+            for f in sorted(fs): p = os.path.join(root, f); out.append(('aoc/' + os.path.relpath(p, aoc), p))
     return out
 
 def deploy(a):
     sdk = a.sdk or os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME')
     adb = os.path.join(sdk, 'platform-tools', 'adb') if sdk else 'adb'
     ext = f'/sdcard/Android/data/{package(a.id, a.test)}/files'
-    if a.from_device:   # copied on the device: much faster than over USB
-        run(adb, '-s', a.serial, 'shell', f'mkdir -p {ext} && for d in romfs dm vk font; do rm -rf {ext}/$d; cp -r {shlex.quote(a.from_device)}/$d {ext}/$d; done')
-    else:   # adb cannot make folders inside Android/data (Android 13: secure_mkdirs is refused): pushed to /data/local/tmp, then copied on the device
-        b = a.build; tmp = '/data/local/tmp/nx_deploy_' + a.id.lower()   # the folders themselves: adb push copies symbolic links as links, which the device refuses
-        src = {'dm': os.path.join(b, 'patched_android'), 'vk': glob.glob(os.path.join(b, 'shader', 'vk'))[0], 'font': os.path.join(b, 'font'), 'romfs': glob.glob(os.path.join(b, 'extract', '*', 'RomFS'))[-1]}
-        run(adb, '-s', a.serial, 'shell', f'rm -rf {tmp}; mkdir -p {tmp} {ext}')
-        for d in ('dm', 'vk', 'font', 'romfs'):
-            run(adb, '-s', a.serial, 'push', src[d], f'{tmp}/{d}', stdout=subprocess.DEVNULL)
-            run(adb, '-s', a.serial, 'shell', f'rm -rf {ext}/{d} && cp -r {tmp}/{d} {ext}/{d} && rm -rf {tmp}/{d}')
-        run(adb, '-s', a.serial, 'shell', f'rm -rf {tmp}')
+    stage = ext + '/.nx-deploy'
+    roots = ('dm', 'vk', 'font', 'romfs', 'aoc')
+    # Validate local inputs before touching device assets. Stage all files, then
+    # replace only game roots; internal saves and settings are never deployed.
+    files = [] if a.from_device else game_files(a.build, a.patched, a.romfs, a.aoc)
+    run(adb, '-s', a.serial, 'shell', 'am force-stop ' + package(a.id, a.test))
+    run(adb, '-s', a.serial, 'shell', f'rm -rf {stage} && mkdir -p ' + ' '.join(stage + '/' + d for d in roots))
+    if a.from_device:
+        source = shlex.quote(a.from_device.rstrip('/'))
+        run(adb, '-s', a.serial, 'shell', f'set -e; test -d {source}/dm; test -d {source}/romfs; test -d {source}/vk; '
+            + f'for d in dm vk font romfs aoc; do if test -d {source}/$d; then cp -R {source}/$d/. {stage}/$d/; fi; done')
+    else:
+        for rel, src in files:
+            dst = stage + '/' + rel
+            run(adb, '-s', a.serial, 'shell', 'mkdir -p ' + shlex.quote(os.path.dirname(dst)))
+            run(adb, '-s', a.serial, 'push', src, dst, stdout=subprocess.DEVNULL)
+    run(adb, '-s', a.serial, 'shell', f'set -e; for d in dm vk font romfs aoc; do rm -rf {ext}/$d; mv {stage}/$d {ext}/$d; done; rmdir {stage}')
     print(f'game files in {ext}')
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Package an ARM64 Android host and a prepared game folder.')
     ap.add_argument('id'); ap.add_argument('build'); ap.add_argument('out', nargs='?')
     ap.add_argument('--deploy', action='store_true'); ap.add_argument('--from-device'); ap.add_argument('--serial')
+    ap.add_argument('--patched'); ap.add_argument('--romfs'); ap.add_argument('--aoc')
+    ap.add_argument('--icon'); ap.add_argument('--language'); ap.add_argument('--env-file')
     ap.add_argument('--save'); ap.add_argument('--cheats'); ap.add_argument('--label')
     ap.add_argument('--bundle', action='store_true'); ap.add_argument('--test', action='store_true')
     ap.add_argument('--library'); ap.add_argument('--sdk'); ap.add_argument('--build-tools'); ap.add_argument('--android-jar')

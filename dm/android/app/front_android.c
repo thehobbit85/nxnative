@@ -224,7 +224,12 @@ static void boot_env(const char *files, const char *ext) {
     snprintf(p, sizeof p, "%s/env.txt", ext);   // diagnostics: switches in <external>/env.txt (one KEY=VALUE per line) win
     if ((f = fopen(p, "r"))) { char ln[1024]; while (fgets(ln, sizeof ln, f)) { ln[strcspn(ln, "\r\n")] = 0; char *eq = strchr(ln, '='); if (!eq || ln[0] == '#') continue; *eq = 0; setenv(ln, eq + 1, 1); fprintf(stderr, "boot: env %s=%s\n", ln, eq + 1); } fclose(f); }
     const char *sub[][2] = {{"DM_ROMFS", "romfs"}, {"DM_VK_DIR", "vk"}, {"DM_FONT_DIR", "font"}};
-    for (int i = 0; i < 3; i++) { snprintf(p, sizeof p, "%s/%s", ext, sub[i][1]); setenv(sub[i][0], p, 0); }
+    for (int i = 0; i < 3; i++) {
+        snprintf(p, sizeof p, "%s/romfs/romfs.img", ext);
+        if (i != 0 || access(p, R_OK) != 0) snprintf(p, sizeof p, "%s/%s", ext, sub[i][1]);
+        setenv(sub[i][0], p, 0);
+    }
+    snprintf(p, sizeof p, "%s/aoc", ext); setenv("DM_AOC", p, 0);
     snprintf(p, sizeof p, "%s/save", files); mkdir(p, 0755); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", files); mkdir(p, 0755); setenv("DM_TEMP", p, 0);
     snprintf(p, sizeof p, "%s/cheats", files); mkdir(p, 0755); setenv("DM_CHEATS", p, 0);

@@ -13,11 +13,28 @@ spec.loader.exec_module(pack)
 
 
 class Packaging(unittest.TestCase):
+    def test_selected_version_uses_android_modules_and_romfs_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            modules = root / 'patched_android_v42'; modules.mkdir()
+            (modules / 'main.patched.bin').write_bytes(b'code')
+            (modules / 'main.fixups.tsv').write_text('# TP_SLOT\t2\n')
+            (root / 'shader/vk').mkdir(parents=True)
+            image = root / 'extract/v42/RomFS.img'; image.parent.mkdir(parents=True)
+            image.write_bytes(b'image')
+            files = dict(pack.game_files(str(root), patched=str(modules), romfs=str(image)))
+            self.assertEqual(Path(files['romfs/romfs.img']), image)
+            self.assertEqual(Path(files['dm/main.patched.bin']), modules / 'main.patched.bin')
+            self.assertNotIn('romfs/ExeFS/main', files)
+
     def test_deploy_keeps_test_assets_in_test_package(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'shader/vk').mkdir(parents=True)
             (root / 'extract/game/RomFS').mkdir(parents=True)
+            (root / 'patched_android').mkdir()
+            (root / 'patched_android/main.patched.bin').write_bytes(b'code')
+            (root / 'patched_android/main.fixups.tsv').write_text('# TP_SLOT\t2\n')
             for test in (False, True):
                 for remote in (False, True):
                     with self.subTest(test=test, remote=remote), patch.object(pack, 'run') as run:
@@ -32,6 +49,16 @@ class Packaging(unittest.TestCase):
                         self.assertIn(target, commands)
                         other = '/sdcard/Android/data/' + pack.package(args[0], not test) + '/files'
                         self.assertNotIn(other, commands)
+
+    def test_image_assets_are_streamed_and_reconstruct_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / 'RomFS.img'
+            original = b'xy' * (3 << 20) + b'end'
+            image.write_bytes(original)
+            parts = list(pack.asset_pieces(image))
+            self.assertGreater(len(parts), 1)
+            self.assertTrue(all(len(p) <= 2 << 20 for p in parts))
+            self.assertEqual(b''.join(parts), original)
 
     def test_piece_ranges_reconstruct_archive(self):
         # Two adjacent entries plus the archive table: every byte is covered once.
