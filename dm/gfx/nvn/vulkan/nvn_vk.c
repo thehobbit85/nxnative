@@ -1735,16 +1735,16 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     VkCommandBuffer cb = C->cb;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, fs ? 2 : 1, sets, 0, NULL);
-    // NVN's upper-left origin keeps D3D's y-up clip space; Vulkan's is y-down: the viewport is flipped (negative height)
+    // As in Metal, the device origin changes clip Y inside the viewport.
+    // Viewport/scissor coordinates always address the same image memory rows.
+    // Vulkan's positive height implements NVN lower-left; upper-left needs a flip.
     float x = 0, y = 0, w = (float)P.w, h = (float)P.h;
     if (S.has_vp) { x = S.vp[0][0]; y = S.vp[0][1]; w = S.vp[0][2]; h = S.vp[0][3]; }
-    float yt = g_origin_ll ? (float)P.h - y - h : y;   // lower-left origin: NVN's y counts from the bottom
-    VkViewport vv = {x, yt + h, w, -h, S.dr[0], S.dr[1] ? S.dr[1] : 1};
+    VkViewport vv = {x, g_origin_ll ? y : y + h, w, g_origin_ll ? h : -h, S.dr[0], S.dr[1] ? S.dr[1] : 1};
     vkCmdSetViewport(cb, 0, 1, &vv);
     VkRect2D sc = {{0, 0}, {P.w, P.h}};
     if (S.has_sc) {
         int32_t sx = S.sc.x < 0 ? 0 : S.sc.x, sy = S.sc.y < 0 ? 0 : S.sc.y, ex = S.sc.x + S.sc.w, ey = S.sc.y + S.sc.h;
-        if (g_origin_ll) { int32_t t = (int32_t)P.h - ey; ey = (int32_t)P.h - S.sc.y; sy = t < 0 ? 0 : t; }
         if (ex > (int32_t)P.w) ex = (int32_t)P.w; if (ey > (int32_t)P.h) ey = (int32_t)P.h;
         sc = (VkRect2D){{sx, sy}, {ex > sx ? (uint32_t)(ex - sx) : 0, ey > sy ? (uint32_t)(ey - sy) : 0}};
     }
@@ -2293,7 +2293,7 @@ static void shot(const tex_t *t, uint64_t n) {
         fwrite(hd, 1, 54, f);
         uint8_t *row = malloc((size_t)w * 4);
         for (uint32_t y = h; y-- > 0;) {
-            const uint8_t *s = (const uint8_t *)px + (size_t)y * w * 4;
+            const uint8_t *s = (const uint8_t *)px + (size_t)(g_origin_ll ? h - 1 - y : y) * w * 4;
             for (uint32_t x = 0; x < w; x++) { int bgr = v->f.f == VK_FORMAT_B8G8R8A8_UNORM; row[4 * x] = s[4 * x + (bgr ? 0 : 2)]; row[4 * x + 1] = s[4 * x + 1]; row[4 * x + 2] = s[4 * x + (bgr ? 2 : 0)]; row[4 * x + 3] = 255; }
             fwrite(row, 1, (size_t)w * 4, f);
         }
@@ -2461,6 +2461,9 @@ static void win_present(const tex_t *t, const int crop[4]) {
     int32_t dw = (int32_t)W.ext.width, dh = (int32_t)W.ext.height, dx = 0, dy = 0;
     if (!stretch) { if ((int64_t)dw * sh > (int64_t)dh * sw) { dw = (int32_t)((int64_t)dh * sw / sh); dx = ((int32_t)W.ext.width - dw) / 2; } else { dh = (int32_t)((int64_t)dw * sh / sw); dy = ((int32_t)W.ext.height - dh) / 2; } }
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{sx, sy, 0}, {sx + sw, sy + sh, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
+    // Lower-left images keep their bottom row first; flip only the displayed crop,
+    // as Metal does, leaving copies, sampled textures and fragment coordinates alone.
+    if (g_origin_ll) { b.srcOffsets[0].y = sy + sh; b.srcOffsets[1].y = sy; }
     vkCmdBlitImage(cb, v->img, VK_IMAGE_LAYOUT_GENERAL, W.img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
     static int show = -1; if (show < 0) { const char *e = getenv("DM_SHOW_FPS"); show = e && atoi(e); }
     static dm_ovl ov[32]; int nov = front_overlay(ov, 32);
