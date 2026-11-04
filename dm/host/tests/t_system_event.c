@@ -3,7 +3,6 @@
 // destruction and address / handle reuse always happen before the first tick.
 #include "../hle_thread.c"
 #include <assert.h>
-#include <mach-o/getsect.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -144,9 +143,8 @@ static void copied_read_end(void) {
 }
 // Resolve exactly the SDK imports the service watcher calls, through the host's normal force-hook table.
 static void *purchase_hook(const char *name) {
-    extern const struct mach_header_64 _mh_execute_header;
     unsigned long bytes = 0;
-    const hle_force_ent *entries = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    const hle_force_ent *entries = DM_SECTION_DATA(swforce, &bytes);
     for (size_t i = 0; i < bytes / sizeof *entries; i++) if (!strcmp(entries[i].name, name)) return (void *)entries[i].fn;
     fprintf(stderr, "missing purchased-item hook: %s\n", name); abort();
 }

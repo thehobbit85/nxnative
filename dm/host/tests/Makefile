@@ -305,6 +305,19 @@ $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) |
 	$(CLANG) -O1 -Wno-unused-function -DDM_TEST_HOOKS -I.. $(GINC) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
 $(B)/t_condvar_old: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -DDM_TEST_HOOKS -DDM_TEST_CV_OLD_ORDER -I.. $(GINC) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
+.PHONY: android-sync-build
+ANDROID_SYNC_TESTS = t_condvar t_condvar_old t_pollwait t_system_event
+ANDROID_SYNC_FLAGS = -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC)
+ANDROID_SYNC_HEADERS = ../hle_thread.c ../hle.h ../dm.h ../host_memory.h $(GAME_H)
+android-sync-build: $(addprefix $(B)/android-sync/,$(ANDROID_SYNC_TESTS))
+$(B)/android-sync:
+	mkdir -p $@
+$(B)/android-sync/t_condvar $(B)/android-sync/t_condvar_old: t_condvar.c t_condvar_stub.c $(ANDROID_SYNC_HEADERS) | $(B)/android-sync
+	$(CLANG) $(ANDROID_SYNC_FLAGS) -DDM_TEST_HOOKS $(if $(filter %/t_condvar_old,$@),-DDM_TEST_CV_OLD_ORDER) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
+$(B)/android-sync/t_pollwait: t_pollwait.c t_condvar_stub.c $(ANDROID_SYNC_HEADERS) | $(B)/android-sync
+	$(CLANG) $(ANDROID_SYNC_FLAGS) -o $@ $< t_condvar_stub.c
+$(B)/android-sync/t_system_event: t_system_event.c ../hle_sdk16.c ../hle_misc.c ../hle_bigstack.c $(ANDROID_SYNC_HEADERS) | $(B)/android-sync
+	$(CLANG) $(ANDROID_SYNC_FLAGS) -Wno-frame-address -o $@ $< ../hle_misc.c ../hle_bigstack.c
 $(B)/t_pollwait: t_pollwait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pollwait.c t_condvar_stub.c
 $(B)/t_preempt: t_preempt.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
