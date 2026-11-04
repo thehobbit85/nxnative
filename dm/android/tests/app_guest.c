@@ -10,6 +10,8 @@ extern uint32_t fs_mount(const char *, const void *), fs_open(uint64_t *, const 
 extern uint32_t fs_create(const char *, int64_t), fs_read(size_t *, uint64_t, int64_t, void *, size_t);
 extern uint32_t fs_write(uint64_t, int64_t, const void *, size_t, const void *), fs_commit(const char *);
 extern void fs_close(uint64_t);
+extern int aoc_count(void), font_state(int);
+extern const void *font_address(int);
 #define API(name) ((NVNT_##name)nvnBootstrapLoader(#name))
 void *memset(void *p, int c, size_t n) { unsigned char *b = p; while (n--) *b++ = c; return p; }
 void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = d; const unsigned char *b = s; while (n--) *a++ = *b++; return d; }
@@ -46,6 +48,10 @@ static _Alignas(16384) unsigned char storage[1 << 20];
 void nnMain(void) {
     NOTE("APP_FIXTURE_MAIN\n");
     check_save();
+    require(aoc_count() == 1);
+    require(font_state(0) == 1 && font_address(0) != NULL);
+    require(font_state(5) == 1 && font_address(5) != NULL);
+    NOTE("APP_FIXTURE_ASSETS_READY\n");
     NVNdevice device; NVNdeviceBuilder db;
     API(nvnDeviceBuilderSetDefaults)(&db); require(API(nvnDeviceInitialize)(&device, &db));
     NVNqueue queue; NVNqueueBuilder qb;

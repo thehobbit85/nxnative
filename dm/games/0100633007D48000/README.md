@@ -38,7 +38,15 @@ Update 1.5.12620 (v589824) over the base game, SDK 20.5.21. Unity 6000.0.61f1 IL
 - In King's Pass, hold right. Walls of vines block the way until struck with Y (five strikes were always enough). Then there are a pit (B to jump out) and crawlids.
 - A save written there loads with A, A from the title and returns to King's Pass.
 
+## Android integration
+
+Current: the shared builder's `--platform android` route builds the registered v589824 update into an ARM64 development APK. All 1,812 shader stages pass SPIR-V validation and resource-sidecar checks. An Android 15 ARM64 emulator with SwiftShader reaches the title, profile selection, save commits, prologue and decoded opening movie; a subsequent launch recognizes the saved King's Pass profile. Gameplay rendering and control validation remain open. This is not a playable-Android qualification or a physical-device result.
+
+The separate asset deployment uses the merged RomFS image directly. Synthetic APK checks cover shared fonts, DLC, input, pause/resume, surface recreation and save retention across reinstall; these are general integration checks, not substitutes for this game's gameplay.
+
 ## Found on this game
+
+- [Android assets and large RomFS images](../../../docs/reference/packing.md#android-assets-and-large-romfs-images): shared builder and APK review, with synthetic font/DLC and archive checks.
 
 - [Vulkan export preserves packaged shader stages](../../../docs/reference/shaders.md#vulkan-export-preserves-packaged-shader-stages): Android export validates all 1,812 stages, including one geometry asset; runtime geometry support remains open.
 

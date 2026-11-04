@@ -229,7 +229,7 @@ static void boot_env(const char *files, const char *ext) {
         if (i != 0 || access(p, R_OK) != 0) snprintf(p, sizeof p, "%s/%s", ext, sub[i][1]);
         setenv(sub[i][0], p, 0);
     }
-    snprintf(p, sizeof p, "%s/aoc", ext); setenv("DM_AOC", p, 0);
+    snprintf(p, sizeof p, "%s/aoc", ext); setenv("DM_AOC_DIR", p, 0);
     snprintf(p, sizeof p, "%s/save", files); mkdir(p, 0755); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", files); mkdir(p, 0755); setenv("DM_TEMP", p, 0);
     snprintf(p, sizeof p, "%s/cheats", files); mkdir(p, 0755); setenv("DM_CHEATS", p, 0);

@@ -54,7 +54,7 @@ def main():
         adb('shell', 'input', 'keyevent', 'KEYCODE_BUTTON_START')
         wait_for(lambda: 'APP_FIXTURE_FRAME' in log(), 'SDK, save commit and first presented frame')
         current = log()
-        assert 'APP_FIXTURE_SAVE_COMMITTED' in current and 'APP_FIXTURE_FAILED' not in current
+        assert 'APP_FIXTURE_SAVE_COMMITTED' in current and 'APP_FIXTURE_ASSETS_READY' in current and 'APP_FIXTURE_FAILED' not in current
         return current
 
     start_guest()
@@ -84,7 +84,7 @@ def main():
     (a.output / 'relaunch.log').write_text(second)
     adb('shell', 'input', 'keyevent', 'KEYCODE_HOME')
     wait_for(lambda: 'front end: paused' in log(), 'final pause')
-    result = dict(serial=a.serial, version=version, bootstrap=True, vulkan_present=True, input=True,
+    result = dict(serial=a.serial, version=version, bootstrap=True, vulkan_present=True, input=True, dlc_and_fonts=True,
                   pause_resume=True, window_recreated=True, save_retained_after_update=True)
     (a.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result), flush=True)

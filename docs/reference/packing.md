@@ -40,6 +40,13 @@
 
 ## Build tools
 
+### Android assets and large RomFS images
+
+- **Symptom:** a single large RomFS image can overrun Android's APK size limit; a directory-format update can keep loading an older image. Fresh Android builds can also omit shared fonts, and packaged DLC is not enumerated.
+- **Cause:** the donor packer checked the current APK position before adding a whole file, with a ZIP32-only sidecar; the installer retained the old image that the loader prefers. Android preparation omitted Apple's font setup, and the frontend set `DM_AOC` instead of the shared host's `DM_AOC_DIR`.
+- **Fix:** reserve a conservative bound before adding each file, spill oversized data into bounded chunks in a ZIP64-capable sidecar, and reconstruct chunks with offset and length checks. Remove the old image only after a directory update completes. Prepare both shared fonts and set the shared DLC path. Keep application title IDs distinct from aliased build-profile IDs so their installed data cannot collide.
+- **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), with synthetic large-file, image-to-directory, font and DLC checks. Java reconstruction also runs on the Android emulator with a forced-ZIP64 fixture; this does not claim a full multi-gigabyte sidecar UI import was tested.
+
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
 
 - **Symptom:** the first extraction stops with `nx_extract exit code 131` and `.NET location: Not found`, even though `dotnet` is on `PATH`. The shader translator can fail the same way.

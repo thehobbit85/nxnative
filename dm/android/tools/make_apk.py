@@ -5,7 +5,7 @@
 #     --bundle: the game files go inside the APK too (assets/game/, deflated, listed in assets/game/files.txt) and the menu unpacks them on the first start: one file, no
 #     computer needed. Every file is stored as pieces, each piece once (assets/game/p/<hash>): archives of (hash, start, end) entries, such as Metroid Dread's .pkg files, are cut at
 #     their entries, which repeat across archives (Dread's 4.7 GB deflated becomes 3.7 GB), and whole files that repeat are stored once. A game that still does not fit
-#     (Super Mario Odyssey: 5.3 GB of already compressed archives) fills the APK to 3.8 GB and puts the rest, whole files, into <out>-datos.zip beside it (marked =d in
+#     reserves up to 3.8 GB in the APK and puts oversized files into <out>-datos.zip as bounded chunks (marked =d in
 #     files.txt; assets/game/datos.txt names it): the menu asks the player to pick that file once, on the first start. --test: package <package>.test, label "(test)": installs beside the real app without touching it. Android takes APKs below 4 GB only; past 2 GB the ZIP stays without ZIP64 records (apksigner and the installer read it as a plain ZIP)
 #   make_apk.py --deploy <id> <NSP build folder> [--from-device <folder on the device that already has romfs/dm/vk/font>]
 # Tools: ANDROID_SDK_ROOT (build-tools and platform installed), JAVA_HOME, and --library.
@@ -100,14 +100,14 @@ def build(a):
                         if not f.startswith('.'): p = os.path.join(root, f); z.write(p, 'assets/save/' + os.path.relpath(p, a.save))
             if a.bundle:
                 listing = []; stored = set(); raw = 0; dz = None; dname = os.path.splitext(os.path.basename(a.out))[0] + '-datos.zip'; dn = dbytes = 0
-                apk_file = z.fp
-                assert apk_file is not None
                 for rel, src in game_files(a.build, a.patched, a.romfs, a.aoc):
-                    if dz is None and apk_file.tell() > APK_GAME_LIMIT:   # the APK is full: the rest goes whole into the data file the menu asks for (see the header)
-                        dz = zipfile.ZipFile(os.path.join(os.path.dirname(os.path.abspath(a.out)), dname), 'w', zipfile.ZIP_DEFLATED, allowZip64=False)
+                    if dz is None and needs_data_archive(z, src, APK_GAME_LIMIT):
+                        # Data archives are streamed, not installed as APKs. Their bounded
+                        # entries need no ZIP64 sizes; the central directory may exceed 4 GiB.
+                        dz = zipfile.ZipFile(os.path.join(os.path.dirname(os.path.abspath(a.out)), dname), 'w', zipfile.ZIP_DEFLATED, allowZip64=True)
                         dz.writestr('nxdatos.txt', f'{package(a.id, a.test)}\t{vc}\n')
                     if dz is not None:
-                        dz.write(src, rel); listing.append(f'{rel}\t{os.path.getsize(src)}\t=d'); dn += 1; dbytes += os.path.getsize(src); continue
+                        write_data_file(dz, rel, src); listing.append(f'{rel}\t{os.path.getsize(src)}\t=d'); dn += 1; dbytes += os.path.getsize(src); continue
                     names = []
                     for piece in asset_pieces(src):
                         k = hashlib.sha1(piece).hexdigest()[:24]; names.append(k)
@@ -143,6 +143,22 @@ def pieces(d):   # (offset, length) ranges that cover the file: an archive of (u
                     if pos < len(d): out.append((pos, len(d) - pos))
                     return out
     return [(0, len(d))]
+
+def needs_data_archive(apk, src, limit):
+    # Bound the uncompressed file, deflate expansion and ZIP entry headers before
+    # writing it. One large RomFS image must not overrun the APK's install limit.
+    size = os.path.getsize(src)
+    return apk.fp.tell() + size + size // 1000 + ((size >> 21) + 1) * 256 > limit
+
+
+def write_data_file(archive, rel, src):
+    with open(src, 'rb') as stream:
+        offset = 0
+        while chunk := stream.read(2 << 20):
+            archive.writestr(f'{rel}.nxpart/{offset:016x}', chunk)
+            offset += len(chunk)
+        if not offset: archive.writestr(rel, b'')
+
 
 def asset_pieces(src):
     with open(src, 'rb') as f:
