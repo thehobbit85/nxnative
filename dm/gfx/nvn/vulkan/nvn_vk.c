@@ -644,13 +644,21 @@ static long g_passdump_left;
 enum { SK_B2T = 1, SK_T2T = 2, SK_T2B = 4, SK_CLEAR = 8, SK_UPLOAD = 16, SK_DRAW = 32, SK_ACLEAR = 64 };
 static int vk_skip(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_VK_SKIP"); m = e ? (int)strtol(e, NULL, 0) : 0; if (m) LOG("DM_VK_SKIP=%#x: GPU work of those kinds is left out", m); } return m; }
 static void tex_upload(vtex *v, const tex_t *t);
-// A texture with no packaged layout in a CPU_NO_ACCESS pool whose storage already holds data takes it as its initial content, as nvn_mtl.m tex_init_fill: games load a file into
-// memory and make a GPU-only pool over it (Metroid Dread's BC6H light probe cubemaps, which sampled as zero and left every lit surface black). Multisample, compressible
-// and depth textures stay GPU textures
+// Reuse Metal's tex_init_fill rules: initial storage also belongs to a texture in
+// a CPU_UNCACHED pool, or a CPU-cached pool flushed before first use. The former
+// needs no flush (Link's Awakening's linear R8 font atlas). Sparse, multisample
+// and depth images stay GPU textures; compression tags exclude only CPU_NO_ACCESS.
+int nvn_flushed(const void *p, uint64_t n); // shared recorder's flushed-range ledger
 static int mem_any(const uint8_t *p, uint64_t n) { uint64_t i = 0, x; for (; i + 8 <= n; i += 8) { memcpy(&x, p + i, 8); if (x) return 1; } for (; i < n; i++) if (p[i]) return 1; return 0; }
 static int init_fill(const tex_t *t, const fmt_t *f) {
-    if (!t->mem || !t->pool || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->has_layout) return 0;
-    if (t->d.samples > 1 || (t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) || f->depth || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    if (!t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->has_layout) return 0;
+    if (t->d.samples > 1 || f->depth || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    int no_cpu = (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) != 0;
+    int uncached = (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED) != 0;
+    if (no_cpu && (t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE)) return 0;
+    static int flush_fill = -1;
+    if (flush_fill < 0) { const char *e = getenv("DM_NVN_FLUSH_FILL"); flush_fill = !e || atoi(e) != 0; }
+    if (!no_cpu && !uncached && (!flush_fill || !nvn_flushed(t->mem, t->L.size))) return 0;
     return mem_any(t->mem, t->L.size);
 }
 // Vulkan fixes usage at allocation. NVN may register an image after drawing into it

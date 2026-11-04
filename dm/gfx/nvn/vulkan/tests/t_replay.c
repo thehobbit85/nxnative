@@ -15,6 +15,8 @@ static prog_t depth_copy_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
 static prog_t origin_program = {.nstage = 2};
 static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
+static const void *flushed_storage;
+int nvn_flushed(const void *p, uint64_t n) { (void)n; return p == flushed_storage; }
 int nvn_dpool_base(const void *pool, int texture) {
     return texture && pool == &texture_pool ? 2048 : texture && pool == &alternate_texture_pool ? 4096 :
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
@@ -217,6 +219,50 @@ static void uploaded_texture(NVNformat format) {
     mtl_tex_release(&texture); mtl_tex_release(&output);
     free(texture.mem);
     printf("Uploaded format %#x and changed CPU content sampled correctly\n", format);
+}
+
+// Initial-content rules reused from Metal. A CPU_UNCACHED linear R8 atlas
+// needs neither a packaged layout nor a flush (Link's Awakening's font atlas).
+static void initial_texture_content(void) {
+    const struct { unsigned pool, flags; int flush, filled; } cases[] = {
+        {NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED,0,0,1},
+        {NVN_MEMORY_POOL_FLAGS_CPU_CACHED,0,1,1},
+        {NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS,0,0,1},
+        {NVN_MEMORY_POOL_FLAGS_CPU_CACHED,0,0,0},
+        {NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED|NVN_MEMORY_POOL_FLAGS_VIRTUAL,0,0,0},
+        {NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS,NVN_TEXTURE_FLAGS_COMPRESSIBLE,0,0},
+        {NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED,NVN_TEXTURE_FLAGS_COMPRESSIBLE,0,1},
+    };
+    for (unsigned c=0;c<sizeof cases/sizeof *cases;c++) {
+        uint8_t storage[64*8]; memset(storage,153,sizeof storage);
+        pool_t pool={.flags=cases[c].pool,.mem=storage,.size=sizeof storage};
+        tex_t source={.serial=0xa000+3*c,.mem=storage,.pool=&pool,.d={.width=64,.height=8,.depth=1,.levels=1,
+            .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_R8,.flags=NVN_TEXTURE_FLAGS_IMAGE|NVN_TEXTURE_FLAGS_LINEAR|cases[c].flags,.stride=64}};
+        tex_t output={.serial=source.serial+1,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+        nvn_tex_layout(&source.d,&source.L); nvn_tex_layout(&output.d,&output.L);
+        flushed_storage=cases[c].flush?storage:NULL;
+        samp_par nearest={0}; mtl_reg_samp(910,&nearest); mtl_reg_tex(910,&source,NULL);
+        mtl_queue_activate(910);
+        for (int pass=0;pass<2;pass++) {
+            uint8_t pixels[256]={0}; list_t list={0};
+            if (pass) { // Once the GPU writes it, later CPU bytes cannot replace that result.
+                memset(storage,17,sizeof storage); mtl_tex_cpu_written(&source);
+                RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&source,.r={.width=64,.height=8,.depth=1},.mask=15,.c.f={1,0,0,1});
+            }
+            RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_copy_program,.stages=3);
+            RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1|BIND_TEX1_NOBASE,.slot=0,.h=910|(910ull<<20));
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+            RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+            put(&list,OP_END,NULL,0);
+            mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+            uint8_t want[]={pass?255:cases[c].filled?153:0,0,0,255};
+            for (int i=0;i<64;i++) { if(memcmp(pixels+4*i,want,4)) fprintf(stderr,"initial content case%u pass%d: %u expected%u\n",c,pass,pixels[4*i],want[0]); assert(!memcmp(pixels+4*i,want,4)); }
+        }
+        mtl_reg_tex(910,NULL,NULL); mtl_tex_release(&source); mtl_tex_release(&output); mtl_queue_forget(910);
+    }
+    flushed_storage=NULL;
+    puts("CPU-uncached, flushed and inaccessible texture initial content and GPU ownership passed");
 }
 
 static void uniform_texture_array(void) {
@@ -659,6 +705,7 @@ int main(void) {
     uploaded_texture(NVN_FORMAT_RGBA8);
     if (astc_supported()) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
+    initial_texture_content();
     uniform_texture_array();
     compute_driver_constants();
     vertex_output_defaults();
