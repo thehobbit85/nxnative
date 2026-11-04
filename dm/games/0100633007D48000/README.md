@@ -44,6 +44,8 @@ Current: the shared builder's `--platform android` route builds the registered v
 
 Resolved: missing player and HUD came from [texture uploads without a sampling dependency](../../../docs/reference/rendering.md#vulkan-texture-uploads-visible-to-sampling). The player atlas is 4096x4096 ASTC 4x4 and the HUD atlas 2048x2048; both were uploaded but sampled as zero. A solid-colour replacement proved the geometry was present, and an isolated atlas replay reproduced the problem. The general image barrier fixes it with the original shaders and depth state. Geometry/runtime parity and later areas remain outside this check.
 
+Save check: Quit to Menu committed the played session; after stopping and restarting the Android process, the profile retained its increased play time and loaded King's Pass again with correct player/HUD rendering. Audio callbacks are observed, but listening and physical controls remain untested.
+
 The separate asset deployment uses the merged RomFS image directly. Synthetic APK checks cover shared fonts, DLC, input, pause/resume, surface recreation and save retention across reinstall; these are general integration checks, not substitutes for this game's gameplay.
 
 ## Found on this game
