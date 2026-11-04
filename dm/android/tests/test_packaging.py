@@ -18,6 +18,62 @@ spec.loader.exec_module(pack)
 
 
 class Packaging(unittest.TestCase):
+    def package_with_fake_sdk(self, root, payload, fail=None):
+        build = root / 'build'; build.mkdir(exist_ok=True)
+        output = root / 'output with spaces'; output.mkdir(exist_ok=True)
+        library = build / 'libdmhost.so'; library.write_bytes(b'fixture library')
+        source = build / 'RomFS.img'; source.write_bytes(payload)
+        def run(*args, **kwargs):
+            tool = Path(args[0]).name
+            if tool == 'aapt2':
+                path = args[args.index('-o') + 1]
+                with zipfile.ZipFile(path, 'w'): pass
+            elif tool == 'd8':
+                Path(args[args.index('--output') + 1], 'classes.dex').write_bytes(b'fixture dex')
+            elif tool == 'zipalign' and '-c' not in args:
+                shutil.copyfile(args[-2], args[-1])
+            elif tool == 'zipalign' and fail == 'align':
+                raise subprocess.CalledProcessError(1, args)
+            elif tool == 'keytool':
+                Path(args[args.index('-keystore') + 1]).write_bytes(b'fixture key')
+            elif tool == 'apksigner':
+                if args[1] == fail:
+                    if fail == 'sign': Path(args[args.index('--out') + 1]).write_bytes(b'incomplete signing output')
+                    raise subprocess.CalledProcessError(1, args)
+                if args[1] == 'sign': shutil.copyfile(args[-1], args[args.index('--out') + 1])
+        write_data = pack.write_data_file
+        def write(*args):
+            write_data(*args)
+            if fail == 'data': raise OSError('fixture archive write failure')
+        with patch.object(pack, 'configure_tools'), patch.object(pack, 'run', side_effect=run), patch.object(pack, 'write_data_file', side_effect=write), \
+             patch.object(pack, 'game_files', return_value=[('romfs/romfs.img', str(source))]), patch.object(pack, 'APK_GAME_LIMIT', 1):
+            pack.main(['0100633007D48000', str(build), str(output / 'Game.apk'), '--bundle', '--library', str(library), '--version-code', '101'])
+        return output / 'Game.apk'
+
+    def test_failed_rebuild_preserves_existing_apk_and_data(self):
+        for failure in ('data', 'sign', 'verify', 'align'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); output = root / 'output with spaces'; output.mkdir()
+                originals = {'Game.apk': b'previous apk', 'Game-datos.zip': b'previous data archive'}
+                for name, data in originals.items(): (output / name).write_bytes(data)
+                with self.assertRaises(SystemExit): self.package_with_fake_sdk(root, b'new game content', failure)
+                self.assertEqual({p.name: p.read_bytes() for p in output.iterdir()}, originals)
+
+    def test_same_version_builds_preserve_each_companion_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); names = []; archives = []
+            for payload in (b'first game content', b'different game content'):
+                apk = self.package_with_fake_sdk(root, payload)
+                with zipfile.ZipFile(apk) as z:
+                    name = z.read('assets/game/datos.txt').decode().split('\t')[0]
+                names.append(name); archive = apk.with_name(name)
+                with zipfile.ZipFile(archive) as z:
+                    self.assertEqual(z.read('nxdatos.txt'), b'com.nxnative.t0100633007d48000\t101\n')
+                    self.assertEqual(b''.join(z.read(n) for n in z.namelist() if n != 'nxdatos.txt'), payload)
+                archives.append(archive.read_bytes())
+            self.assertNotEqual(names[0], names[1])
+            self.assertEqual(apk.with_name(names[0]).read_bytes(), archives[0])
+
     def test_deploy_assets_remain_readable_outside_adb_owner(self):
         # Run the deployment's shell steps on a real temporary tree. Android's
         # shell-owned 0770 directories must be traversable by the separate app UID.

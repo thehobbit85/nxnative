@@ -40,6 +40,13 @@
 
 ## Build tools
 
+### Failed Android rebuild replaces a working data archive
+
+- **Symptom:** an APK rebuild fails during signing, but the previous APK's companion ZIP has already changed; two builds using the same version code also overwrite each other's game data.
+- **Cause:** the packer wrote the companion directly to a fixed `<name>-datos.zip` destination before signing the APK. Signing wrote directly to the final APK path, with no subsequent signature or alignment verification.
+- **Fix:** build both products in a temporary directory on the output filesystem. Name each companion by its content hash, verify the signed APK and its alignment, publish the complete immutable companion, then atomically replace the APK. Existing companions remain available to their matching APKs. A failed final rename may leave a complete unreferenced companion; it does not damage the previous pair.
+- **Found on:** synthetic packaging failure injection for archive writes, partial signing output, signature verification and alignment verification; same-version rebuilds with different payloads. SDK-backed synthetic packages exercise bundled and companion output, and the emulator checks installation/update with save retention.
+
 ### Android staged assets are unreadable by the app
 
 - **Symptom:** the Android host aborts opening `dm/main.fixups.tsv` although ADB lists and reads the deployed file.

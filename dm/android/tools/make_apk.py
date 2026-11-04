@@ -5,12 +5,13 @@
 #     --bundle: the game files go inside the APK too (assets/game/, deflated, listed in assets/game/files.txt) and the menu unpacks them on the first start: one file, no
 #     computer needed. Every file is stored as pieces, each piece once (assets/game/p/<hash>): archives of (hash, start, end) entries, such as Metroid Dread's .pkg files, are cut at
 #     their entries, which repeat across archives (Dread's 4.7 GB deflated becomes 3.7 GB), and whole files that repeat are stored once. A game that still does not fit
-#     reserves up to 3.8 GB in the APK and puts oversized files into <out>-datos.zip as bounded chunks (marked =d in
+#     reserves up to 3.8 GB in the APK and puts oversized files into <out>-datos-<content hash>.zip as bounded chunks (marked =d in
 #     files.txt; assets/game/datos.txt names it): the menu asks the player to pick that file once, on the first start. --test: package <package>.test, label "(test)": installs beside the real app without touching it. Android takes APKs below 4 GB only; past 2 GB the ZIP stays without ZIP64 records (apksigner and the installer read it as a plain ZIP)
 #   make_apk.py --deploy <id> <NSP build folder> [--from-device <folder on the device that already has romfs/dm/vk/font>]
 # Tools: ANDROID_SDK_ROOT (build-tools and platform installed), JAVA_HOME, and --library.
 # A development signing key is kept in the prepared build folder so updates retain app data.
 import shlex
+from contextlib import ExitStack
 import argparse, glob, hashlib, os, re, shutil, struct, subprocess, sys, tempfile, zipfile, time
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -41,6 +42,11 @@ def configure_tools(a):
     ENV = dict(os.environ, JAVA_HOME=JAVA, PATH=os.path.join(JAVA, 'bin') + os.pathsep + os.environ.get('PATH', ''))
 
 def run(*a, **k): subprocess.run([str(x) for x in a], check=True, env=ENV, **k)
+def file_digest(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as source:
+        while block := source.read(1 << 20): digest.update(block)
+    return digest.hexdigest()
 def package(gid, test=False): return 'com.nxnative.t' + gid.lower() + ('.test' if test else '')   # test: installs beside the real app, its own data
 
 MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
@@ -65,11 +71,15 @@ def build(a):
     configure_tools(a)
     lib = a.library or os.path.join(ANDROID, 'gen', a.id, 'libdmhost.so')
     if not os.path.exists(lib): sys.exit(f'[RED] {lib} missing: make -C dm/android GAME={a.id} first')
-    with tempfile.TemporaryDirectory(prefix='apk_', dir=os.environ.get('WORK')) as w:
+    output = Path(a.out).resolve(); output.parent.mkdir(parents=True, exist_ok=True)
+    # Stage beside the destination so the final APK replacement is atomic even
+    # when WORK and the output are on different filesystems.
+    with tempfile.TemporaryDirectory(prefix='apk_', dir=output.parent) as w:
+        data_path = None; data_name = None
         label = (a.label or a.id) + (' (test)' if a.test else '')
         vc = a.version_code or int(time.time())   # increase --version-code for an update; seconds avoid the donor's hourly collisions
         if not 1 <= vc <= 2100000000: raise ValueError('version code must be between 1 and 2100000000')
-        open(os.path.join(w, 'AndroidManifest.xml'), 'w').write(MANIFEST.format(pkg=package(a.id, a.test), vc=vc, vn='0.1.' + str(vc), label=escape(label, {'"': '&quot;'})))
+        Path(w, 'AndroidManifest.xml').write_text(MANIFEST.format(pkg=package(a.id, a.test), vc=vc, vn='0.1.' + str(vc), label=escape(label, {'"': '&quot;'})))
         res = os.path.join(w, 'res', 'mipmap'); os.makedirs(res)
         icon = a.icon or (glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')) or [None])[0]
         if icon: shutil.copyfile(icon, os.path.join(res, 'icon.jpg'))
@@ -80,7 +90,7 @@ def build(a):
         cls = os.path.join(w, 'classes'); os.makedirs(cls)
         run(os.path.join(JAVA, 'bin', 'javac'), '--release', '11', '-cp', JAR, '-d', cls, *glob.glob(os.path.join(ANDROID, 'app', 'java', '**', '*.java'), recursive=True))
         run(os.path.join(BT, 'd8'), '--release', '--min-api', '30', '--lib', JAR, '--output', w, *glob.glob(os.path.join(cls, '**', '*.class'), recursive=True))
-        with zipfile.ZipFile(base, 'a', zipfile.ZIP_DEFLATED) as z:
+        with ExitStack() as archives, zipfile.ZipFile(base, 'a', zipfile.ZIP_DEFLATED) as z:
             z.write(os.path.join(w, 'classes.dex'), 'classes.dex')
             z.write(lib, 'lib/arm64-v8a/libdmhost.so')
             if a.language: z.writestr('assets/default-language.txt', a.language)
@@ -99,12 +109,13 @@ def build(a):
                     for f in sorted(fs):
                         if not f.startswith('.'): p = os.path.join(root, f); z.write(p, 'assets/save/' + os.path.relpath(p, a.save))
             if a.bundle:
-                listing = []; stored = set(); raw = 0; dz = None; dname = os.path.splitext(os.path.basename(a.out))[0] + '-datos.zip'; dn = dbytes = 0
+                listing = []; stored = set(); raw = 0; dz = None; dn = dbytes = 0
                 for rel, src in game_files(a.build, a.patched, a.romfs, a.aoc):
                     if dz is None and needs_data_archive(z, src, APK_GAME_LIMIT):
                         # Data archives are streamed, not installed as APKs. Their bounded
                         # entries need no ZIP64 sizes; the central directory may exceed 4 GiB.
-                        dz = zipfile.ZipFile(os.path.join(os.path.dirname(os.path.abspath(a.out)), dname), 'w', zipfile.ZIP_DEFLATED, allowZip64=True)
+                        data_path = Path(w) / 'game-data.zip'
+                        dz = archives.enter_context(zipfile.ZipFile(data_path, 'w', zipfile.ZIP_DEFLATED, allowZip64=True))
                         dz.writestr('nxdatos.txt', f'{package(a.id, a.test)}\t{vc}\n')
                     if dz is not None:
                         write_data_file(dz, rel, src); listing.append(f'{rel}\t{os.path.getsize(src)}\t=d'); dn += 1; dbytes += os.path.getsize(src); continue
@@ -116,8 +127,11 @@ def build(a):
                 z.writestr('assets/game/files.txt', '\n'.join(listing) + '\n')
                 print(f'game: {len(listing)} files, {len(stored)} pieces, {raw / 1e9:.2f} GB stored once')
                 if dz is not None:
-                    dz.close(); z.writestr('assets/game/datos.txt', f'{dname}\t{dn}\t{dbytes}\n')
-                    print(f'data file {dname}: {dn} files, {dbytes / 1e9:.2f} GB, {os.path.getsize(os.path.join(os.path.dirname(os.path.abspath(a.out)), dname)) / 1e9:.2f} GB compressed')
+                    assert data_path is not None
+                    dz.close()
+                    data_name = output.stem + '-datos-' + file_digest(data_path)[:24] + '.zip'
+                    z.writestr('assets/game/datos.txt', f'{data_name}\t{dn}\t{dbytes}\n')
+                    print(f'data file {data_name}: {dn} files, {dbytes / 1e9:.2f} GB, {data_path.stat().st_size / 1e9:.2f} GB compressed')
         if os.path.getsize(base) >= 0xFFFFFFFF: sys.exit(f'[RED] the APK would be {os.path.getsize(base) / 1e9:.1f} GB: Android installs APKs below 4 GB only')
         aligned = os.path.join(w, 'aligned.apk')
         run(os.path.join(BT, 'zipalign'), '-f', '-P', '16', '4', base, aligned)
@@ -125,7 +139,19 @@ def build(a):
         if not os.path.exists(ks):
             run(os.path.join(JAVA, 'bin', 'keytool'), '-genkeypair', '-keystore', ks, '-storepass', 'android', '-keypass', 'android', '-alias', 'nxnative', '-keyalg', 'RSA', '-keysize', '2048',
                 '-validity', '10000', '-dname', 'CN=nxnative development', stdout=subprocess.DEVNULL)
-        run(os.path.join(BT, 'apksigner'), 'sign', '--ks', ks, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--ks-key-alias', 'nxnative', '--out', a.out, aligned)
+        signed = Path(w) / 'signed.apk'
+        run(os.path.join(BT, 'apksigner'), 'sign', '--ks', ks, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--ks-key-alias', 'nxnative', '--out', signed, aligned)
+        run(os.path.join(BT, 'apksigner'), 'verify', signed)
+        run(os.path.join(BT, 'zipalign'), '-c', '-P', '16', '4', signed)
+        if data_path is not None and data_name is not None:
+            destination = output.with_name(data_name)
+            if destination.exists():
+                if file_digest(destination) != file_digest(data_path): raise ValueError('existing data archive differs from its content name: ' + str(destination))
+            else:
+                os.replace(data_path, destination)
+            # Publish immutable data first. If the final rename fails, the old
+            # APK/data pair remains intact and this complete archive is reusable.
+        os.replace(signed, output)
         print(f'{a.out}: {package(a.id, a.test)} "{label}", {os.path.getsize(a.out) / 1e6:.1f} MB' + (f', save from {a.save}' if a.save else '') + (f', cheats {os.path.basename(a.cheats)}' if a.cheats else ''))
 
 def pieces(d):   # (offset, length) ranges that cover the file: an archive of (u64 hash, u32 start, u32 end) entries after (u32 header size past this word, u32 data size, u32 count)
