@@ -4,9 +4,12 @@
 #pragma once
 #include "dm.h"
 typedef struct { const char *name; void *fn; } hle_ent;
-// Registration tables are linker sections: Mach-O "__DATA,<name>" (read with getsectiondata), ELF "<name>" (Android: read between __start_<name> and __stop_<name>)
+// Registration tables are linker sections: Mach-O "__DATA,<name>" (read with getsectiondata), ELF "<name>" (Android: read between __start_<name> and __stop_<name>).
+// Immutable records must remain contiguous: ASan's per-global redzones would
+// become bogus table entries. Only these records omit redzones; their target
+// functions and the rest of the host remain instrumented.
 #ifdef __APPLE__
-#define DM_SECTION(name) section("__DATA," #name)
+#define DM_SECTION(name) section("__DATA," #name), no_sanitize("address")
 #define DM_ASM_SYM(name) "_" #name
 #define DM_ASM_ADDR(reg, name) "    adrp " reg ", _" #name "@PAGE\n    add " reg ", " reg ", _" #name "@PAGEOFF\n"
 #define DM_ASM_HIDDEN ".private_extern"
@@ -14,7 +17,7 @@ typedef struct { const char *name; void *fn; } hle_ent;
 #include <mach-o/ldsyms.h>
 #define DM_SECTION_DATA(name, szp) ((const void *)getsectiondata(&_mh_execute_header, "__DATA", #name, (szp)))
 #else
-#define DM_SECTION(name) section(#name), retain
+#define DM_SECTION(name) section(#name), retain, no_sanitize("address")
 #define DM_ASM_SYM(name) #name
 #define DM_ASM_ADDR(reg, name) "    adrp " reg ", " #name "\n    add " reg ", " reg ", :lo12:" #name "\n"
 #define DM_ASM_HIDDEN ".hidden"

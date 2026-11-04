@@ -10,7 +10,9 @@ void guest_gate_stack(int own_stack) { (void)own_stack; }
 #ifndef DM_TEST_THREAD_ENTER
 void dm_thread_enter(uint64_t entry, uint64_t arg, uint64_t sp) { (void)entry; (void)arg; (void)sp; abort(); }
 #endif
+#ifndef DM_TEST_GUEST_SYMBOLS
 void *guest_sym(const char *name) { (void)name; return NULL; }
+#endif
 module_t *module_of(const void *p) { (void)p; return NULL; }
 #include <time.h>
 uint64_t now_ns(void) { struct timespec t; if (clock_gettime(CLOCK_MONOTONIC, &t)) abort(); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
