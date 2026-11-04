@@ -133,6 +133,15 @@
 - **Fix:** general, in the profile lookup. `own_profile_folders` names every folder the script writes a game's provisional and derived profiles to (`<NSP folder>/<id>_build/profile`, `<work dir>/profile`, `--profile-out`), and `main` leaves them out of `by_title` and of `same_build`'s `by_build` (their `skip`). A provisional profile there is packed as provisional again, with its heap check, and a derived one is derived again from its registered profile. `derive_profile` stops with a `BuildError` rather than derive a profile onto its own folder. This also covers a multi-program game's provisional profiles that the first program's build put on `DM_GAMES_DIR` ([PR #2503](https://github.com/seedds/nxnative/pull/2503)). Tests: `test_the_builds_own_profile_is_not_taken_as_registered` (`test_nsp_work_dir.py`) and `test_a_profile_is_never_derived_onto_its_own_folder` (`test_nsp_incremental.py`).
 - **Found on:** [Chained Echoes](../../dm/games/0100C510166F0000/README.md) ([PR #2564](https://github.com/seedds/nxnative/pull/2564)), whose provisional profile had additional compute kernels to add. The tables came back from `shader/pkg.partial/tables`, and the prewarm list and the conflict rulings from their empty defaults.
 
+## Mac apps
+
+### The Mac app drops the FPS setting and Metal HUD menu
+
+- **Symptom:** a Mac app built with `--show-fps` has neither the Metal performance overlay nor its Metal HUD menu.
+- **Cause:** the NSP script returned from its Mac packaging path before applying `SHOW_FPS` / `--show-fps`. The older bundler carried that preference into the app, but the current launcher received no HUD default. The Mac host enables Apple's HUD through `DM_METAL_HUD`, and Apple adds its menu when the HUD is enabled.
+- **Fix:** `scripts/build_ipa_from_nsp.py` passes the resolved choice to `dm/mac/pack_app.py`, which stores `DMShowFPS` in `Info.plist`. `dm/mac/launcher.c` sets `DM_METAL_HUD` from it before spawning the host, after reading environment files and the player's saved or window choices so those retain precedence. The packed `launcher.json` HUD row uses the same build default. `--no-show-fps` disables the bundled default; changing the option invalidates bundle reuse.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md); applies to every Mac app. The restored menu still needs a visual check in a running game.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more
