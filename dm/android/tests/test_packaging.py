@@ -90,6 +90,16 @@ class Packaging(unittest.TestCase):
                 with patch.dict(pack.os.environ, {'JAVA_HOME': str(java)}):
                     with self.assertRaisesRegex(ValueError, missing): pack.configure_tools(args)
 
+    def test_web_shim_is_reused_from_apple(self):
+        shim = pack.apple_web_shim()
+        self.assertIn(b'window.nx = stub(nx', shim)
+        self.assertIn(b"'getGamepads'", shim)
+        self.assertIn(b'window.webkit.messageHandlers.dm.postMessage', shim)
+        with tempfile.TemporaryDirectory() as tmp:
+            apk = self.package_with_fake_sdk(Path(tmp), b'game', bundle=False)
+            with zipfile.ZipFile(apk) as archive:
+                self.assertEqual(archive.read('assets/web-shim.js'), shim)
+
     def test_javac_wrapper_reports_real_jdk_home(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); java = root / 'real JDK'; bt = root / 'sdk'; jar = bt / 'android.jar'
