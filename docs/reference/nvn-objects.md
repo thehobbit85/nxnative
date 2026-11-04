@@ -44,6 +44,15 @@ The game may also write into an NVN object directly, without an NVN call, throug
 
 ## Memory pools
 
+### Vulkan texture IDs after memory-pool finalization
+
+- **Symptom:** a sampled descriptor still resolves a finalized pool's texture, or a never-used descriptor dereferences the retired pool object. Reusing that object's address can make a stale ID appear live again.
+- **Cause:** Vulkan's pool-drop hook did nothing, and descriptor lookup released its registry lock before resolving/uploading the copied texture. Metal invalidates these IDs under the same lock used by readers.
+- **Fix:** invalidate every texture/image registration naming the finalized pool; only explicit registration makes it live again. Hold the registry lock from the live-ID check through initial texture resolution/upload so finalization cannot free guest storage during that read. Encoded views keep their existing deferred GPU lifetime; the published submission fence is atomic for retirement readers.
+- **Check:** the Vulkan replay submits a sampled draw, finalizes the pool before waiting, then makes the old pool object inaccessible. The submitted draw completes correctly; both warm and never-resolved IDs read the dummy texture. Reusing the pool's object address leaves them invalid until one ID is explicitly registered again, which reads the new storage.
+- **Open:** direct texture records retained after pool finalization, cross-object storage aliases and all presentation/resource retirement races are separate lifetime cases; this establishes registered-descriptor behavior.
+
+
 ### Heaps cut from a pool at alignment relative to its GPU address
 
 - **Symptom:** a null write as soon as the main thread starts recording a command buffer (13 Sentinels: a constructor at `main+0x2fa9a0` runs on `this = 0` when the prologue enters its first battle).
