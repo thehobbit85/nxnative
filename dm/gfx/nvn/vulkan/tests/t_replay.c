@@ -11,12 +11,14 @@ uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); r
 uint64_t guest_ns(void) { return now_ns(); }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
+static prog_t output_program = {.nstage = 2};
 static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
 int nvn_dpool_base(const void *pool, int texture) {
     return texture && pool == &texture_pool ? 2048 : texture && pool == &alternate_texture_pool ? 4096 :
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &output_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x33 + stage; return 1; }
     if (p == &driver_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x32; return 1; }
     if (p == &compute || p == &groups) { assert(stage == 0); memset(key, 0, 8); key[7] = p == &groups ? 4 : 3; return 1; }
     if (p == &bindless_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x31 : 1; return 1; }
@@ -272,6 +274,27 @@ static void uniform_texture_array(void) {
     puts("Uniform texture arrays, pool bases, inline updates, independent samplers and missing handles passed");
 }
 
+static void vertex_output_defaults(void) {
+    list_t list = {0};
+    uint8_t pixel[4] = {0};
+    tex_t output = {.serial = 0x3300, .d = {.width = 1, .height = 1, .depth = 1, .levels = 1,
+                    .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d, &output.L);
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &output, .r = {.width=1, .height=1, .depth=1}, .mask=15, .c.f={0,0,1,1});
+    RECORD(OP_SET_RT, p_set_rt, .n=1, .color={&output});
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&output_program, .stages=3);
+    RECORD(OP_BIND_VATTR, p_bind_vattr, .n=0);
+    RECORD(OP_DRAW, p_draw, .prim=NVN_DRAW_PRIMITIVE_TRIANGLES, .count=3, .instances=1);
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&output, .src=(uintptr_t)pixel, .r={.width=1, .height=1, .depth=1});
+    put(&list, OP_END, NULL, 0);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    const uint8_t green[] = {0,255,0,255};
+    if (memcmp(pixel, green, 4)) {
+        fprintf(stderr, "vertex output defaults: pixel %u %u %u %u\n", pixel[0], pixel[1], pixel[2], pixel[3]); abort();
+    }
+    puts("Unwritten vertex output components default to (0,0,0,1); explicit writes override them");
+}
+
 static void compute_driver_constants(void) {
     for (int mode = 0; mode < 5; ++mode) {
         uint32_t output[16] = {0}, uniform[16] = {0}, counts[] = {mode >= 2 ? 0u : 2u, mode == 2 ? 0u : 3u, mode == 2 ? 0u : 4u};
@@ -517,6 +540,7 @@ int main(void) {
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
     uniform_texture_array();
     compute_driver_constants();
+    vertex_output_defaults();
     textured_draw(0, 0);  // CPU argument block, followed by a fully GPU-generated block
     textured_draw(1, 0);  // X is GPU-generated, Y and Z are CPU-written
     textured_draw(0, 1);  // argument producer and consumer in successive submissions
