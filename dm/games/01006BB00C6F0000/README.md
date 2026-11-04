@@ -63,14 +63,22 @@ Game-specific findings; the general host changes they led to are listed under [F
 - The title wants L+R: `DM_KEYS="f6000:L+R~0.4,f6300:A,f6500:A,f6700:Down,f6800:A"` reaches a new file's name entry (a fresh save directory via `SV=`).
 - Racy crashes: run 12 busy loops beside the route (`for i in $(seq 12); do (while :; do :; done) & done`).
 
+## Android integration
+
+**Verified, 2026-11-04:** the ARM64 Android 15 / API 35 emulator with SwiftShader renders the opening room, Link, Marin, Tarin, hearts, complete menu and dialogue text, inventory and item effects. Scripted input advances the opening conversation, moves Link, talks to Tarin, obtains the shield and raises it with R. Leaving the house reaches Mabe Village with its scenery and location text visible. These checks use the original exported shaders and the production renderer, without diagnostic shader replacements.
+
+Save check: the System menu's Save operation completes with the house location and timestamp. After force-stopping and restarting the Android process, File 1 retains that save; loading it restores the room and the acquired shield, and movement and shield input still work. Clear the `DM_CTL` command file while the app is stopped before restarting a test: its reader starts at byte zero each process, so retaining old commands would replay them and confound the reload check.
+
+This is early-area emulator validation, not whole-game or physical-device qualification. SwiftShader runs slowly; these results do not establish playable frame rates on hardware. Audio callbacks are observed, but audible output and physical controls remain untested. The freshly rewritten Mac build also reaches the opening movie with the actor guard; that check does not establish Mac gameplay for this change.
+
 ## Found on this game
 
 - **Android font draw parameters:** [Draw parameters on a Vulkan device without the optional feature](../../../docs/reference/shaders.md#draw-parameters-on-a-vulkan-device-without-the-optional-feature). The capability-based fallback restores complete menu strings on the API 35 SwiftShader emulator.
-- **Android font atlas initial content:** [Storage of a CPU-uncached pool at first use](../../../docs/reference/nvn-objects.md#storage-of-a-cpu-uncached-pool-at-first-use). Reusing Metal's rule populates the previously zero Vulkan atlas; the remaining clipped glyphs came from unsupported draw-parameter built-ins, below.
+- **Android font atlas initial content:** [Storage of a CPU-uncached pool at first use](../../../docs/reference/nvn-objects.md#storage-of-a-cpu-uncached-pool-at-first-use). Reusing Metal's rule populates the previously zero Vulkan atlas; the remaining clipped glyphs came from unsupported draw-parameter built-ins, above.
 
 General host changes first needed here; each applies to every game:
 
-- [Vulkan depth formats and nearest scaled depth copies](../../../docs/reference/rendering.md#vulkan-depth-formats-and-nearest-scaled-depth-copies): Android SwiftShader advertises no D24S8 features; the format and copy fallbacks pass synthetic depth/stencil replay. Commercial retesting is in progress.
+- [Vulkan depth formats and nearest scaled depth copies](../../../docs/reference/rendering.md#vulkan-depth-formats-and-nearest-scaled-depth-copies): Android SwiftShader advertises no D24S8 features; the format and copy fallbacks pass synthetic depth/stencil replay. The opening room and Mabe Village checks use these fallbacks.
 
 - [Vulkan target lowers dynamic texture offsets](../../../docs/reference/shaders.md#vulkan-target-lowers-dynamic-texture-offsets): the captured postprocess shader `9338e3f1b597fe7c` passes Vulkan 1.1 validation using the bundled Ryujinx lowering.
 
@@ -91,7 +99,7 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- Android runtime: the ARM64 API 35 emulator reaches the saved opening room after the actor sentinel repair. The room, Link, other characters and hearts render after restoring Metal's lower-left viewport/culling rules in Vulkan. The CPU-uncached font-atlas fill and optional draw-parameter fallback restore complete text; interactive gameplay and save/reload validation remain open. Scaled nearest depth/stencil copies now pass the synthetic GPU checks. The bound-geometry warning comes from the program's stage mask; the exported game shaders are vertex, fragment and compute stages, with no geometry stage to execute.
+- Android runtime: broader progression, device performance and physical-device qualification remain open beyond the [verified opening route](#android-integration). The bound-geometry warning comes from the program's stage mask; the exported game shaders are vertex, fragment and compute stages, with no geometry stage to execute. Packed D24 guest uploads and linearly filtered depth copies remain renderer gaps; the tested route uses nearest scaled depth/stencil copies.
 
 - **`SR_Y_DIRECTION`.** 2,487 of its pixel shaders read the window's Y-direction system register, which is −1 under a lower-left origin. The Ryujinx recompiler answers a constant +1 (a TODO in `InstEmitMove.cs`; LASRecomp answers −1). In the room shader the value only scales a depth slope under `abs()`; other shaders may use its sign (`dFdy`-based effects). Answering it per profile means a translator change, i.e. every game's chain.
 - development.md calls SDK 8.2.0 "the oldest so far"; Mario Kart 8 Deluxe (SDK 4.4.0) is older now.
