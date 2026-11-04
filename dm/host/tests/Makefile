@@ -19,6 +19,16 @@ GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_directory $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_save_sync $(B)/t_save_sync_metadata: ../save_fs.h
 GAME_H = ../gen/$(GAME)/game_profile.h
+.PHONY: jit android-jit-build
+run: jit
+jit: $(B)/t_jit
+	$(B)/t_jit $(QUIET)
+JIT_HEADERS = ../loader.c ../hle_jit.c ../jit_memory.h ../hle.h ../dm.h $(GAME_H)
+$(B)/t_jit: t_jit.c $(JIT_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ $<
+android-jit-build: $(B)/t_jit_android $(B)/t_jit_memory
+$(B)/t_jit_android: t_jit.c $(JIT_HEADERS) ../android_text.h ../../android/compat/sha256.c ../../android/compat/CommonCrypto/CommonDigest.h | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $< ../../android/compat/sha256.c
 run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid
 	$(B)/t_language
 	$(B)/t_heap_size

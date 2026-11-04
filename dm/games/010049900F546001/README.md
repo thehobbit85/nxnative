@@ -25,6 +25,7 @@ A closes text, B jumps, Y attacks; Plus starts at the head, Minus opens the laun
 
 ## Found on this game
 
+- [JIT plugin reload](../../../docs/reference/services.md#jit-plugin-reload-loses-initial-data): resolved in a synthetic Android/Mac fixture for the shared API this game uses; no new gameplay observation.
 - [`nn::jit` taken over by the host](../../../docs/reference/services.md#nnjit-taken-over-by-the-host), [`nn::jit` served from an image on iOS](../../../docs/reference/services.md#nnjit-served-from-an-image-on-ios).
 - Vulkan layer: [`VK_EXT_debug_report`](../../../docs/reference/rendering.md#vk_ext_debug_report), [Specialization constants](../../../docs/reference/rendering.md#specialization-constants), [Packed 16-bit and 8-bit formats](../../../docs/reference/rendering.md#packed-16-bit-and-8-bit-formats), [Image clears, dynamic stencil and line width](../../../docs/reference/rendering.md#image-clears-dynamic-stencil-and-line-width), [What a game tears down that it should not](../../../docs/reference/rendering.md#what-a-game-tears-down-that-it-should-not).
 

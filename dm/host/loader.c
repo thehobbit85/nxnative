@@ -548,8 +548,9 @@ static unsigned rebind(module_t *k, module_t *nm, int load) {
     return n;
 }
 
-void nro_load(module_t *m) {
-    pthread_rwlock_wrlock(&g_modules_mu);
+// Both ordinary modules and isolated JIT plugins can be unloaded and loaded
+// again. Save their initial data before either path relocates or initializes it.
+static void nro_reset_data(module_t *m) {
     // No guest code can modify an inactive NRO before its first load. Copy here, before relocation/init: eagerly copying FFX/X-2's 1,432 modules committed 5.8 GB of mostly unused bss.
     if (!m->pristine) {
         if (!(m->pristine = malloc(m->pristine_len ? m->pristine_len : 1))) die("%s: pristine data copy", m->name);
@@ -559,6 +560,10 @@ void nro_load(module_t *m) {
         memcpy(m->base + m->data_off, m->pristine, m->pristine_len);
         memset(m->base + m->data_off + m->pristine_len, 0, m->key_page_off - m->data_off - m->pristine_len);
     }
+}
+void nro_load(module_t *m) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    nro_reset_data(m);
     m->loads++; m->loaded = 1; g_loaded[g_nloaded++] = m;
     relocate(m);
     unsigned n = 0;
@@ -571,7 +576,7 @@ void nro_load(module_t *m) {
 // undefined weak symbols 0; Super Mario 64's EmuSystemJITPlugin.nro has only those and relative relocations) and never takes part in the game's symbol lookups
 void nro_load_alone(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
-    if (m->loads) memcpy(m->base + m->data_off, m->pristine, m->pristine_len);
+    nro_reset_data(m);
     m->loads++; m->loaded = 1;
     relocs_t rl = relocs_of(m);
     unsigned nrel = rl.relr ? relr_apply(m, rl.relr, rl.relrsz, (uint64_t)m->base) : 0, nsym = 0;
