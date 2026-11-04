@@ -7,6 +7,7 @@ import zipfile
 import tempfile
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -18,7 +19,7 @@ spec.loader.exec_module(pack)
 
 
 class Packaging(unittest.TestCase):
-    def package_with_fake_sdk(self, root, payload, fail=None):
+    def package_with_fake_sdk(self, root, payload, fail=None, options=()):
         build = root / 'build'; build.mkdir(exist_ok=True)
         output = root / 'output with spaces'; output.mkdir(exist_ok=True)
         library = build / 'libdmhost.so'; library.write_bytes(b'fixture library')
@@ -27,7 +28,8 @@ class Packaging(unittest.TestCase):
             tool = Path(args[0]).name
             if tool == 'aapt2':
                 path = args[args.index('-o') + 1]
-                with zipfile.ZipFile(path, 'w'): pass
+                with zipfile.ZipFile(path, 'w') as archive:
+                    if 'link' in args: archive.write(args[args.index('--manifest') + 1], 'AndroidManifest.xml')
             elif tool == 'd8':
                 Path(args[args.index('--output') + 1], 'classes.dex').write_bytes(b'fixture dex')
             elif tool == 'zipalign' and '-c' not in args:
@@ -47,8 +49,25 @@ class Packaging(unittest.TestCase):
             if fail == 'data': raise OSError('fixture archive write failure')
         with patch.object(pack, 'configure_tools'), patch.object(pack, 'run', side_effect=run), patch.object(pack, 'write_data_file', side_effect=write), \
              patch.object(pack, 'game_files', return_value=[('romfs/romfs.img', str(source))]), patch.object(pack, 'APK_GAME_LIMIT', 1):
-            pack.main(['0100633007D48000', str(build), str(output / 'Game.apk'), '--bundle', '--library', str(library), '--version-code', '101'])
+            pack.main(['0100633007D48000', str(build), str(output / 'Game.apk'), '--bundle', '--library', str(library), '--version-code', '101', *options])
         return output / 'Game.apk'
+
+    def test_manifest_keeps_game_version_separate_from_install_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            version = '1.5.12620 & "test"'
+            apk = self.package_with_fake_sdk(root, b'game', options=['--version-name', version])
+            with zipfile.ZipFile(apk) as archive: manifest = ET.fromstring(archive.read('AndroidManifest.xml'))
+            android = '{http://schemas.android.com/apk/res/android}'
+            self.assertEqual(manifest.get(android + 'versionName'), version)
+            self.assertEqual(manifest.get(android + 'versionCode'), '101')
+
+    def test_explicit_invalid_version_codes_fail_before_sdk_work(self):
+        for code in ('0', '-1', '2100000001'):
+            with self.subTest(code=code), patch.object(pack, 'configure_tools') as configure:
+                with self.assertRaises(SystemExit):
+                    pack.main(['0100633007D48000', 'missing-build', 'out.apk', '--version-code', code])
+                configure.assert_not_called()
 
     def test_failed_rebuild_preserves_existing_apk_and_data(self):
         for failure in ('data', 'sign', 'verify', 'align'):

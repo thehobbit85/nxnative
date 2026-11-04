@@ -77,9 +77,9 @@ def build(a):
     with tempfile.TemporaryDirectory(prefix='apk_', dir=output.parent) as w:
         data_path = None; data_name = None
         label = (a.label or a.id) + (' (test)' if a.test else '')
-        vc = a.version_code or int(time.time())   # increase --version-code for an update; seconds avoid the donor's hourly collisions
+        vc = a.version_code if a.version_code is not None else int(time.time())   # install ordering is independent of the game's display version
         if not 1 <= vc <= 2100000000: raise ValueError('version code must be between 1 and 2100000000')
-        Path(w, 'AndroidManifest.xml').write_text(MANIFEST.format(pkg=package(a.id, a.test), vc=vc, vn='0.1.' + str(vc), label=escape(label, {'"': '&quot;'})))
+        Path(w, 'AndroidManifest.xml').write_text(MANIFEST.format(pkg=package(a.id, a.test), vc=vc, vn=escape(a.version_name, {'"': '&quot;'}), label=escape(label, {'"': '&quot;'})))
         res = os.path.join(w, 'res', 'mipmap'); os.makedirs(res)
         icon = a.icon or (glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')) or [None])[0]
         if icon: shutil.copyfile(icon, os.path.join(res, 'icon.jpg'))
@@ -265,8 +265,10 @@ def main(argv=None):
     ap.add_argument('--bundle', action='store_true'); ap.add_argument('--test', action='store_true')
     ap.add_argument('--library'); ap.add_argument('--sdk'); ap.add_argument('--build-tools'); ap.add_argument('--android-jar')
     ap.add_argument('--keystore'); ap.add_argument('--version-code', type=int)
+    ap.add_argument('--version-name', default='1.0', help='game display version (independent of --version-code)')
     a = ap.parse_args(argv)
     if not re.fullmatch(r'[0-9a-fA-F]{16}', a.id): ap.error('id must be a 16-digit title ID')
+    if a.version_code is not None and not 1 <= a.version_code <= 2100000000: ap.error('version code must be between 1 and 2100000000')
     if a.deploy and not a.serial: ap.error('--deploy requires an explicit --serial')
     if not a.deploy and not a.out: ap.error('an output APK path is required')
     try:

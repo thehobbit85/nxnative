@@ -2843,6 +2843,8 @@ def parse_args(argv):
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
+    ap.add_argument('--android-version-code', type=int, help='Android install version, 1..2100000000 (default: seconds since the Unix epoch); increase for updates, independently of the game display version')
+    ap.add_argument('--android-keystore', help='Android development keystore (nxnative alias, android password); keep the same key for updates (default: android-debug.keystore in the build folder)')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
     ap.add_argument('-l', '--language', help='game language, a code or a name: ja, fr, de, es, it, nl, pt, ru, ko, zh-Hans, zh-Hant, en-GB, fr-CA, es-419, pt-BR, Japanese, ... (default: the LANGUAGE setting, else English); '
@@ -2960,6 +2962,8 @@ def main(args=None):
     platform = args.platform or PLATFORM
     if platform not in ('ios', 'mac', 'mac-app', 'android'): raise BuildError(f'PLATFORM / --platform must be ios, mac, mac-app or android: {platform}')
     android = platform == 'android'
+    if not android and (args.android_keystore or args.android_version_code is not None): raise BuildError('Android signing and version options require --platform android')
+    if args.android_version_code is not None and not 1 <= args.android_version_code <= 2100000000: raise BuildError('Android version code must be between 1 and 2100000000')
     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
     mac_pack = platform == 'mac-app'
     seen_shaders = SEEN_SHADERS if args.seen_shaders is None else args.seen_shaders
@@ -3145,6 +3149,7 @@ def main(args=None):
     app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name') if dump else '')   # a dump has no control data, a NUP may have no NACP
     if not app_name and not (mac and not mac_pack): raise BuildError(f'no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')
     bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or f'org.nxnative.{app:016x}'
+    if android: bundle_id = f'com.nxnative.t{app:016x}'
     team_id = args.team_id or TEAM_ID or env.get('DM_TEAM_ID') or saved_signing.get('DEVELOPMENT_TEAM') or '0000000000'
     if prepare_xcode:
         try: xcode_projects.check_bundle_id(workspace, project, bundle_id)
@@ -3215,7 +3220,9 @@ def main(args=None):
         PROG.stage('Android APK')
         android_fonts(py, repo, work, env, logs)
         cmd = [py, repo / 'scripts/build_android.py', f'{app:016X}', work, out_ipa, '--profile', g.id,
-               '--patched', android_patched, '--romfs', rfs.source(game), '--label', app_name, '--language', lang]
+               '--patched', android_patched, '--romfs', rfs.source(game), '--label', app_name, '--version-name', app_version or '1.0', '--language', lang]
+        if args.android_version_code is not None: cmd += ['--version-code', str(args.android_version_code)]
+        if args.android_keystore: cmd += ['--keystore', str(Path(args.android_keystore).expanduser().resolve())]
         if romfs_mode == 'bundle': cmd += ['--bundle']
         if aoc: cmd += ['--aoc', aoc]
         if icon: cmd += ['--icon', icon]
