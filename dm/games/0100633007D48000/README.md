@@ -55,6 +55,7 @@ The separate asset deployment uses the merged RomFS image directly. Synthetic AP
 - [Android assets and large RomFS images](../../../docs/reference/packing.md#android-assets-and-large-romfs-images): shared builder and APK review, with synthetic font/DLC and archive checks.
 - [Interrupted Android asset updates](../../../docs/reference/packing.md#interrupted-android-asset-updates): staged installation, content checks and recovery qualified with synthetic assets.
 - [Android build paths split by Make](../../../docs/reference/packing.md#android-build-paths-split-by-make): the wrapper preserves native output paths and incremental reuse through stable aliases.
+- [Incomplete Android package inputs](../../../docs/reference/packing.md#incomplete-android-package-inputs): preflight checks reject missing modules, resource pairs, explicit assets and wrong library ABIs.
 
 - [Vulkan export preserves packaged shader stages](../../../docs/reference/shaders.md#vulkan-export-preserves-packaged-shader-stages): Android export validates all 1,812 stages, including one geometry asset; runtime geometry support remains open.
 

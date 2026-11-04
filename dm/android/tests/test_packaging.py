@@ -19,11 +19,15 @@ pack = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pack)
 
 
+def elf_library(machine=183, kind=3):
+    return struct.pack('<16sHHIQQQIHHHHHH', b'\x7fELF\x02\x01\x01' + bytes(9), kind, machine, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0)
+
+
 class Packaging(unittest.TestCase):
     def package_with_fake_sdk(self, root, payload, fail=None, options=(), limit=1):
         build = root / 'build'; build.mkdir(exist_ok=True)
         output = root / 'output with spaces'; output.mkdir(exist_ok=True)
-        library = build / 'libdmhost.so'; library.write_bytes(b'fixture library')
+        library = build / 'libdmhost.so'; library.write_bytes(elf_library())
         source = build / 'RomFS.img'; source.write_bytes(payload)
         def run(*args, **kwargs):
             tool = Path(args[0]).name
@@ -81,6 +85,62 @@ class Packaging(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     pack.main(['0100633007D48000', 'missing-build', 'out.apk', '--version-code', code])
                 configure.assert_not_called()
+
+    def test_wrong_native_library_fails_before_sdk_work(self):
+        for data in (b'not an ELF library', elf_library(machine=62), elf_library(kind=2), elf_library()[:40]):
+            with self.subTest(data=data[:20]), tempfile.TemporaryDirectory() as tmp:
+                library = Path(tmp, 'lib.so'); library.write_bytes(data)
+                with patch.object(pack, 'configure_tools') as configure:
+                    with self.assertRaises(SystemExit):
+                        pack.main(['0100633007D48000', tmp, tmp + '/out.apk', '--library', str(library)])
+                    configure.assert_not_called()
+
+    def test_output_cannot_replace_a_package_input(self):
+        for source in ('library', 'romfs', 'keystore'):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); lib = root / 'lib.so'; lib.write_bytes(elf_library())
+                romfs = root / 'RomFS.img'; romfs.write_bytes(b'game data')
+                key = root / 'android-debug.keystore'; key.write_bytes(b'key file')
+                output = {'library': lib, 'romfs': romfs, 'keystore': key}[source]
+                before = output.read_bytes()
+                with patch.object(pack, 'configure_tools') as configure, patch.object(pack, 'game_files', return_value=[('romfs/romfs.img', str(romfs))]):
+                    with self.assertRaises(SystemExit):
+                        pack.main(['0100633007D48000', tmp, str(output), '--library', str(lib), '--bundle'])
+                    configure.assert_not_called()
+                    self.assertEqual(output.read_bytes(), before)
+
+    def test_explicit_missing_assets_fail_before_sdk_work(self):
+        for option in ('--save', '--aoc', '--icon', '--env-file', '--cheats', '--romfs'):
+            with self.subTest(option=option), tempfile.TemporaryDirectory() as tmp:
+                library = Path(tmp, 'lib.so'); library.write_bytes(elf_library())
+                with patch.object(pack, 'configure_tools') as configure:
+                    with self.assertRaises(SystemExit):
+                        pack.main(['0100633007D48000', tmp, tmp + '/out.apk', '--library', str(library), option, tmp + '/missing'])
+                    configure.assert_not_called()
+
+    def test_module_and_shader_files_must_be_complete_pairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); modules = root / 'patched_android'; modules.mkdir()
+            shaders = root / 'shader/vk'; shaders.mkdir(parents=True)
+            romfs = root / 'extract/base/RomFS'; romfs.mkdir(parents=True)
+            (modules / 'sdk.patched.bin').write_bytes(b'code')
+            (modules / 'sdk.fixups.tsv').write_text('# TP_SLOT\t2\n')
+            with self.assertRaisesRegex(ValueError, 'main'):
+                pack.game_files(tmp)
+            (modules / 'main.patched.bin').write_bytes(b'code')
+            (modules / 'main.fixups.tsv').write_text('# TP_SLOT\t2\n')
+            shader = shaders / '0123456789abcdef.spv'; sidecar = shader.with_suffix('.vk.txt')
+            shader.write_bytes(struct.pack('<5I', 0x07230203, 0x10000, 0, 1, 0))
+            with self.assertRaisesRegex(ValueError, 'sidecar'):
+                pack.game_files(tmp)
+            sidecar.write_text('stage vs\n')
+            self.assertIn('vk/' + shader.name, dict(pack.game_files(tmp)))
+            shader.unlink()
+            with self.assertRaisesRegex(ValueError, 'SPIR-V'):
+                pack.game_files(tmp)
+            sidecar.unlink()
+            with self.assertRaisesRegex(ValueError, 'DLC'):
+                pack.game_files(tmp, aoc=str(root / 'missing-dlc'))
 
     def test_failed_rebuild_preserves_existing_apk_and_data(self):
         for failure in ('data', 'sign', 'verify', 'align'):

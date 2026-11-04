@@ -49,6 +49,14 @@ def file_digest(path):
     return digest.hexdigest()
 def package(gid, test=False): return 'com.nxnative.t' + gid.lower() + ('.test' if test else '')   # test: installs beside the real app, its own data
 
+def check_library(path):
+    # ELF machine/type catches a Mac host, x86 Android binary or ET_EXEC image
+    # selected as the app library. Dynamic-linker semantics remain a loader check.
+    with open(path, 'rb') as source: header = source.read(64)
+    if (len(header) != 64 or header[:7] != b'\x7fELF\x02\x01\x01' or
+            struct.unpack_from('<HHI', header, 16) != (3, 183, 1) or struct.unpack_from('<H', header, 52)[0] != 64):
+        raise ValueError('expected an ELF64 little-endian ARM64 shared library: ' + str(path))
+
 MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{pkg}" android:versionCode="{vc}" android:versionName="{vn}">
   <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="33"/>
@@ -68,10 +76,23 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 '''
 
 def build(a):
-    configure_tools(a)
     lib = a.library or os.path.join(ANDROID, 'gen', a.id, 'libdmhost.so')
     if not os.path.exists(lib): sys.exit(f'[RED] {lib} missing: make -C dm/android GAME={a.id} first')
-    output = Path(a.out).resolve(); output.parent.mkdir(parents=True, exist_ok=True)
+    check_library(lib)
+    for name in ('save', 'aoc', 'icon', 'env_file', 'cheats', 'romfs'):
+        path = getattr(a, name)
+        if path is None: continue
+        valid = os.path.isdir(path) if name in ('save', 'aoc') else os.path.isfile(path)
+        if name == 'romfs': valid = valid or os.path.isdir(path)
+        if not path or not valid: raise ValueError('missing or invalid --' + name.replace('_', '-') + ': ' + path)
+    files = game_files(a.build, a.patched, a.romfs, a.aoc) if a.bundle else []
+    output = Path(a.out).resolve()
+    ks = os.path.abspath(a.keystore or os.path.join(a.build, 'android-debug.keystore'))
+    sources = [lib, ks, *(src for _, src in files), *(path for path in (a.icon, a.env_file, a.cheats, a.romfs) if path)]
+    if any(output == Path(source).resolve() for source in sources) or (a.save and output.is_relative_to(Path(a.save).resolve())):
+        raise ValueError('output APK would replace or become part of a package input: ' + str(output))
+    configure_tools(a)
+    output.parent.mkdir(parents=True, exist_ok=True)
     # Stage beside the destination so the final APK replacement is atomic even
     # when WORK and the output are on different filesystems.
     with tempfile.TemporaryDirectory(prefix='apk_', dir=output.parent) as w:
@@ -110,7 +131,7 @@ def build(a):
                         if not f.startswith('.'): p = os.path.join(root, f); z.write(p, 'assets/save/' + os.path.relpath(p, a.save))
             if a.bundle:
                 listing = []; stored = set(); raw = 0; dz = None; dn = dbytes = 0
-                for rel, src in game_files(a.build, a.patched, a.romfs, a.aoc):
+                for rel, src in files:
                     if dz is None and needs_data_archive(z, src, APK_GAME_LIMIT):
                         # Data archives are streamed, not installed as APKs. Their bounded
                         # entries need no ZIP64 sizes; the central directory may exceed 4 GiB.
@@ -137,7 +158,6 @@ def build(a):
         if os.path.getsize(base) >= 0xFFFFFFFF: sys.exit(f'[RED] the APK would be {os.path.getsize(base) / 1e9:.1f} GB: Android installs APKs below 4 GB only')
         aligned = os.path.join(w, 'aligned.apk')
         run(os.path.join(BT, 'zipalign'), '-f', '-P', '16', '4', base, aligned)
-        ks = os.path.abspath(a.keystore or os.path.join(a.build, 'android-debug.keystore'))
         if not os.path.exists(ks):
             run(os.path.join(JAVA, 'bin', 'keytool'), '-genkeypair', '-keystore', ks, '-storepass', 'android', '-keypass', 'android', '-alias', 'nxnative', '-keyalg', 'RSA', '-keysize', '2048',
                 '-validity', '10000', '-dname', 'CN=nxnative development', stdout=subprocess.DEVNULL)
@@ -207,12 +227,18 @@ def game_files(b, patched=None, romfs=None, aoc=None):   # (path in the app's ex
     patched = str(patched or os.path.join(b, 'patched_android'))
     if not os.path.isdir(vk): raise ValueError('missing shader/vk: export Android shaders first')
     if not glob.glob(os.path.join(patched, '*.patched.bin')): raise ValueError('missing patched_android modules: rewrite with --thread-slots android first')
+    if not os.path.isfile(os.path.join(patched, 'main.patched.bin')): raise ValueError('missing Android main.patched.bin')
     for module in Path(patched).glob('*.patched.bin'):
         metadata = module.with_name(module.name.replace('.patched.bin', '.fixups.tsv'))
         if not metadata.is_file() or not re.search(r'^# TP_SLOT\t2$', metadata.read_text(), re.M):
             raise ValueError(str(module) + ': not an Android rewrite; run patch_nso.py --thread-slots android')
     for f in sorted(glob.glob(os.path.join(patched, '*.patched.bin')) + glob.glob(os.path.join(patched, '*.tsv'))): out.append(('dm/' + os.path.basename(f), f))
-    for f in sorted(glob.glob(os.path.join(vk, '*.spv')) + glob.glob(os.path.join(vk, '*.vk.txt'))): out.append(('vk/' + os.path.basename(f), f))
+    shaders = sorted(Path(vk).glob('*.spv')); sidecars = sorted(Path(vk).glob('*.vk.txt'))
+    for shader in shaders:
+        if not shader.with_suffix('.vk.txt').is_file(): raise ValueError('missing shader sidecar: ' + str(shader))
+    for sidecar in sidecars:
+        if not sidecar.with_name(sidecar.name[:-7] + '.spv').is_file(): raise ValueError('missing SPIR-V module: ' + str(sidecar))
+    for f in sorted(shaders + sidecars): out.append(('vk/' + f.name, str(f)))
     for f in sorted(glob.glob(os.path.join(b, 'font', '*'))): out.append(('font/' + os.path.basename(f), f))
     choices = [str(romfs)] if romfs else glob.glob(os.path.join(b, 'extract', '*', 'RomFS')) + glob.glob(os.path.join(b, 'extract', '*', 'RomFS.img'))
     if len(choices) != 1: raise ValueError('select one extracted RomFS with --romfs')
@@ -223,6 +249,7 @@ def game_files(b, patched=None, romfs=None, aoc=None):   # (path in the app's ex
         for root, _, fs in os.walk(romfs):
             for f in sorted(fs): p = os.path.join(root, f); out.append(('romfs/' + os.path.relpath(p, romfs), p))
     if aoc:
+        if not os.path.isdir(aoc): raise ValueError('missing DLC folder: ' + str(aoc))
         for root, _, fs in os.walk(aoc):
             for f in sorted(fs): p = os.path.join(root, f); out.append(('aoc/' + os.path.relpath(p, aoc), p))
     return out
