@@ -36,6 +36,42 @@ static void check_save(void) {
     uint32_t options = 0; require(fs_write(file, 0, value, sizeof value, &options) == 0);
     fs_close(file); require(fs_commit("save") == 0); NOTE("APP_FIXTURE_SAVE_COMMITTED\n");
 }
+#ifdef APP_PROGRAM
+extern void oe_execute(int, const void *, size_t);
+extern int oe_previous(void);
+extern unsigned oe_parameter(size_t *, void *, size_t);
+extern uint32_t fs_rom(const char *, void *, size_t);
+static int previous;
+static void check_program(void) {
+    previous = oe_previous();
+    uint8_t param[12]; for (int i = 0; i < 12; i++) param[i] = 0xa5;
+    size_t n = 99;
+    if (APP_PROGRAM) {
+        require(previous == APP_PROGRAM - 1 && oe_parameter(&n, param + 2, 8) && n == 6);
+        require(param[0] == 0xa5 && param[1] == 0xa5 && param[8] == 0xa5 && param[11] == 0xa5);
+        require(param[2] == 'N' && param[3] == 0 && param[4] == 0xff && param[5] == APP_PROGRAM && param[6] == 4 && param[7] == 9);
+        require(!oe_parameter(&n, param, sizeof param) && n == 0);
+    } else require((previous == -1 || previous == 2 || previous == 0) && !oe_parameter(&n, param, sizeof param) && n == 0);
+    NOTE("PROGRAM_PARAMETERS_READY\n");
+    require(fs_rom("rom", NULL, 0) == 0);
+    uint64_t file; uint8_t marker = 99; size_t got = 0;
+    require(fs_open(&file, "rom:/program.txt", 1) == 0);
+    require(fs_read(&got, file, 0, &marker, 1) == 0 && got == 1 && marker == APP_PROGRAM); fs_close(file);
+    if (APP_PROGRAM == 0) NOTE("PROGRAM_0_READY\n");
+    if (APP_PROGRAM == 1) NOTE("PROGRAM_1_READY\n");
+    if (APP_PROGRAM == 2) NOTE("PROGRAM_2_READY\n");
+    if (!APP_PROGRAM && previous == 0) NOTE("PROGRAM_HANDOFF_DONE\n");
+}
+static void next_program(void) {
+    uint8_t param[] = {'N', 0, 0xff, APP_PROGRAM + 1, 4, 9};
+    if (APP_PROGRAM == 0 && previous == -1) oe_execute(1, param, sizeof param);
+    else if (APP_PROGRAM == 1) oe_execute(2, param, sizeof param);
+    else if (APP_PROGRAM == 2) oe_execute(0, NULL, 0);
+    else if (APP_PROGRAM == 0 && previous == 2) oe_execute(99, param, sizeof param);
+    else return;
+    NOTE("PROGRAM_EXECUTE_RETURNED\n"); require(0);
+}
+#endif
 void _init_libc0(void) {}
 void nnosInitialize(uint64_t main_handle, uint64_t arg) { require(main_handle != 0 && arg == 0); }
 void _init_libc1(void) {}
@@ -48,6 +84,9 @@ static _Alignas(16384) unsigned char storage[1 << 20];
 void nnMain(void) {
     NOTE("APP_FIXTURE_MAIN\n");
     check_save();
+#ifdef APP_PROGRAM
+    check_program();
+#endif
     require(aoc_count() == 1);
     require(font_state(0) == 1 && font_address(0) != NULL);
     require(font_state(5) == 1 && font_address(5) != NULL);
@@ -96,6 +135,9 @@ void nnMain(void) {
         API(nvnQueuePresentTexture)(&queue, &window, index);
         API(nvnQueueFinish)(&queue);
         if (frame % 60 == 0) NOTE("APP_FIXTURE_FRAME\n");
+#ifdef APP_PROGRAM
+        if (frame == 90) next_program();
+#endif
         sleep_frame();
     }
 }

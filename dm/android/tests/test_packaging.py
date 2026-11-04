@@ -77,11 +77,11 @@ class Packaging(unittest.TestCase):
         return output / 'Game.apk'
 
     def test_incomplete_sdk_or_jdk_fails_during_configuration(self):
-        for missing in ('aapt2', 'd8', 'zipalign', 'apksigner', 'android.jar', 'java', 'javac', 'keytool'):
+        for missing in ('aapt2', 'd8', 'zipalign', 'apksigner', 'android.jar', 'java', 'javac', 'keytool', 'release'):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); bt = root / 'SDK with spaces/build-tools/35.0.0'; java = root / 'JDK with spaces'
                 jar = root / 'SDK with spaces/platforms/android-35/android.jar'
-                paths = [bt / n for n in ('aapt2', 'd8', 'zipalign', 'apksigner')] + [java / 'bin' / n for n in ('java', 'javac', 'keytool')] + [jar]
+                paths = [bt / n for n in ('aapt2', 'd8', 'zipalign', 'apksigner')] + [java / 'bin' / n for n in ('java', 'javac', 'keytool')] + [jar, java / 'release']
                 for path in paths:
                     if path.name == missing: continue
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +89,19 @@ class Packaging(unittest.TestCase):
                 args = SimpleNamespace(sdk=str(root / 'SDK with spaces'), build_tools=str(bt), android_jar=str(jar))
                 with patch.dict(pack.os.environ, {'JAVA_HOME': str(java)}):
                     with self.assertRaisesRegex(ValueError, missing): pack.configure_tools(args)
+
+    def test_javac_wrapper_reports_real_jdk_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); java = root / 'real JDK'; bt = root / 'sdk'; jar = bt / 'android.jar'
+            for path in [bt / n for n in ('aapt2', 'd8', 'zipalign', 'apksigner', 'android.jar')] + \
+                        [java / 'bin' / n for n in ('java', 'javac', 'keytool')] + [java / 'release']:
+                path.parent.mkdir(parents=True, exist_ok=True); path.write_text('#!/bin/sh\nexit 0\n'); path.chmod(0o755)
+            wrapper = root / 'wrappers/bin/javac'; wrapper.parent.mkdir(parents=True)
+            wrapper.write_text('#!/bin/sh\nprintf "    java.home = %s\\n" "$FIXTURE_JDK_HOME" >&2\n'); wrapper.chmod(0o755)
+            args = SimpleNamespace(sdk=str(bt), build_tools=str(bt), android_jar=str(jar))
+            with patch.dict(pack.os.environ, {'JAVA_HOME': '', 'FIXTURE_JDK_HOME': str(java)}), patch.object(pack.shutil, 'which', return_value=str(wrapper)):
+                pack.configure_tools(args)
+            self.assertEqual(pack.JAVA, str(java))
 
     def test_unchanged_apk_reuses_verified_products(self):
         for limit, bundle in ((1, True), (1000000, True), (1, False)):

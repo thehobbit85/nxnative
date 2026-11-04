@@ -322,6 +322,15 @@ $(B)/t_time_android: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $<
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
+.PHONY: android-program android-program-build
+run: android-program
+android-program: $(B)/t_android_program
+	$(B)/t_android_program
+$(B)/t_android_program: t_android_program.c ../../android/app/program_boot.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -o $@ $<
+android-program-build: $(B)/t_android_program $(B)/t_oe_android
+$(B)/t_oe_android: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $<
 # Run a synthetic worker through thread_main, the guest stack switch, the SVC gate and bionic signals.
 .PHONY: android-scheduler-build
 android-scheduler-build: $(B)/t_android_scheduler $(B)/t_thread_leak
