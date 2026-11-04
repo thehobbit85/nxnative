@@ -41,6 +41,12 @@ OpFunctionEnd
 
 
 class AndroidShaderTests(unittest.TestCase):
+    def test_packaged_geometry_stage_is_preserved_without_claiming_runtime_support(self):
+        for stage in ('gs', 'hs', 'ds'):
+            self.assertEqual(vk.vk_txt({'stage': stage, 'bindings': []}), f'stage {stage}\n')
+        with self.assertRaisesRegex(ValueError, 'stage'):
+            vk.vk_txt({'stage': 'invalid', 'bindings': []})
+
     @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val'), 'requires SPIRV-Tools')
     def test_storage_image_contract(self):
         with tempfile.TemporaryDirectory() as tmp:

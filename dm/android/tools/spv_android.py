@@ -142,7 +142,9 @@ RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'img', 'sbuf', 'tbuf'
 
 def vk_txt(meta):
     """Encode the stage, vertex inputs and guest source of each descriptor for the Vulkan executor."""
-    if meta['stage'] not in ('vs', 'ps', 'cs'):
+    # Shader packages include unused geometry/tessellation programs. Preserve
+    # their real stages; exporting assets does not imply runtime stage support.
+    if meta['stage'] not in ('vs', 'ps', 'cs', 'gs', 'hs', 'ds'):
         raise ValueError(f"unsupported Vulkan stage: {meta['stage']}")
     lines = [f"stage {meta['stage']}"]
     if meta.get('tg'):
@@ -199,6 +201,7 @@ def export(pkg, keys, out):
         for i in range(0, len(keys), 512):
             subprocess.run([sys.executable, TOOLS / 'own_compilers.py', pkg, cache, *keys[i:i + 512]], env=env, check=True)
         libraries, = cache.glob('b-*')
+        stage_counts = collections.Counter()
         for key in keys:
             spv = captured / (key + '.spv')
             refl = json.loads((libraries / (key + '_b.json')).read_text())
@@ -208,7 +211,11 @@ def export(pkg, keys, out):
             subprocess.run([validator, '--target-env', 'vulkan1.1', binary], check=True)
             meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads') if k in refl}
             meta.update(key=key, tg=refl.get('threadgroup_size'), bindings=vk_reflect(data, refl))
+            stage_counts[meta['stage']] += 1
             (dest / (key + '.vk.txt')).write_text(vk_txt(meta))
+        for stage in ('gs', 'hs', 'ds'):
+            if stage_counts[stage]:
+                print(f'[RED] Vulkan runtime does not execute {stage}: preserved {stage_counts[stage]} shader assets; games using them still require that feature', flush=True)
         dest.rename(out)
     print(f'Exported {len(keys)} validated Vulkan shader stages to {out}')
 

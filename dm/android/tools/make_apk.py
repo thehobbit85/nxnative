@@ -196,10 +196,17 @@ def deploy(a):
         run(adb, '-s', a.serial, 'shell', f'set -e; test -d {source}/dm; test -d {source}/romfs; test -d {source}/vk; '
             + f'for d in dm vk font romfs aoc; do if test -d {source}/$d; then cp -R {source}/$d/. {stage}/$d/; fi; done')
     else:
+        parents = sorted({os.path.dirname(stage + '/' + rel) for rel, _ in files})
+        if parents: run(adb, '-s', a.serial, 'shell', 'mkdir -p ' + ' '.join(map(shlex.quote, parents)))
+        groups = {}
         for rel, src in files:
             dst = stage + '/' + rel
-            run(adb, '-s', a.serial, 'shell', 'mkdir -p ' + shlex.quote(os.path.dirname(dst)))
-            run(adb, '-s', a.serial, 'push', src, dst, stdout=subprocess.DEVNULL)
+            if os.path.basename(src) != os.path.basename(dst):
+                run(adb, '-s', a.serial, 'push', src, dst, stdout=subprocess.DEVNULL)
+            else: groups.setdefault(os.path.dirname(dst), []).append(src)
+        for parent, sources in groups.items():
+            for offset in range(0, len(sources), 64):
+                run(adb, '-s', a.serial, 'push', *sources[offset:offset + 64], parent + '/', stdout=subprocess.DEVNULL)
     run(adb, '-s', a.serial, 'shell', f'set -e; for d in dm vk font romfs aoc; do rm -rf {ext}/$d; mv {stage}/$d {ext}/$d; done; rmdir {stage}')
     print(f'game files in {ext}')
 
