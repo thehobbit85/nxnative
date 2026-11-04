@@ -1583,17 +1583,19 @@ static VkPipeline pso_get(const pso_key *k, VkPipelineLayout pl) {
 typedef struct { uint64_t addr, size, gen; VkDeviceSize off; } dcopy;
 #define NDC 4096
 static dcopy g_dc[NDC]; static int g_ndc;
-static VkDeviceSize copy_in(uint64_t addr, uint64_t size, VkDeviceSize align) {   // guest memory → ring, reused when the same range is asked for again unchanged (hashed by address)
+static VkDeviceSize copy_in_at(uint64_t addr, uint64_t size, VkDeviceSize align, VkDeviceSize prefix) {   // a prefix can align a typed view inside an overlapping storage range
     gw_wait_prior(addr, size);
     dcopy *e = &g_dc[(addr >> 4 ^ addr >> 13) % NDC];
-    if (e->addr == addr && e->size >= size && e->gen == g_wgen && e->gen && !(e->off % align)) return e->off;
+    if (e->addr == addr && e->size >= size && e->gen == g_wgen && e->gen && e->off % align == prefix) return e->off;
     int gpu = 0;
     pthread_mutex_lock(&g_gwmu);
     for (size_t i = 0; i < g_ngw; i++) gpu |= overlaps(addr, size, g_gw[i].addr, g_gw[i].size);
     pthread_mutex_unlock(&g_gwmu);
     if (gpu) pass_end();
-    VkDeviceSize o = ring_put((const void *)(uintptr_t)addr, size, align);
-    if (o == VK_WHOLE_SIZE) return o;
+    if (prefix >= align || size > UINT64_MAX - prefix) die("Vulkan: invalid buffer snapshot padding");
+    VkDeviceSize base = ring_alloc(size + prefix, align), o = base + prefix;
+    if (prefix) memset(C->ringp + base, 0, prefix);
+    memcpy(C->ringp + o, (const void *)(uintptr_t)addr, size);
     if (gpu) {
         barrier_all(C->cb);
         pthread_mutex_lock(&g_gwmu);
@@ -1614,6 +1616,7 @@ static VkDeviceSize copy_in(uint64_t addr, uint64_t size, VkDeviceSize align) { 
     *e = (dcopy){addr, size, g_wgen, o};
     return o;
 }
+static VkDeviceSize copy_in(uint64_t addr, uint64_t size, VkDeviceSize align) { return copy_in_at(addr, size, align, 0); }
 static uint64_t g_tex_miss[4];   // texture slots read as the black dummy: 0 no handle bound, 1 handle not registered, 2 texture not created, 3 no view (logged with the frame stats)
 int nvn_dpool_base(const void *pool, int texture);   // shared recorder's host-table numbering
 // Index widening/scanning and descriptor-handle decoding happen on the CPU.
@@ -1785,7 +1788,8 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
 // ranges share one backing allocation, so writes and atomics through either
 // descriptor see the same bytes, including across vertex and fragment sets.
 #define MAX_BUFFER_BINDINGS (2 * 64 * 32) // two stages, reflected bindings, descriptor-array elements
-static gw_t g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
+typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; int has_texel; } storage_range;
+static storage_range g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
 static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
 typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes; } texel_range;
 static int texel_binding(const sbind *b, int stage, uint32_t element, texel_range *out) {
@@ -1833,7 +1837,7 @@ static p_bind_buf storage_binding(const sbind *b, int stage) {
     return u;
 }
 static int storage_order(const void *a, const void *b) {
-    uint64_t x = ((const gw_t *)a)->addr, y = ((const gw_t *)b)->addr;
+    uint64_t x = ((const storage_range *)a)->addr, y = ((const storage_range *)b)->addr;
     return (x > y) - (x < y);
 }
 static int prepare_storage(shader_t **first, shader_t **second) {
@@ -1852,16 +1856,23 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             if (u.size > UINT64_MAX - u.addr) return 0;
             if (!is_texel(b) && u.size > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "storage range exceeds the device descriptor limit: requires shader address lowering"); return 0; }
             if (g_nstorage == sizeof g_storage / sizeof *g_storage) die("Vulkan: too many storage bindings");
-            g_storage[g_nstorage++] = (gw_t){.addr=u.addr, .size=u.size};
+            g_storage[g_nstorage++] = (storage_range){.addr=u.addr, .size=u.size, .texel=u.addr, .has_texel=is_texel(b)};
             }
         }
     }
     qsort(g_storage, g_nstorage, sizeof *g_storage, storage_order);
+    VkDeviceSize texel_align = g_props.limits.minTexelBufferOffsetAlignment;
     size_t n = 0;
     for (size_t i = 0; i < g_nstorage; i++) {
-        gw_t *r = &g_storage[i];
+        storage_range *r = &g_storage[i];
         if (n && overlaps(g_storage[n-1].addr, g_storage[n-1].size, r->addr, r->size)) {
-            gw_t *prev = &g_storage[n-1];
+            storage_range *prev = &g_storage[n-1];
+            if (r->has_texel) {
+                if (prev->has_texel && prev->texel % texel_align != r->texel % texel_align) {
+                    RED_ONCE(23, "overlapping typed views have incompatible alignment: texel-coordinate lowering required"); return 0;
+                }
+                prev->has_texel = 1; prev->texel = r->texel;
+            }
             uint64_t end = r->addr + r->size;
             if (end > prev->addr + prev->size) prev->size = end - prev->addr;
         } else g_storage[n++] = *r;
@@ -1870,9 +1881,10 @@ static int prepare_storage(shader_t **first, shader_t **second) {
     VkDeviceSize align = g_props.limits.minStorageBufferOffsetAlignment;
     if (align < g_props.limits.minTexelBufferOffsetAlignment) align = g_props.limits.minTexelBufferOffsetAlignment;
     for (size_t i = 0; i < n; i++) {
-        gw_t *r = &g_storage[i];
-        if (gw_find(r->addr, r->size, align, &r->buf, &r->off, &r->p)) continue;
-        VkDeviceSize offset = copy_in(r->addr, r->size, align);
+        storage_range *r = &g_storage[i];
+        VkDeviceSize prefix = r->has_texel ? (texel_align - (r->texel - r->addr) % texel_align) % texel_align : 0;
+        if (!prefix && gw_find(r->addr, r->size, align, &r->buf, &r->off, &r->p)) continue;
+        VkDeviceSize offset = copy_in_at(r->addr, r->size, align, prefix);
         if (offset == VK_WHOLE_SIZE) return 0;
         r->buf = C->ring; r->off = offset; r->p = C->ringp + offset;
     }
@@ -1883,7 +1895,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             p_bind_buf u=storage_binding(&s->b[b],s->stage);
             if(!u.addr || !u.size) continue;
             for(size_t i=0;i<n;i++) if(u.addr>=g_storage[i].addr && u.addr-g_storage[i].addr<g_storage[i].size) {
-                bias[b]=(uint32_t)((u.addr-g_storage[i].addr)%g_props.limits.minStorageBufferOffsetAlignment);break;
+                bias[b]=(uint32_t)((g_storage[i].off+u.addr-g_storage[i].addr)%g_props.limits.minStorageBufferOffsetAlignment);break;
             }
         }
         shader_t *variant=buffer_variant(s,bias);
@@ -1894,7 +1906,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
 }
 static int prepared_storage(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off, uint8_t **p) {
     for (size_t i = 0; i < g_nstorage; i++) {
-        const gw_t *r = &g_storage[i];
+        const storage_range *r = &g_storage[i];
         if (r->buf && addr >= r->addr && addr - r->addr < r->size && size <= r->size - (addr - r->addr)) {
             *buf = r->buf; *off = r->off + addr - r->addr; *p = r->p + (addr - r->addr); return 1;
         }
