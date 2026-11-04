@@ -4,6 +4,7 @@ import importlib.util
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('make_apk', Path(__file__).resolve().parents[1] / 'tools/make_apk.py')
 assert spec is not None and spec.loader is not None
@@ -12,6 +13,26 @@ spec.loader.exec_module(pack)
 
 
 class Packaging(unittest.TestCase):
+    def test_deploy_keeps_test_assets_in_test_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'shader/vk').mkdir(parents=True)
+            (root / 'extract/game/RomFS').mkdir(parents=True)
+            for test in (False, True):
+                for remote in (False, True):
+                    with self.subTest(test=test, remote=remote), patch.object(pack, 'run') as run:
+                        args = ['0100633007D48000', tmp, '--deploy', '--serial', 'emulator-5554']
+                        if test:
+                            args.append('--test')
+                        if remote:
+                            args.extend(['--from-device', '/sdcard/source'])
+                        pack.main(args)
+                        commands = '\n'.join(str(c.args) for c in run.call_args_list)
+                        target = '/sdcard/Android/data/' + pack.package(args[0], test) + '/files'
+                        self.assertIn(target, commands)
+                        other = '/sdcard/Android/data/' + pack.package(args[0], not test) + '/files'
+                        self.assertNotIn(other, commands)
+
     def test_piece_ranges_reconstruct_archive(self):
         # Two adjacent entries plus the archive table: every byte is covered once.
         data = struct.pack('<IIIQIIQII', 40, 8, 2, 1, 44, 48, 2, 48, 52) + b'AAAABBBB'

@@ -230,22 +230,13 @@ public class MenuActivity extends Activity {
         return ext != null && new File(ext, "romfs").isDirectory() && new File(ext, "dm").isDirectory() && new File(ext, "vk").isDirectory();
     }
 
-    // The cheats of the bundled file, numbered as the host numbers them (dm/host/hle_cheats.c: [Name] entries with code; {Name} master codes always run and are not listed)
+    // Stable host keys, including duplicate suffixes; master codes always run.
     private List<String> cheatNames() {
         List<String> out = new ArrayList<>();
         File f = new File(getFilesDir(), "cheats.txt");
         if (!f.exists()) return out;
         try (BufferedReader r = new BufferedReader(new InputStreamReader(new java.io.FileInputStream(f), StandardCharsets.UTF_8))) {
-            String cur = null; boolean code = false; String l;
-            while ((l = r.readLine()) != null) {
-                l = l.trim();
-                if (l.startsWith("[") || l.startsWith("{")) {
-                    if (cur != null && code) out.add(cur);
-                    int close = l.indexOf(l.startsWith("[") ? ']' : '}');
-                    cur = l.startsWith("[") && close > 0 ? l.substring(1, close) : null; code = false;
-                } else if (l.matches("(?i)[0-9a-f]{8}(?:\\s+[0-9a-f]{8})*")) code = true;
-            }
-            if (cur != null && code) out.add(cur);
+            return CheatSelections.keys(r);
         } catch (Exception e) { /* unreadable: no cheats */ }
         return out;
     }
@@ -287,12 +278,12 @@ public class MenuActivity extends Activity {
         showFps = new CheckBox(this); showFps.setText("Show frame rate"); showFps.setTextColor(Color.WHITE); showFps.setChecked(prefs.getBoolean("showfps", false));
         col.addView(showFps);
         List<String> cheats = cheatNames();
-        Set<String> on = prefs.getStringSet("cheats", new HashSet<>());
+        Set<String> on = prefs.getStringSet("cheat_keys", new HashSet<>());
         if (cheats.isEmpty()) col.addView(text("No cheats are bundled for this build.", 15, false));
         else {
             col.addView(text("Cheats (choose which to enable)", 18, true));
             for (int i = 0; i < cheats.size(); i++) {
-                CheckBox c = new CheckBox(this); c.setText(cheats.get(i)); c.setTextColor(Color.WHITE); c.setChecked(on.contains(String.valueOf(i + 1)));
+                CheckBox c = new CheckBox(this); c.setText(cheats.get(i)); c.setTextColor(Color.WHITE); c.setChecked(on.contains(cheats.get(i)));
                 cheatBoxes.add(c); col.addView(c);
             }
         }
@@ -315,11 +306,11 @@ public class MenuActivity extends Activity {
     }
     private void save() {
         Set<String> on = new HashSet<>(); StringBuilder list = new StringBuilder();
-        for (int i = 0; i < cheatBoxes.size(); i++) if (cheatBoxes.get(i).isChecked()) { on.add(String.valueOf(i + 1)); list.append(cheatBoxes.get(i).getText()).append('\n'); }
+        for (CheckBox box : cheatBoxes) if (box.isChecked()) { String key = box.getText().toString(); on.add(key); list.append(key).append('\n'); }
         String[] langs = {"es-419", "en-US", "system"};
         prefs.edit().putInt("opmode", mode.getSelectedItemPosition() == 1 ? 1 : 0).putInt("fps", fps.getSelectedItemPosition() == 1 ? 30 : 60)
              .putBoolean("stretch", fit.getSelectedItemPosition() == 1).putString("lang", langs[lang.getSelectedItemPosition()])
-             .putBoolean("showfps", showFps.isChecked()).putStringSet("cheats", on).putBoolean("skip", skip.isChecked()).apply();
+             .putBoolean("showfps", showFps.isChecked()).putStringSet("cheat_keys", on).putBoolean("skip", skip.isChecked()).apply();
         String l = langs[lang.getSelectedItemPosition()]; if (l.equals("system")) l = systemLang();
         try (BufferedReader r = new BufferedReader(new InputStreamReader(new java.io.FileInputStream(new File(getFilesDir(), "cheats-build.txt")), StandardCharsets.UTF_8))) {
             String bid = r.readLine();

@@ -163,7 +163,7 @@ def game_files(b):   # (path in the app's external folder, source) for every gam
 def deploy(a):
     sdk = a.sdk or os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME')
     adb = os.path.join(sdk, 'platform-tools', 'adb') if sdk else 'adb'
-    ext = f'/sdcard/Android/data/{package(a.id)}/files'
+    ext = f'/sdcard/Android/data/{package(a.id, a.test)}/files'
     if a.from_device:   # copied on the device: much faster than over USB
         run(adb, '-s', a.serial, 'shell', f'mkdir -p {ext} && for d in romfs dm vk font; do rm -rf {ext}/$d; cp -r {shlex.quote(a.from_device)}/$d {ext}/$d; done')
     else:   # adb cannot make folders inside Android/data (Android 13: secure_mkdirs is refused): pushed to /data/local/tmp, then copied on the device

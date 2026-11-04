@@ -249,3 +249,11 @@ All read on 2026-10-26 at Atmosphère commit [`6b0c077b4c608a3a2ee712b8dc35fee87
 - `libraries/libmesosphere/source/kern_k_debug_base.cpp` (`ReadMemory`, `WriteMemory`), `kern_k_page_table_base.cpp` (`CanReadWriteDebugMemory`, `ReadDebugMemory`, `WriteDebugMemory`, `SetHeapSize`), `svc/kern_svc_debug.cpp`, `svc/kern_svc_physical_memory.cpp` (`MapPhysicalMemory`): which pages a debugger reaches, where the heap and virtual address memory live.
 
 No secondary source was needed. The host column comes from [docs/development.md, Cheats](../development.md#cheats) and `dm/host/hle_cheats.c` as of 2026-10-26 (the engine was brought to this table's reference semantics that day: failed accesses, reachable memory, the per-pass register reset).
+
+### Android menu selections with duplicate names
+
+- **Symptom:** choosing the second cheat with the same display name enables the first one.
+- **Cause:** the donor menu's ordinal selections were adapted to current `.enabled` files by writing raw display names; the shared host uses disambiguated keys.
+- **Fix:** the menu uses the host's name keys, including duplicate suffixes, masters and labels in the duplicate count, and the same UTF-8 name limit. Preferences retain keys rather than menu positions.
+- **Check:** `dm/android/tests/CheatSelectionsTest.java` covers duplicate names, master/label counts, inline and packed code words, and truncated names.
+- **Found on:** the synthetic Android integration in [Android parity](../android-parity.md#integration-milestone-checks).
