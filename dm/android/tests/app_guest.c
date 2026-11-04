@@ -1,0 +1,95 @@
+// Synthetic guest for the release-linked Android app. No commercial game data.
+// Uses rewritten SVC instructions and relocated NVN imports, including presentation.
+#include "nvn_protos.h"
+#include <stddef.h>
+#include <stdint.h>
+extern void *nvnBootstrapLoader(const char *);
+typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attributes, pad; } pad_state;
+extern int hid_read(pad_state *, int, const uint32_t *);
+extern uint32_t fs_mount(const char *, const void *), fs_open(uint64_t *, const char *, int);
+extern uint32_t fs_create(const char *, int64_t), fs_read(size_t *, uint64_t, int64_t, void *, size_t);
+extern uint32_t fs_write(uint64_t, int64_t, const void *, size_t, const void *), fs_commit(const char *);
+extern void fs_close(uint64_t);
+#define API(name) ((NVNT_##name)nvnBootstrapLoader(#name))
+void *memset(void *p, int c, size_t n) { unsigned char *b = p; while (n--) *b++ = c; return p; }
+void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = d; const unsigned char *b = s; while (n--) *a++ = *b++; return d; }
+static void message(const char *s, size_t n) {
+    register const char *x0 __asm__("x0") = s; register size_t x1 __asm__("x1") = n;
+    __asm__ volatile("svc #0x27" : "+r"(x0), "+r"(x1) : : "memory");
+}
+#define NOTE(s) message(s, sizeof(s) - 1)
+static void sleep_frame(void) {
+    register long x0 __asm__("x0") = 16666667;
+    __asm__ volatile("svc #0x0b" : "+r"(x0) : : "memory");
+}
+static void require(int ok) { if (!ok) { NOTE("APP_FIXTURE_FAILED\n"); for (;;) sleep_frame(); } }
+static void check_save(void) {
+    require(fs_mount("save", 0) == 0);
+    uint64_t file; uint32_t value[2] = {0x4e585350, 0}; size_t got = 0;
+    if (fs_open(&file, "save:/integration.bin", 1) == 0) {
+        require(fs_read(&got, file, 0, value, sizeof value) == 0 && got == sizeof value && value[0] == 0x4e585350);
+        fs_close(file); NOTE("APP_FIXTURE_SAVE_RETAINED\n");
+    } else require(fs_create("save:/integration.bin", sizeof value) == 0);
+    value[1]++; require(fs_open(&file, "save:/integration.bin", 2) == 0);
+    uint32_t options = 0; require(fs_write(file, 0, value, sizeof value, &options) == 0);
+    fs_close(file); require(fs_commit("save") == 0); NOTE("APP_FIXTURE_SAVE_COMMITTED\n");
+}
+void _init_libc0(void) {}
+void nnosInitialize(uint64_t main_handle, uint64_t arg) { require(main_handle != 0 && arg == 0); }
+void _init_libc1(void) {}
+void nninitInitializeSdkModule(void) {}
+void _ZN2nn2os11SetHostArgcEi(int argc) { require(argc >= 1); }
+void _ZN2nn2os11SetHostArgvEPPc(char **argv) { require(argv && argv[0]); }
+void nninitStartup(void) { NOTE("APP_FIXTURE_SDK_READY\n"); }
+void _init_libc2(void) {}
+static _Alignas(16384) unsigned char storage[1 << 20];
+void nnMain(void) {
+    NOTE("APP_FIXTURE_MAIN\n");
+    check_save();
+    NVNdevice device; NVNdeviceBuilder db;
+    API(nvnDeviceBuilderSetDefaults)(&db); require(API(nvnDeviceInitialize)(&device, &db));
+    NVNqueue queue; NVNqueueBuilder qb;
+    API(nvnQueueBuilderSetDefaults)(&qb); API(nvnQueueBuilderSetDevice)(&qb, &device);
+    require(API(nvnQueueInitialize)(&queue, &qb));
+    NVNmemoryPool pool; NVNmemoryPoolBuilder pb;
+    API(nvnMemoryPoolBuilderSetDefaults)(&pb); API(nvnMemoryPoolBuilderSetDevice)(&pb, &device);
+    API(nvnMemoryPoolBuilderSetStorage)(&pb, storage, sizeof storage);
+    API(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+    require(API(nvnMemoryPoolInitialize)(&pool, &pb));
+    NVNtexture tex[3]; NVNtexture *textures[] = {&tex[0], &tex[1], &tex[2]}; NVNtextureBuilder tb;
+    API(nvnTextureBuilderSetDefaults)(&tb); API(nvnTextureBuilderSetDevice)(&tb, &device);
+    API(nvnTextureBuilderSetTarget)(&tb, NVN_TEXTURE_TARGET_2D); API(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA8);
+    API(nvnTextureBuilderSetSize2D)(&tb, 64, 64);
+    require(API(nvnTextureBuilderGetStorageSize)(&tb) <= 32768);
+    for (int i = 0; i < 3; i++) {
+        API(nvnTextureBuilderSetStorage)(&tb, &pool, 65536 + i * 32768);
+        require(API(nvnTextureInitialize)(&tex[i], &tb));
+    }
+    NVNwindow window; NVNwindowBuilder wb;
+    API(nvnWindowBuilderSetDefaults)(&wb); API(nvnWindowBuilderSetDevice)(&wb, &device);
+    API(nvnWindowBuilderSetTextures)(&wb, 3, textures);
+    API(nvnWindowBuilderSetPresentInterval)(&wb, 1);
+    require(API(nvnWindowInitialize)(&window, &wb));
+    NVNcommandBuffer cb; require(API(nvnCommandBufferInitialize)(&cb, &device));
+    uint64_t last_buttons = 0;
+    for (unsigned frame = 0;; frame++) {
+        pad_state state; uint32_t id = 32;
+        require(hid_read(&state, 1, &id) == 1);
+        if (state.buttons && state.buttons != last_buttons) NOTE("APP_FIXTURE_BUTTON_DOWN\n");
+        if (!state.buttons && last_buttons) NOTE("APP_FIXTURE_BUTTON_UP\n");
+        last_buttons = state.buttons;
+        int index = 0; API(nvnQueueAcquireTexture)(&queue, &window, &index);
+        API(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, 65536);
+        API(nvnCommandBufferBeginRecording)(&cb);
+        const NVNtexture *target = textures[index];
+        API(nvnCommandBufferSetRenderTargets)(&cb, 1, &target, 0, 0, 0);
+        float color[] = {0.125f, 0.75f, 0.25f, 1};
+        API(nvnCommandBufferClearColor)(&cb, 0, color, 15);
+        NVNcommandHandle handle = API(nvnCommandBufferEndRecording)(&cb);
+        API(nvnQueueSubmitCommands)(&queue, 1, &handle);
+        API(nvnQueuePresentTexture)(&queue, &window, index);
+        API(nvnQueueFinish)(&queue);
+        if (frame % 60 == 0) NOTE("APP_FIXTURE_FRAME\n");
+        sleep_frame();
+    }
+}
