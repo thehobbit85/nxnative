@@ -133,6 +133,15 @@
 - **Fix:** general, in the profile lookup. `own_profile_folders` names every folder the script writes a game's provisional and derived profiles to (`<NSP folder>/<id>_build/profile`, `<work dir>/profile`, `--profile-out`), and `main` leaves them out of `by_title` and of `same_build`'s `by_build` (their `skip`). A provisional profile there is packed as provisional again, with its heap check, and a derived one is derived again from its registered profile. `derive_profile` stops with a `BuildError` rather than derive a profile onto its own folder. This also covers a multi-program game's provisional profiles that the first program's build put on `DM_GAMES_DIR` ([PR #2503](https://github.com/seedds/nxnative/pull/2503)). Tests: `test_the_builds_own_profile_is_not_taken_as_registered` (`test_nsp_work_dir.py`) and `test_a_profile_is_never_derived_onto_its_own_folder` (`test_nsp_incremental.py`).
 - **Found on:** [Chained Echoes](../../dm/games/0100C510166F0000/README.md) ([PR #2564](https://github.com/seedds/nxnative/pull/2564)), whose provisional profile had additional compute kernels to add. The tables came back from `shader/pkg.partial/tables`, and the prewarm list and the conflict rulings from their empty defaults.
 
+## Launcher text
+
+### Launcher buttons and settings cannot be translated
+
+- **Symptom:** the iOS and Mac launchers show English settings and buttons regardless of the app's language, and contributors must edit source code to translate them.
+- **Cause:** UI literals have no bundled string table; dynamic labels from `launcher.json` are rendered verbatim and have no translation keys.
+- **Fix:** both launchers look up a shared `Launcher.strings` table. The settings generator adds optional stable keys while retaining English fallbacks and the original values. Both app packers include the locale resources. The translation and compatibility contract is in [Translating the built-in launchers](../frontends.md#translating-the-built-in-launchers).
+- **Found on:** [issue #775](https://github.com/seedds/nxnative/issues/775), covering both launchers.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more
