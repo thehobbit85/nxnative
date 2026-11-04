@@ -46,7 +46,9 @@
 
 **Interfaces:** Each graphics/compute command gathers writable buffer bindings before encoding. Bindings that overlap within that command share storage and offsets; publication occurs only after successful command encoding.
 
-- [ ] Add vertex and fragment SSBO writes followed by a compute reader, and two overlapping SSBO descriptors used by one dispatch. Check writes, guards and raster output independently.
+- [x] Add vertex and fragment SSBO writes followed by compute readers; check three successive atomic draws, guards, raster output and submission splits.
+- [x] Implement graphics-stage write ownership and barriers, honoring read-only reflection.
+- [ ] Add two overlapping SSBO descriptors used by one dispatch and verify coherent aliases.
 - [ ] Implement per-stage ownership and barriers, then unify simultaneous overlapping bindings without losing byte aliases or alignment.
 - [ ] Cover CPU consumers of GPU-produced indices/handles, pool finalization, new pools at reused addresses and outstanding fences.
 - [ ] Run synthetic Metal/Vulkan comparisons and commit the validated behavior.

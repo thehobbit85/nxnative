@@ -15,7 +15,8 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/0000000000000003.spv $(B)/shaders/0000000000000004.spv $(B)/shaders/0000000000000021.spv $(B)/shaders/0000000000000022.spv $(B)/shaders/0000000000000031.spv $(B)/shaders/0000000000000032.spv \
          $(B)/shaders/0000000000000033.spv $(B)/shaders/0000000000000034.spv $(B)/shaders/0000000000000035.spv $(B)/shaders/0000000000000036.spv \
          $(B)/shaders/0000000000000037.spv $(B)/shaders/0000000000000038.spv \
-         $(B)/shaders/0000000000000039.spv $(B)/shaders/000000000000003a.spv $(B)/shaders/0000000000000040.spv
+         $(B)/shaders/0000000000000039.spv $(B)/shaders/000000000000003a.spv $(B)/shaders/0000000000000040.spv \
+         $(B)/shaders/0000000000000041.spv $(B)/shaders/0000000000000042.spv
 profile:
 	$(MAKE) -C $(HOST) GAME=$(GAME) game_profile
 $(B)/shaders/0000000000000040.spv: tests/buffer.comp tests/buffer.vk.txt
@@ -133,3 +134,12 @@ $(B)/shaders/000000000000003a.spv: tests/draw_parameters.frag tests/draw_paramet
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/draw_parameters.frag.vk.txt $(@:.spv=.vk.txt)
+
+$(B)/shaders/0000000000000041.spv: tests/storage.vert tests/storage.vert.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/storage.vert.vk.txt $(@:.spv=.vk.txt)
+$(B)/shaders/0000000000000042.spv: tests/storage.frag tests/storage.frag.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/storage.frag.vk.txt $(@:.spv=.vk.txt)

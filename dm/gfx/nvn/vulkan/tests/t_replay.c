@@ -11,6 +11,7 @@ uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); r
 uint64_t guest_ns(void) { return now_ns(); }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
+static prog_t storage_program = {.nstage = 2};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
@@ -24,6 +25,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x41 + stage; return 1; }
     if (p == &buffer_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x40; return 1; }
     if (p == &draw_parameters_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x39 + stage; return 1; }
     if (p == &origin_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x37 + stage; return 1; }
@@ -828,7 +830,43 @@ static void buffer_range_lifetime(void) {
     free(large);
     puts("600 live GPU buffer ranges and ring rollover retain their data through completion");
 }
+static void graphics_storage(void) {
+    tex_t target={.serial=0xb100,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&target.d,&target.L);
+    for(int split=0;split<2;split++) {
+        uint32_t vertices[5]={0xcafebabe,10,10,10,0xcafebabe}, fragments[66], vertex_result[3]={0}, fragment_result[64]={0};
+        for(int i=0;i<66;i++) fragments[i]=i==0||i==65?0xcafebabe:20;
+        uint8_t pixels[8*8*4]={0};list_t list={0};
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&storage_program,.stages=3);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)(vertices+1),.size=12);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=1,.index=0,.addr=(uintptr_t)(fragments+1),.size=256);
+        for(int draw=0;draw<3;draw++) {
+            uint32_t value=20+draw;push_constants(&list,0,240,&value,sizeof value);
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+            put(&list,OP_BARRIER,NULL,0);
+        }
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+        if(split) { put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);mtl_sub_commit();list.length=0; }
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&buffer_program,.stages=0x20);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(vertices+1),.size=12);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)vertex_result,.size=sizeof vertex_result);
+        RECORD(OP_DISPATCH,p_dispatch,.x=3,.y=1,.z=1);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(fragments+1),.size=256);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)fragment_result,.size=sizeof fragment_result);
+        RECORD(OP_DISPATCH,p_dispatch,.x=64,.y=1,.z=1);
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for(int i=0;i<3;i++) if(vertices[i+1]!=13||vertex_result[i]!=1013) {
+            fprintf(stderr,"graphics storage split%d vertex%d: %u/%u expected 13/1013\n",split,i,vertices[i+1],vertex_result[i]);abort();
+        }
+        for(int i=0;i<64;i++) assert(fragments[i+1]==23 && fragment_result[i]==1023 && !memcmp(pixels+4*i,(uint8_t[]){0,255,0,255},4));
+        assert(vertices[0]==0xcafebabe&&vertices[4]==0xcafebabe&&fragments[0]==0xcafebabe&&fragments[65]==0xcafebabe);
+    }
+    mtl_tex_release(&target);
+    puts("Vertex and fragment storage writes survive successive draws, compute consumers and fences");
+}
 int main(void) {
+    graphics_storage();
     readback_gpu_consumer();
     buffer_range_lifetime();
     ordered_buffers();
