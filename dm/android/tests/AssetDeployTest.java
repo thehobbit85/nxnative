@@ -66,7 +66,8 @@ public final class AssetDeployTest {
             try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(apk))) {
                 zip.putNextEntry(new ZipEntry("assets/game/external-files.txt")); zip.write(TEXT.getBytes(StandardCharsets.UTF_8)); zip.closeEntry();
             }
-            check(AssetDeploy.readManifest(apk).identity.equals(manifest().identity), "APK manifest differs");
+            try { AssetDeploy.readManifest(apk); throw new AssertionError("accepted legacy APK without native producer"); }
+            catch (IOException expected) { }
             try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(apk))) { zip.putNextEntry(new ZipEntry("other")); zip.closeEntry(); }
             try { AssetDeploy.readManifest(apk); throw new AssertionError("accepted APK without external contract"); }
             catch (IOException expected) { }

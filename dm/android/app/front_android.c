@@ -8,6 +8,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "front.h"
+#include "android_contract.h"
 #include <android/input.h>
 #include <android/keycodes.h>
 #include <android/looper.h>

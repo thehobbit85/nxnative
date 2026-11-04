@@ -16,6 +16,8 @@ import argparse, glob, hashlib, json, os, re, shutil, struct, subprocess, sys, t
 from pathlib import Path
 from xml.sax.saxutils import escape
 HERE = os.path.dirname(os.path.abspath(__file__)); ANDROID = os.path.dirname(HERE)
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from dm.android.tools.target_contract import target_manifest
 SDK = BT = JAR = JAVA = ''
 ENV = os.environ.copy()
 APK_GAME_LIMIT = int(os.environ.get('APK_GAME_LIMIT', '3800000000'))
@@ -98,7 +100,9 @@ def selected_inputs(a, lib, ks):
                     path = os.path.join(root, name); saves.append((os.path.relpath(path, a.save), path))
     icon = a.icon or next(iter(sorted(glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')))), None)
     java = sorted(glob.glob(os.path.join(ANDROID, 'app', 'java', '**', '*.java'), recursive=True))
-    sources = [('host', lib), ('keystore', ks), ('packer', __file__)]
+    sources = [('host', lib), ('keystore', ks), ('packer', __file__), ('target-contract', os.path.join(HERE, 'target_contract.py'))]
+    export_record = Path(a.build) / 'shader/vk/export-contract.json'
+    if export_record.is_file(): sources.append(('shader-export', str(export_record)))
     sources += [('game/' + rel, src) for rel, src in files] + [('save/' + rel, src) for rel, src in saves]
     sources += [('java', src) for src in java]
     sources += [(role, src) for role, src in (('icon', icon), ('env', a.env_file), ('cheats', a.cheats)) if src]
@@ -176,6 +180,7 @@ def build(a):
     for target in (output, receipt):
         if any(target == Path(source).resolve() for source in protected_sources) or any(target.is_relative_to(root.resolve()) for root in asset_roots):
             raise ValueError('output APK or receipt would replace or become part of a package input: ' + str(target))
+    contract = target_manifest(a, lib, files)
     configure_tools(a)
     output.parent.mkdir(parents=True, exist_ok=True)
     if not os.path.exists(ks):
@@ -213,6 +218,7 @@ def build(a):
                 z.write(a.cheats, 'assets/cheats/' + bid + '.txt')
                 z.writestr('assets/cheats-build.txt', bid)
             for rel, src in saves: z.write(src, 'assets/save/' + rel)
+            z.writestr('assets/game/target.tsv', contract)
             if not a.bundle:
                 listing = [f'{rel}\t{os.path.getsize(src)}\t=d\t{file_digest(src)}' for rel, src in files]
                 z.writestr('assets/game/external-files.txt', '\n'.join(listing) + '\n')
@@ -251,7 +257,8 @@ def build(a):
         run(os.path.join(BT, 'zipalign'), '-c', '-P', '16', '4', signed)
         # Discover again as well as hashing again: files added during compilation
         # must not be hidden by the original selection. Reject detected changes.
-        if key != input_key(a, selected_inputs(a, lib, ks)):
+        final_inputs = selected_inputs(a, lib, ks)
+        if key != input_key(a, final_inputs) or contract != target_manifest(a, lib, final_inputs[0]):
             raise ValueError('package inputs changed while building; retry with stable inputs')
         data_digest = file_digest(data_path) if data_path is not None else None
         staged_receipt = Path(w, 'build.json')
@@ -411,6 +418,7 @@ def main(argv=None):
     ap.add_argument('--save'); ap.add_argument('--cheats'); ap.add_argument('--label')
     ap.add_argument('--bundle', action='store_true'); ap.add_argument('--test', action='store_true')
     ap.add_argument('--library'); ap.add_argument('--sdk'); ap.add_argument('--build-tools'); ap.add_argument('--android-jar')
+    ap.add_argument('--profile', help='profile ID compiled into the host (default: application title ID)')
     ap.add_argument('--check-tools', action='store_true', help='validate SDK/JDK prerequisites without building')
     ap.add_argument('--keystore'); ap.add_argument('--version-code', type=int)
     ap.add_argument('--version-name', default='1.0', help='game display version (independent of --version-code)')

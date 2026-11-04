@@ -22,6 +22,7 @@ public final class AssetDeploy {
             if (result.entries.isEmpty()) throw new IOException("Empty separate-data manifest");
             for (GameAssets.Entry asset : result.entries.values())
                 if (!asset.data) throw new IOException("Invalid separate-data manifest transport");
+            TargetContract.checkApk(apk, result, null);
             return result;
         }
     }

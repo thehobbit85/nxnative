@@ -13,6 +13,8 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+from dm.android.tools.target_contract import host_contract, stamp_export
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
 
@@ -221,6 +223,7 @@ def export(pkg, keys, out):
     validator, optimizer = shutil.which('spirv-val'), shutil.which('spirv-opt')
     if not validator or not optimizer:
         raise ValueError('spirv-val and spirv-opt from SPIRV-Tools are required')
+    producer = host_contract()
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='vk-build-', dir=out.parent) as tmp:
         work = Path(tmp).resolve()
@@ -271,6 +274,7 @@ def export(pkg, keys, out):
         for stage in ('gs', 'hs', 'ds'):
             if stage_counts[stage]:
                 print(f'[RED] Vulkan runtime does not execute {stage}: preserved {stage_counts[stage]} shader assets; games using them still require that feature', flush=True)
+        stamp_export(dest, producer=producer)
         dest.rename(out)
     print(f'Exported {len(keys)} validated Vulkan shader stages to {out}')
 

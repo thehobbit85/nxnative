@@ -58,6 +58,7 @@ The separate asset deployment uses the merged RomFS image directly. Synthetic AP
 - [Incomplete Android package inputs](../../../docs/reference/packing.md#incomplete-android-package-inputs): preflight checks reject missing modules, resource pairs, explicit assets and wrong library ABIs.
 - [Android prerequisite failures](../../../docs/reference/packing.md#android-prerequisite-failures-after-native-compilation): early shared tool checks and asset-directory output protection.
 - [Incremental APK reuse](../../../docs/reference/packing.md#android-apk-rebuilt-despite-unchanged-inputs): selected-input and product hashes avoid unchanged repackaging; synthetic fixtures cover invalidation and interrupted publication.
+- [Android target compatibility](../../../docs/reference/packing.md#android-apk-combines-incompatible-prepared-inputs): producer-bound host/shader records and a portable module/asset contract checked before launch.
 - [Separate Android deployment](../../../docs/reference/packing.md#separate-android-deployment-mixes-asset-generations): the installed APK identifies expected data; the shared installer verifies, replaces and recovers managed roots.
 
 - [Vulkan export preserves packaged shader stages](../../../docs/reference/shaders.md#vulkan-export-preserves-packaged-shader-stages): Android export validates all 1,812 stages, including one geometry asset; runtime geometry support remains open.

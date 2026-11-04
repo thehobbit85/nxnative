@@ -56,6 +56,10 @@ $(OUT)/obj/%.o: ../% | profile
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 APP_OBJ := $(patsubst %,$(OUT)/obj/android/%.o,app/front_android.c)
+$(OUT)/android_contract.h: FORCE
+	python3 tools/target_contract.py $(GAME) $@
+$(APP_OBJ): $(OUT)/android_contract.h
+$(APP_OBJ): CFLAGS += -I$(OUT)
 $(OUT)/libdmhost.so: $(OBJ) $(APP_OBJ) $(CODEC_LIBS)
 	$(CC) -shared -o $@ $(OBJ) $(APP_OBJ) $(CODEC_LIBS) -Wl,--no-undefined -Wl,--error-limit=0 -Wl,-z,max-page-size=16384 -landroid -llog -laaudio -lvulkan -lmediandk -lm -ldl
 $(OUT)/dmhost: $(OBJ) $(CLI_OBJ) $(CODEC_LIBS)

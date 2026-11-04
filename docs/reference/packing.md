@@ -90,6 +90,13 @@
 - **Fix:** follow the Mac packer's shared selection/key approach: use the same file lists for hashing and packaging, including saves, auto-selected icons and cheat build metadata. Hash input contents, options, packer/Java sources and SDK tools; inventory the installed JDK runtime. A versioned receipt records the input digest and signed APK/companion hashes. Reuse requires all hashes to match. Recheck inputs before publication, and publish the receipt before the final APK rename so an interrupted publication cannot falsely reuse an older APK. A damaged content-named companion can be atomically restored; valid older archives remain untouched. Automatic version codes are assigned only when rebuilding.
 - **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic packaging fixtures. Checks cover same-size input changes, tools/runtime, saves, metadata, corrupted products/receipts, concurrent input changes and failed final publication. This reuse receipt is not a complete runtime capability manifest.
 
+### Android APK combines incompatible prepared inputs
+
+- **Symptom:** an APK contains a stale native host or shaders produced for another profile/chain; an asset directory alone cannot identify its required execution ABI.
+- **Cause:** the APK reuse receipt proves selected file bytes, but it does not identify the producer of an existing library/export or bind its protocol to the launcher's supported target.
+- **Fix:** embed the native producer contract in the compiled library, including profile/header/input hashes, TP slot, host ABI, descriptor schema, chain and exporter identity. The exporter stamps its validated products. Packaging compares actual producer records, rejects incompatible or unstamped inputs, and emits portable `target.tsv` with module build IDs/hashes and asset inventory. The menu and installed-APK deployment CLI verify the native record, library hash, supported protocol/backend and asset-manifest bindings before launch/publication. Installation still verifies asset contents and commits its identity; startup does not rehash multi-gigabyte RomFS data on every launch. This contract is compatibility evidence, not a renderer-completeness certificate.
+- **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through producer mismatch tests and synthetic APK startup checks.
+
 ### Separate Android deployment mixes asset generations
 
 - **Symptom:** a stopped ADB deployment leaves modules and assets from different builds; an unbundled APK accepts an unrelated data folder because the expected directories exist.

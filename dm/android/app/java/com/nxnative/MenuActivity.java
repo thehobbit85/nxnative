@@ -68,6 +68,7 @@ public class MenuActivity extends Activity {
                     manifest = GameAssets.Manifest.read(in); externalAssets = true;
                 }
             }
+            TargetContract.checkApk(new File(getApplicationInfo().sourceDir), manifest, getPackageName());
         } catch (Exception e) { preparationError = e.getMessage() != null ? e.getMessage() : e.toString(); }
         if (preparationError == null) seedFiles();
         if (!prefs.contains("lang")) {
