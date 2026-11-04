@@ -195,6 +195,9 @@ def build(a):
         asset_roots += [Path(item['build']) / 'font', Path(item['build']) / 'shader/vk', Path(item['patched'] or Path(item['build']) / 'patched_android')]
         asset_roots += [Path(path) for path in (item['aoc'], item['romfs']) if path and Path(path).is_dir()]
         if not item['romfs']: asset_roots += list(Path(item['build']).glob('extract/*/RomFS'))
+        asset_roots += [Path(item['build']) / 'html']
+        if item['romfs']: asset_roots += [Path(item['romfs']).parent / 'html']
+        else: asset_roots += list(Path(item['build']).glob('extract/*/html'))
     for target in (output, receipt):
         if any(target == Path(source).resolve() for source in protected_sources) or any(target.is_relative_to(root.resolve()) for root in asset_roots):
             raise ValueError('output APK or receipt would replace or become part of a package input: ' + str(target))
@@ -379,6 +382,13 @@ def game_files(b, patched=None, romfs=None, aoc=None):   # (path in the app's ex
     else:
         for root, _, fs in os.walk(romfs):
             for f in sorted(fs): p = os.path.join(root, f); out.append(('romfs/' + os.path.relpath(p, romfs), p))
+    # nx_extract puts each version's HtmlDocument NCAs beside its RomFS. Select
+    # exactly that version, including when more than one extraction is retained.
+    html = Path(romfs).parent / 'html'
+    if html.is_dir():
+        for root, dirs, fs in os.walk(html):
+            dirs.sort()
+            for f in sorted(fs): p = os.path.join(root, f); out.append(('html/' + os.path.relpath(p, html), p))
     if aoc:
         if not os.path.isdir(aoc): raise ValueError('missing DLC folder: ' + str(aoc))
         for root, _, fs in os.walk(aoc):
@@ -397,7 +407,7 @@ def deploy(a):
     adb = os.path.join(sdk, 'platform-tools', 'adb') if sdk else 'adb'
     ext = f'/sdcard/Android/data/{package(a.id, a.test)}/files'
     stage = ext + '/.nx-deploy'
-    roots = ('dm', 'vk', 'font', 'romfs', 'aoc', 'programs')
+    roots = ('dm', 'vk', 'font', 'romfs', 'aoc', 'html', 'programs')
     # The installed APK is the authority for this asset set. Reuse its Java
     # verifier/journal instead of maintaining a second transaction in shell.
     files = [] if a.from_device else package_files(a)

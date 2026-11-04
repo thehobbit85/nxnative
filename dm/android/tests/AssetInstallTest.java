@@ -85,10 +85,13 @@ public final class AssetInstallTest {
             check(new File(AssetInstall.prepare(root, OLD), "dm/prepared").exists(), "matching candidate not resumed");
             check(!new File(AssetInstall.prepare(root, NEW), "dm/prepared").exists(), "different candidate reused");
             write(new File(root, "aoc/stale"), "removed DLC");
+            write(new File(root, "html/stale"), "removed page");
             write(new File(root, "programs/2/romfs/old"), "removed program");
             write(new File(AssetInstall.prepare(root, NEW), "programs/1/romfs/new"), "child resources");
+            write(new File(AssetInstall.prepare(root, NEW), "html/html-document/index.html"), "new page");
             AssetInstall.publish(root, NEW, AssetInstall::move);
             check(Arrays.equals(new File(root, "aoc").list(), new String[0]), "removed DLC survived replacement");
+            check(!new File(root, "html/stale").exists() && read(new File(root, "html/html-document/index.html")).equals("new page"), "HTML was not replaced with the assets");
             check(!new File(root, "programs/2").exists() && read(new File(root, "programs/1/romfs/new")).equals("child resources"), "program resources not replaced together");
             write(new File(root, "dm/current"), "current");
             File duplicate = AssetInstall.prepare(root, NEW);

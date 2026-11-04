@@ -9,9 +9,9 @@ static void record(const char *files, int index, const void *data, size_t n) {
     if (n) assert(fwrite(data, n, 1, f) == 1); assert(!fclose(f));
 }
 static void paths(const char *root) {
-    char p[1024]; const char *keys[] = {"DM_ROMFS", "DM_VK_DIR", "DM_FONT_DIR", "DM_AOC_DIR"};
-    const char *dirs[] = {"romfs", "vk", "font", "aoc"};
-    for (int i = 0; i < 4; i++) { snprintf(p, sizeof p, "%s/%s", root, dirs[i]); assert(!strcmp(getenv(keys[i]), p)); unsetenv(keys[i]); }
+    char p[1024]; const char *keys[] = {"DM_ROMFS", "DM_VK_DIR", "DM_FONT_DIR", "DM_AOC_DIR", "DM_HTML"};
+    const char *dirs[] = {"romfs", "vk", "font", "aoc", "html"};
+    for (int i = 0; i < 5; i++) { snprintf(p, sizeof p, "%s/%s", root, dirs[i]); assert(getenv(keys[i]) && !strcmp(getenv(keys[i]), p)); unsetenv(keys[i]); }
 }
 int main(void) {
     char tmp[64] = "/tmp/nx-program-XXXXXX";

@@ -16,7 +16,7 @@ import java.util.Set;
 /** Replace only managed game roots; interrupted renames recover before Play. */
 final class AssetInstall {
     // The identity moves last: it is the commit point for the whole asset set.
-    static final String[] ROOTS = {"dm", "romfs", "vk", "font", "aoc", "programs", ".unpacked"};
+    static final String[] ROOTS = {"dm", "romfs", "vk", "font", "aoc", "html", "programs", ".unpacked"};
     interface Move { void run(File from, File to) throws IOException; }
     private AssetInstall() { }
     static final class Guard implements java.io.Closeable {

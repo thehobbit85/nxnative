@@ -44,7 +44,7 @@ static int dm_android_program_boot(const char *files, const char *ext, int hando
     if (count > 1) setenv("DM_EXEC_OUT", rec, 1); else unsetenv("DM_EXEC_OUT");
     int len = index ? snprintf(root, root_n, "%s/programs/%d", ext, index) : snprintf(root, root_n, "%s", ext);
     if (len < 0 || (size_t)len >= root_n) return -1;
-    const char *sub[][2] = {{"DM_ROMFS", "romfs"}, {"DM_VK_DIR", "vk"}, {"DM_FONT_DIR", "font"}, {"DM_AOC_DIR", "aoc"}};
+    const char *sub[][2] = {{"DM_ROMFS", "romfs"}, {"DM_VK_DIR", "vk"}, {"DM_FONT_DIR", "font"}, {"DM_AOC_DIR", "aoc"}, {"DM_HTML", "html"}};
     for (size_t i = 0; i < sizeof sub / sizeof *sub; i++) {
         if (snprintf(path, sizeof path, "%s/romfs/romfs.img", root) >= (int)sizeof path) return -1;
         if (i || access(path, R_OK)) if (snprintf(path, sizeof path, "%s/%s", root, sub[i][1]) >= (int)sizeof path) return -1;
