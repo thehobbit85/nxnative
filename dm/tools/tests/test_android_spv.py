@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'android/tools'))
 import spv_android as vk
@@ -41,6 +42,25 @@ OpFunctionEnd
 
 
 class AndroidShaderTests(unittest.TestCase):
+    def test_retry_reuses_content_addressed_compiles_but_recaptures_spirv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seen = []
+            def stop_before_translation(command, **kwargs):
+                env = kwargs['env']
+                seen.append(dict(env, metal_cache=str((Path(env['DMSH_CAS']) / 'metallib').resolve())))
+                raise RuntimeError('translation boundary')
+            for name in ('first', 'retry'):
+                with mock.patch.object(vk.subprocess, 'run', side_effect=stop_before_translation), \
+                     mock.patch.object(vk.shutil, 'which', side_effect=lambda name: '/tools/' + name):
+                    with self.assertRaisesRegex(RuntimeError, 'translation boundary'):
+                        vk.export(root / 'pkg', ['0' * 16], root / name)
+            self.assertNotEqual(seen[0]['DMSH_CAS'], seen[1]['DMSH_CAS'])
+            self.assertEqual(seen[0]['metal_cache'], seen[1]['metal_cache'])
+            self.assertEqual(Path(seen[0]['metal_cache']), (root / 'vk-metallib').resolve())
+            self.assertEqual(Path(seen[0]['DMSH_PREFILL']), root / 'cache')
+            self.assertNotEqual(seen[0]['DMSH_SPV_CAPTURE'], seen[1]['DMSH_SPV_CAPTURE'])
+
     @unittest.skipUnless(all(shutil.which(t) for t in ('spirv-as', 'spirv-val', 'spirv-opt')), 'requires SPIRV-Tools')
     def test_unused_descriptor_without_metal_metadata_is_removed(self):
         # The raw translator keeps unreferenced globals; SPIRV-Cross omits them

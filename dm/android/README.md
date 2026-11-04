@@ -35,6 +35,8 @@ It shares extraction, profile selection and shader discovery with Apple builds, 
 
 For a prepared folder, the standalone wrapper below remains available. It contains `patched_android/*.patched.bin` and their rewriter TSV files, `shader/vk/*.spv` and `*.vk.txt`, optional `font/`, and one `extract/*/RomFS` directory or `RomFS.img`. `--patched` and `--romfs` select an explicit version. Export shaders with `dm/android/tools/spv_android.py <shader-package> <new-output-directory> --keys-file <keys-file>`; the main builder does this automatically and checks product hashes before incremental reuse.
 
+Export retries retain compiled Metal libraries in `shader/vk-metallib`, keyed by their contents and compiler settings. They still translate and validate fresh Vulkan SPIR-V: the complete translation cache stays isolated from Apple jobs, whose texture operations can differ.
+
 ```sh
 python3 scripts/build_android.py <title-ID> <prepared-folder> <output.apk> --bundle
 ```
