@@ -48,6 +48,7 @@ public class MenuActivity extends Activity {
     private boolean playKeyDown;
     private TextView status; private android.widget.ProgressBar bar; private volatile boolean unpacking;
     private GameAssets.Manifest manifest;
+    private boolean externalAssets;
     private String preparationError;
     private static boolean installationActive; // Accessed on the UI thread, including worker completion callbacks.
 
@@ -58,9 +59,15 @@ public class MenuActivity extends Activity {
         try {
             File ext = getExternalFilesDir(null);
             if (ext == null) throw new java.io.IOException("Game storage is unavailable");
-            if (!installationActive) AssetInstall.recover(ext);
+            if (!installationActive) {
+                try (AssetInstall.Guard guard = AssetInstall.acquire(ext)) { AssetInstall.recover(ext); }
+            }
             try (InputStream in = getAssets().open("game/files.txt")) { manifest = GameAssets.Manifest.read(in); }
-            catch (java.io.FileNotFoundException e) { /* Separate-assets APK. */ }
+            catch (java.io.FileNotFoundException e) {
+                try (InputStream in = getAssets().open("game/external-files.txt")) {
+                    manifest = GameAssets.Manifest.read(in); externalAssets = true;
+                }
+            }
         } catch (Exception e) { preparationError = e.getMessage() != null ? e.getMessage() : e.toString(); }
         if (preparationError == null) seedFiles();
         if (!prefs.contains("lang")) {
@@ -111,7 +118,7 @@ public class MenuActivity extends Activity {
     }
     // ---- The game inside the APK ----
     private long versionCode() { try { return getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode(); } catch (Exception e) { return 0; } }
-    private boolean bundled() { return manifest != null; }
+    private boolean bundled() { return manifest != null && !externalAssets; }
     private static File gameFile(File root, String name) throws java.io.IOException {
         return GameAssets.path(root, name);
     }
@@ -262,6 +269,9 @@ public class MenuActivity extends Activity {
     }
     private boolean gameFilesPresent() {
         File ext = getExternalFilesDir(null);
+        if (ext == null) return false;
+        try { if (manifest == null || !manifest.identity.equals(AssetInstall.identity(ext))) return false; }
+        catch (Exception e) { return false; }
         return ext != null && new File(ext, "romfs").isDirectory() && new File(ext, "dm").isDirectory() && new File(ext, "vk").isDirectory();
     }
 
@@ -300,7 +310,7 @@ public class MenuActivity extends Activity {
         dataButton = new Button(this); dataButton.setText("Choose data file"); dataButton.setTextSize(18); dataButton.setVisibility(View.GONE);
         dataButton.setOnClickListener(v -> pickData()); col.addView(dataButton);
         if (!gameFilesPresent() && !bundled()) {
-            TextView w = text("Game files are missing from " + getExternalFilesDir(null) + " (romfs, dm, vk). Copy them from your computer and reopen the app.", 15, true);
+            TextView w = text("Game data is missing or belongs to another build. Install this APK's matching game data from your computer, then reopen the app.", 15, true);
             w.setTextColor(Color.rgb(255, 120, 120)); col.addView(w);
         }
         mode = spinner(col, "Console mode", new String[]{"Handheld", "Docked (TV, higher resolution)"}, prefs.getInt("opmode", 0) == 1 ? 1 : 0);
@@ -330,6 +340,7 @@ public class MenuActivity extends Activity {
         skip = new CheckBox(this); skip.setText("Skip this menu (hold − and + while playing to reopen it)"); skip.setTextColor(Color.WHITE);
         skip.setChecked(prefs.getBoolean("skip", false)); col.addView(skip);
         Button play = playButton = new Button(this); play.setText("Play (START)"); play.setTextSize(20);
+        if (externalAssets && !gameFilesPresent()) play.setEnabled(false);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); lp.topMargin = 28;
         play.setOnClickListener(v -> { save(); play(); });
         col.addView(play, lp);

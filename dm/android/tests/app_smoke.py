@@ -2,7 +2,7 @@
 """Exercise a synthetic APK on an explicitly selected ARM64 Android emulator.
 
 Installs/updates only the fixture's .test package. Requires app_fixture.py's modules
-and an APK made with --bundle --test. Artifacts contain no commercial game data.
+and a --test APK with bundled or already-deployed matching assets. Artifacts contain no commercial game data.
 """
 from pathlib import Path
 import argparse
@@ -28,7 +28,8 @@ def main():
     if not a.serial.startswith('emulator-'): p.error('this automated install test is restricted to an emulator')
     a.output.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(a.apk) as apk:
-        assets_id = hashlib.sha256(apk.read('assets/game/files.txt')).hexdigest()
+        manifest = 'assets/game/files.txt' if 'assets/game/files.txt' in apk.namelist() else 'assets/game/external-files.txt'
+        assets_id = hashlib.sha256(apk.read(manifest)).hexdigest()
     base = [a.adb, '-s', a.serial]
 
     def adb(*args, binary=False):
@@ -50,7 +51,7 @@ def main():
     version = match.group(1)
     adb('shell', 'am', 'force-stop', PACKAGE)
     adb('shell', 'am', 'start', '-W', '-n', PACKAGE + '/com.nxnative.MenuActivity')
-    wait_for(lambda: shell('cat ' + EXTERNAL + '/.unpacked 2>/dev/null || true').strip() == assets_id, 'bundled assets installed')
+    wait_for(lambda: shell('cat ' + EXTERNAL + '/.unpacked 2>/dev/null || true').strip() == assets_id, 'matching assets installed')
     shell("printf 'DM_DBG=1\\n' > " + EXTERNAL + '/env.txt')
 
     def start_guest():

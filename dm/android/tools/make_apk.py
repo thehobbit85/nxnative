@@ -78,7 +78,7 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 def selected_inputs(a, lib, ks):
     # The Mac packer uses the same selection for its reuse key and copies. Keep
     # that contract here too, including automatically discovered icons/saves.
-    files = game_files(a.build, a.patched, a.romfs, a.aoc) if a.bundle else []
+    files = game_files(a.build, a.patched, a.romfs, a.aoc)
     saves = []
     if a.save:
         for root, dirs, names in os.walk(a.save):
@@ -200,6 +200,9 @@ def build(a):
                 z.write(a.cheats, 'assets/cheats/' + bid + '.txt')
                 z.writestr('assets/cheats-build.txt', bid)
             for rel, src in saves: z.write(src, 'assets/save/' + rel)
+            if not a.bundle:
+                listing = [f'{rel}\t{os.path.getsize(src)}\t=d\t{file_digest(src)}' for rel, src in files]
+                z.writestr('assets/game/external-files.txt', '\n'.join(listing) + '\n')
             if a.bundle:
                 listing = []; stored = set(); raw = 0; dz = None; dn = dbytes = 0
                 for rel, src in files:
@@ -339,17 +342,27 @@ def game_files(b, patched=None, romfs=None, aoc=None):   # (path in the app's ex
             for f in sorted(fs): p = os.path.join(root, f); out.append(('aoc/' + os.path.relpath(p, aoc), p))
     return out
 
+def installed_apk(adb, serial, pkg):
+    result = subprocess.check_output([str(adb), '-s', serial, 'shell', 'pm', 'path', pkg], text=True, env=ENV)
+    paths = [line[len('package:'):] for line in result.splitlines() if line.startswith('package:') and line.endswith('/base.apk')]
+    if len(paths) != 1: raise ValueError('install the matching APK before deploying game data: ' + pkg)
+    return paths[0]
+
+
 def deploy(a):
     sdk = a.sdk or os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME')
     adb = os.path.join(sdk, 'platform-tools', 'adb') if sdk else 'adb'
     ext = f'/sdcard/Android/data/{package(a.id, a.test)}/files'
     stage = ext + '/.nx-deploy'
     roots = ('dm', 'vk', 'font', 'romfs', 'aoc')
-    # Validate local inputs before touching device assets. Stage all files, then
-    # replace only game roots; internal saves and settings are never deployed.
+    # The installed APK is the authority for this asset set. Reuse its Java
+    # verifier/journal instead of maintaining a second transaction in shell.
     files = [] if a.from_device else game_files(a.build, a.patched, a.romfs, a.aoc)
+    apk = installed_apk(adb, a.serial, package(a.id, a.test))
+    invoke = 'umask 000; CLASSPATH=' + shlex.quote(apk) + ' app_process /system/bin com.nxnative.AssetDeploy '
+    run(adb, '-s', a.serial, 'shell', invoke + '--check ' + shlex.quote(apk))
     run(adb, '-s', a.serial, 'shell', 'am force-stop ' + package(a.id, a.test))
-    run(adb, '-s', a.serial, 'shell', f'rm -rf {stage} && mkdir -p ' + ' '.join(stage + '/' + d for d in roots))
+    run(adb, '-s', a.serial, 'shell', f'umask 000; rm -rf {stage} && mkdir -p ' + ' '.join(stage + '/' + d for d in roots))
     if a.from_device:
         source = shlex.quote(a.from_device.rstrip('/'))
         run(adb, '-s', a.serial, 'shell', f'set -e; test -d {source}/dm; test -d {source}/romfs; test -d {source}/vk; '
@@ -366,10 +379,14 @@ def deploy(a):
         for parent, sources in groups.items():
             for offset in range(0, len(sources), 64):
                 run(adb, '-s', a.serial, 'push', *sources[offset:offset + 64], parent + '/', stdout=subprocess.DEVNULL)
-    # ADB-created directories may remain shell-owned 0770 on emulators. The app
-    # has a different UID; it needs read/traverse access inside its scoped folder.
-    # Touch only staged game assets, never internal saves or external settings.
-    run(adb, '-s', a.serial, 'shell', f'set -e; chmod -R a+rX {stage}; for d in dm vk font romfs aoc; do rm -rf {ext}/$d; mv {stage}/$d {ext}/$d; done; rmdir {stage}')
+    if installed_apk(adb, a.serial, package(a.id, a.test)) != apk:
+        raise ValueError('installed APK changed during deployment; retry with matching assets')
+    run(adb, '-s', a.serial, 'shell', 'am force-stop ' + package(a.id, a.test))
+    # Shell-created transaction directories must also be writable by the app so
+    # its next launch can finish rollback/cleanup after an interrupted deployment.
+    # Other applications remain excluded by Android scoped storage.
+    run(adb, '-s', a.serial, 'shell', f'chmod -R a+rwX {stage}')
+    run(adb, '-s', a.serial, 'shell', invoke + shlex.join([ext, apk]))
     print(f'game files in {ext}')
 
 def main(argv=None):

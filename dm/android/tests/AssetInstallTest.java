@@ -43,12 +43,43 @@ public final class AssetInstallTest {
             check(!new File(root, ".nx-previous").exists() && !new File(root, ".nx-install").exists(), "transaction leftovers");
         } finally { AssetInstall.remove(root); }
     }
+    private static void repairInterruption(int stop) throws Exception {
+        File root = Files.createTempDirectory("nx-install-repair").toFile();
+        try {
+            for (String name : AssetInstall.ROOTS) if (!name.startsWith(".")) write(new File(root, name + "/old"), name);
+            write(new File(root, ".unpacked"), NEW);
+            File stage = AssetInstall.prepare(root, NEW);
+            for (String name : AssetInstall.ROOTS) if (!name.startsWith(".")) write(new File(stage, name + "/new"), name);
+            int[] moves = {0};
+            try {
+                AssetInstall.publish(root, NEW, (from, to) -> {
+                    if (stop == -1) throw new IOException("before first rename");
+                    AssetInstall.move(from, to);
+                    if (++moves[0] == stop) throw new IOException("after rename");
+                }, true);
+                check(stop == 0, "repair interruption not reached");
+            } catch (IOException expected) { check(stop != 0, "unexpected repair error"); }
+            AssetInstall.recover(root); AssetInstall.recover(root);
+            boolean committed = stop == 0 || stop == 12;
+            for (String name : AssetInstall.ROOTS) if (!name.startsWith(".")) {
+                check(new File(root, name + "/new").exists() == committed, "mixed repair: " + name);
+                check(new File(root, name + "/old").exists() != committed, "lost original during repair: " + name);
+            }
+            check(AssetInstall.identity(root).equals(NEW), "repair lost installation identity");
+        } finally { AssetInstall.remove(root); }
+    }
     public static void main(String[] args) throws Exception {
         interruption(0, true); interruption(0, false); interruption(-1, true); interruption(-1, false);
         for (int i = 1; i <= 12; i++) interruption(i, true);
         for (int i = 1; i <= 6; i++) interruption(i, false);
+        repairInterruption(0); repairInterruption(-1);
+        for (int i = 1; i <= 12; i++) repairInterruption(i);
         File root = Files.createTempDirectory("nx-install-resume").toFile();
         try {
+            try (AssetInstall.Guard guard = AssetInstall.acquire(root)) {
+                try (AssetInstall.Guard other = AssetInstall.acquire(root)) { throw new AssertionError("concurrent installation accepted"); }
+                catch (IOException expected) { }
+            }
             File stage = AssetInstall.prepare(root, OLD);
             write(new File(stage, "dm/prepared"), "candidate");
             check(new File(AssetInstall.prepare(root, OLD), "dm/prepared").exists(), "matching candidate not resumed");

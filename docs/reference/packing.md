@@ -51,7 +51,7 @@
 
 - **Symptom:** the Android host aborts opening `dm/main.fixups.tsv` although ADB lists and reads the deployed file.
 - **Cause:** on the ARM64 API 35 emulator, ADB creates shell-owned directories with mode 0770; the app has another UID and cannot traverse them. Renaming the staged directories does not change their ownership or access bits.
-- **Fix:** `make_apk.py --deploy` grants read access and directory traversal (`a+rX`) to the staged game assets before replacing the live game roots. It changes neither internal saves nor existing external settings, and requires no root access. The assets remain inside the app's scoped external folder.
+- **Fix:** `make_apk.py --deploy` grants access to staged game assets before replacing the live game roots. Its recoverable installer also needs writable transaction directories (`a+rwX`), so the app can clean up after a shell-process interruption. It changes neither internal saves nor existing external settings, and requires no root access. Other applications remain excluded by Android scoped storage.
 - **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md), first Android deployment. After correcting these permissions, module loading succeeds and execution reaches `nnMain`; gameplay is a separate check.
 - **Check:** `dm/android/tests/test_packaging.py` runs the actual deployment shell steps on permission-restricted temporary files for both local and on-device sources, checking final readability/traversal and preservation of an external settings file. Both cases fail before the fix and pass afterward.
 
@@ -82,6 +82,13 @@
 - **Cause:** the donor APK packer had no input fingerprint or verified-product reuse check.
 - **Fix:** follow the Mac packer's shared selection/key approach: use the same file lists for hashing and packaging, including saves, auto-selected icons and cheat build metadata. Hash input contents, options, packer/Java sources and SDK tools; inventory the installed JDK runtime. A versioned receipt records the input digest and signed APK/companion hashes. Reuse requires all hashes to match. Recheck inputs before publication, and publish the receipt before the final APK rename so an interrupted publication cannot falsely reuse an older APK. A damaged content-named companion can be atomically restored; valid older archives remain untouched. Automatic version codes are assigned only when rebuilding.
 - **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic packaging fixtures. Checks cover same-size input changes, tools/runtime, saves, metadata, corrupted products/receipts, concurrent input changes and failed final publication. This reuse receipt is not a complete runtime capability manifest.
+
+### Separate Android deployment mixes asset generations
+
+- **Symptom:** a stopped ADB deployment leaves modules and assets from different builds; an unbundled APK accepts an unrelated data folder because the expected directories exist.
+- **Cause:** separate APKs carried no asset identity, and deployment replaced each live root with shell `rm`/`mv` commands without a journal or content verification.
+- **Fix:** separate APKs carry `game/external-files.txt` with expected paths, sizes and SHA-256 digests. The tool loads the installed APK's `AssetDeploy` through Android `app_process`, checks the contract before staging and rechecks the APK path before publication. The Java verifier rejects missing, extra, wrong or symlinked assets and transfers a verified candidate through `AssetInstall` on the same filesystem. A shared lock excludes menu recovery during publication. To repair damaged content whose marker is unchanged, move the old marker to the journal before touching any live data; the new marker still commits last. Reopening the menu recovers an interrupted replacement and requires its own manifest identity before Play. Saves/settings stay outside managed roots. Deployment requires one writer per application.
+- **Found on:** the [Hollow Knight Android integration](../../dm/games/0100633007D48000/README.md#android-integration), through synthetic separate-APK checks. Java tests interrupt every repair rename; emulator checks reject wrong data without changing live assets, repair corruption, deploy from device storage and recover an interrupted repair as the app UID.
 
 ### Interrupted Android asset updates
 

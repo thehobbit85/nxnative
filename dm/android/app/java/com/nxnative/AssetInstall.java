@@ -5,6 +5,10 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
@@ -15,6 +19,25 @@ final class AssetInstall {
     static final String[] ROOTS = {"dm", "romfs", "vk", "font", "aoc", ".unpacked"};
     interface Move { void run(File from, File to) throws IOException; }
     private AssetInstall() { }
+    static final class Guard implements java.io.Closeable {
+        final FileChannel channel;
+        final FileLock lock;
+        Guard(FileChannel channel, FileLock lock) { this.channel = channel; this.lock = lock; }
+        @Override public void close() throws IOException {
+            try { lock.release(); } finally { channel.close(); }
+        }
+    }
+    static Guard acquire(File root) throws IOException {
+        FileChannel channel = FileChannel.open(new File(root, ".nx-install.lock").toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        try {
+            FileLock lock = channel.tryLock();
+            if (lock == null) throw new IOException("Another game installation is active; reopen the app after it finishes");
+            return new Guard(channel, lock);
+        } catch (IOException | OverlappingFileLockException error) {
+            channel.close();
+            throw new IOException("Another game installation is active or storage cannot be locked", error);
+        }
+    }
 
     static String read(File file) throws IOException {
         if (!file.isFile()) return "";
@@ -74,14 +97,22 @@ final class AssetInstall {
         return stage;
     }
     static void publish(File root, String identity, Move rename) throws IOException {
+        publish(root, identity, rename, false);
+    }
+    static void publish(File root, String identity, Move rename, boolean repair) throws IOException {
         File stage = new File(root, ".nx-install"), previous = new File(root, ".nx-previous");
         if (!read(new File(stage, ".identity")).equals(identity)) throw new IOException("Game asset candidate changed");
         if (previous.exists()) throw new IOException("Game asset recovery is required before installation");
-        if (identity(root).equals(identity)) { remove(stage); return; }
+        if (!repair && identity(root).equals(identity)) { remove(stage); return; }
         write(new File(stage, ".unpacked"), identity);
         StringBuilder journal = new StringBuilder(identity + "\n");
         for (String name : ROOTS) if (new File(root, name).exists()) journal.append(name).append('\n');
         directory(previous); write(new File(previous, "journal"), journal.toString());
+        // Move the original commit marker before any data. A repair can have
+        // the same identity as the old set, so leaving that marker live during
+        // replacement would make recovery mistake a partial repair for commit.
+        File marker = new File(root, ".unpacked");
+        if (marker.exists()) rename.run(marker, new File(previous, ".unpacked"));
         for (String name : ROOTS) {
             File live = new File(root, name);
             if (live.exists()) rename.run(live, new File(previous, name));
