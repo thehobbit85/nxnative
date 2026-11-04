@@ -104,6 +104,10 @@ $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(
 .PHONY: symbols
 symbols: $(B)/t_symbols
 	$(B)/t_symbols
+.PHONY: android-symbols-build
+android-symbols-build: $(B)/t_symbols_android
+$(B)/t_symbols_android: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h ../android_text.h ../../android/compat/sha256.c $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $< ../../android/compat/sha256.c
 run: $(B)/t_system_event
 run: $(B)/t_audren_work
 $(B)/t_audren_work: t_audren_work.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)
