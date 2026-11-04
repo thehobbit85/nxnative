@@ -9,6 +9,8 @@
 int svc_thread(int, uint64_t *);
 uint32_t svc_thread_main_init(void);
 void guest_thread_init(void);
+void thr_counts(int *, int *, int *);
+int thr_limit_used(void);
 static _Atomic unsigned phases;
 static uint32_t read_end, write_end, worker, main_thread;
 static uint8_t *stack;
@@ -126,6 +128,61 @@ static void condition_order(void) {
     }
     assert(!atomic_load(&lock_word) && !atomic_load(&cond_key));
 }
+static _Atomic unsigned cancelled_phase;
+static void cancellation_worker(uintptr_t core) {
+    assert(dm_slot_get(g_keytls) != main_tls && dm_slot_get(g_keytlr) != main_tlr);
+    // Cancel before StartThread must be consumed exactly once. An immediate
+    // timeout is independent of the following cancellation of a blocked wait.
+    assert(gate(0, (uintptr_t)&read_end, 1, UINT64_MAX, 0x18) == 0xec01);
+    assert(gate(0, (uintptr_t)&read_end, 1, 0, 0x18) == 0xea01);
+    atomic_store(&cancelled_phase, 1);
+    assert(gate(0, (uintptr_t)&read_end, 1, UINT64_MAX, 0x18) == 0xec01);
+    atomic_store(&cancelled_phase, 2);
+    assert(!gate(0, (uintptr_t)&read_end, 1, UINT64_MAX, 0x18));
+    assert(gate(0, 0, 0, 0, 0x10) == core);
+    atomic_store(&cancelled_phase, 3);
+    gate(0, 0, 0, 0, 0x0a); abort();
+}
+static void repeated_lifetimes(void) {
+    int handles, live, objects;
+    thr_counts(&handles, &live, &objects);
+    assert(handles == 1 && live == 1 && objects == 1 && thr_limit_used() == 1);
+    for (unsigned cycle = 0; cycle < 64; cycle++) {
+        uint64_t r[32] = {0}; unsigned core = 1 + cycle % 2;
+        atomic_store(&cancelled_phase, 0);
+        call(0x45, r); write_end = r[1]; read_end = r[2];
+        r[1] = (uintptr_t)cancellation_worker; r[2] = core;
+        r[3] = (uintptr_t)stack + STACK_SIZE; r[4] = 30; r[5] = -2;
+        call(0x08, r); uint32_t thread = r[1];
+        assert(thr_limit_used() == 2);
+        r[2] = thread; call(0x0e, r); assert(r[1] == 0 && r[2] == 1);
+        r[0] = thread; r[1] = 28; call(0x0d, r);
+        r[1] = thread; call(0x0c, r); assert(r[1] == 28);
+        r[0] = thread; call(0x19, r);
+        r[0] = thread; call(0x09, r);
+        assert(atomic_load(&cancelled_phase) == 1);
+        r[0] = thread; call(0x19, r);
+        assert(atomic_load(&cancelled_phase) == 2);
+        // Keep the ideal core if allowed, otherwise select the first allowed
+        // core; the process default resets both ideal core and mask.
+        r[0] = thread; r[1] = -3; r[2] = 1u << core; call(0x0f, r);
+        r[2] = thread; call(0x0e, r); assert(r[1] == core && r[2] == (1u << core));
+        r[0] = thread; r[1] = -2; r[2] = 7; call(0x0f, r);
+        r[2] = thread; call(0x0e, r); assert(r[1] == 0 && r[2] == 1);
+        r[0] = thread; r[1] = -1; r[2] = 1u << core; call(0x0f, r);
+        r[2] = thread; call(0x0e, r); assert(r[1] == core && r[2] == (1u << core));
+        r[0] = write_end; call(0x11, r);
+        r[1] = (uintptr_t)&thread; r[2] = 1; r[3] = UINT64_MAX; call(0x18, r);
+        assert(atomic_load(&cancelled_phase) == 3 && thr_limit_used() == 1);
+        // Exited handles remain signaled until closed, then reject lookup.
+        r[1] = (uintptr_t)&thread; r[2] = 1; r[3] = 0; call(0x18, r);
+        r[0] = thread; call(0x16, r);
+        r[1] = thread; assert(svc_thread(0x25, r) && r[0] == 0xe401);
+        r[0] = write_end; call(0x16, r); r[0] = read_end; call(0x16, r);
+        thr_counts(&handles, &live, &objects);
+        assert(handles == 1 && live == 1 && objects == 1);
+    }
+}
 int main(void) {
     alarm(15);
     for (unsigned i = 0; i < 0x26; i++) {
@@ -172,6 +229,8 @@ int main(void) {
     condition_order();
     assert(gate_visits[0x25] == 1 && gate_visits[0x18] == 1 && gate_visits[0x10] == 2);
     assert(gate_visits[0x1b] == 3 && gate_visits[0x1c] == 3 && gate_visits[0x0a] == 4);
+    repeated_lifetimes();
+    assert(gate_visits[0x18] == 1 + 4 * 64 && gate_visits[0x0a] == 4 + 64);
     assert(!munmap(stack, 3 * STACK_SIZE));
-    puts("PASS: guest stacks/TLS, same-core handoff, event wait, priority, core migration, 32 live pause/resumes, scalar/SIMD context, exit/close, priority/FIFO condition and mutex handoff");
+    puts("PASS: guest stacks/TLS, same-core handoff, event wait, priority, core migration, 32 live pause/resumes, scalar/SIMD context, priority/FIFO condition and mutex handoff, 64 cancellation/affinity/exit lifetimes without handle/object growth");
 }
