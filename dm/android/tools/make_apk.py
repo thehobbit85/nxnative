@@ -115,6 +115,7 @@ def selected_inputs(a, lib, ks):
     java = sorted(glob.glob(os.path.join(ANDROID, 'app', 'java', '**', '*.java'), recursive=True))
     sources = [('host', lib), ('keystore', ks), ('packer', __file__), ('target-contract', os.path.join(HERE, 'target_contract.py'))]
     sources.append(('program-inputs', os.path.join(HERE, 'program_inputs.py')))
+    sources.append(('web-shim', os.path.join(ANDROID, '..', 'host', 'web_apple.m')))
     if getattr(a, 'programs', None): sources.append(('programs', a.programs))
     for index, item in program_inputs(a).items():
         export_record = Path(item['build']) / 'shader/vk/export-contract.json'
@@ -240,6 +241,7 @@ def build(a):
                 z.writestr('assets/cheats-build.txt', bid)
             for rel, src in saves: z.write(src, 'assets/save/' + rel)
             z.writestr('assets/game/target.tsv', contract)
+            z.writestr('assets/web-shim.js', apple_web_shim())
             if not a.bundle:
                 listing = [f'{rel}\t{os.path.getsize(src)}\t=d\t{file_digest(src)}' for rel, src in files]
                 z.writestr('assets/game/external-files.txt', '\n'.join(listing) + '\n')
@@ -349,6 +351,15 @@ def asset_pieces(src):
             data = f.read()
             for offset, size in pieces(data):
                 yield data[offset:offset + size]
+
+
+def apple_web_shim():
+    # Keep the nx/controller behavior identical to Apple's tested web frontend;
+    # there is no separately maintained Android copy of this script.
+    source = Path(ANDROID, '..', 'host', 'web_apple.m').read_text()
+    match = re.search(r'static NSString \*const SHIM = @R"JS\((.*?)\)JS";', source, re.S)
+    if not match: raise ValueError('cannot find the shared Apple web shim')
+    return match[1].encode('utf-8')
 
 
 def package_files(a):
