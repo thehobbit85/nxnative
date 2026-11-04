@@ -4,6 +4,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Textures and formats
 
+### Ordered Vulkan buffer writes and partial overlaps
+
+- **Symptom:** a compute consumer reads stale words after overlapping GPU writes, buffer copy/fill/update, or pitched texture readback; more than 512 outstanding writes lose earlier ranges.
+- **Cause:** the Vulkan backend reused GPU storage only for fully covered reads, otherwise copied stale guest bytes. Copies and fills ran on the CPU before earlier GPU writes completed; texture readbacks were published only to the completion thread. A fixed write table discarded live entries.
+- **Fix:** keep a growable ordered list of live GPU-backed ranges. Compose partial intersections into a fresh ring snapshot with transfer dependencies, preserving untouched CPU bytes. Copies, fills, inline updates and the actual rows of texture readbacks publish that backing to later GPU consumers and ordered completion copies. Wait for prior submissions before taking their CPU snapshot, and reopen the render pass when resolving a draw's buffers ended it.
+- **Found on:** synthetic Vulkan replay (`dm/gfx/nvn/vulkan/tests/t_replay.c`), 2026-11-04: `ordered_buffers`, `readback_gpu_consumer`, `buffer_range_lifetime` and updated-index draws. Exact words and padding pass on Android SwiftShader with dynamic rendering and legacy render passes; the previous implementation fails the overlapping-write and readback consumers.
+- **Open:** storage writes from graphics stages, simultaneous aliases within one command, and GPU-produced indices or handles inspected by the CPU require separate ownership support. This increment does not establish full buffer parity. See the [parity matrix](../nvn-vulkan-parity.md).
+
 ### Vulkan texture uploads visible to sampling
 
 - **Symptom:** Packaged ASTC textures sample as transparent black on Android SwiftShader: the player, HUD, title background and scene effects disappear, while their geometry and other textures render.

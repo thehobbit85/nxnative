@@ -11,6 +11,7 @@ uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); r
 uint64_t guest_ns(void) { return now_ns(); }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
+static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
 static prog_t origin_program = {.nstage = 2};
@@ -23,6 +24,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &buffer_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x40; return 1; }
     if (p == &draw_parameters_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x39 + stage; return 1; }
     if (p == &origin_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x37 + stage; return 1; }
     if (p == &depth_copy_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x35 + stage; return 1; }
@@ -68,7 +70,7 @@ static void put(list_t *list, unsigned op, const void *payload, size_t bytes) {
 
 // The payload width is in bytes. The recorder allows partial updates to either stage group's block.
 static void push_constants(list_t *list, int compute, uint16_t offset, const void *data, size_t size) {
-    _Alignas(p_push_const) uint8_t bytes[sizeof(p_push_const) + 16];
+    _Alignas(p_push_const) uint8_t bytes[sizeof(p_push_const) + 16] = {0};
     assert(size <= 16);
     p_push_const *p = (p_push_const *)bytes;
     p->compute = compute; p->offset = offset; p->size = (uint32_t)size;
@@ -712,6 +714,11 @@ static void draw_parameters(void) {
         RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&draw_parameters_program,.stages=3);
         RECORD(OP_BIND_UBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)expected,.size=sizeof expected);
+        if (mode) {
+            struct { uint64_t address, size; uint8_t bytes[sizeof indices]; } update = {(uintptr_t)indices, sizeof indices, {0}};
+            memcpy(update.bytes, indices, sizeof indices);
+            put(&list, OP_UPDATE_UB, &update, sizeof update); // forces an ordered snapshot for index-buffer binding
+        }
         if (mode) RECORD(OP_DRAW_IDX,p_draw_idx,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.itype=1,.count=3,
             .base_vertex=mode==1?2:0,.base_instance=expected[0],.instances=2,.ibuf=(uintptr_t)indices);
         else RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.first=5,.count=3,.base_instance=expected[0],.instances=2);
@@ -724,7 +731,107 @@ static void draw_parameters(void) {
     mtl_tex_release(&output);
     puts("Base instance, base vertex and draw index survive direct and indexed draw replay");
 }
+static void ordered_buffers(void) {
+    for (int split = 0; split <= 1; split++) {
+        uint32_t words[16], copied[16], first[18], second[18];
+        for (int i = 0; i < 16; i++) { words[i] = 10 + i; copied[i] = 0; }
+        for (int i = 0; i < 18; i++) first[i] = second[i] = 0xcafebabe;
+        list_t list = {0};
+        uint32_t values[] = {101, 102, 103, 104};
+        push_constants(&list, 1, 240, values, sizeof values);
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&groups, .stages=0x20);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage=5, .index=0, .addr=(uintptr_t)(words+2), .size=16);
+        RECORD(OP_DISPATCH, p_dispatch, .x=4, .y=1, .z=1);
+        values[0]=201; values[1]=202;
+        push_constants(&list, 1, 240, values, sizeof values);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage=5, .index=0, .addr=(uintptr_t)(words+4), .size=8);
+        RECORD(OP_DISPATCH, p_dispatch, .x=2, .y=1, .z=1);
+        if (split) {
+            put(&list, OP_END, NULL, 0); mtl_sub_begin(); mtl_exec(list.bytes); mtl_sub_commit(); list.length=0;
+        }
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&buffer_program, .stages=0x20);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage=5, .index=0, .addr=(uintptr_t)words, .size=sizeof words);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage=5, .index=1, .addr=(uintptr_t)(first+1), .size=sizeof words);
+        RECORD(OP_DISPATCH, p_dispatch, .x=16, .y=1, .z=1);
+        uint64_t copy[] = {(uintptr_t)words, (uintptr_t)copied, sizeof words};
+        put(&list, OP_COPY_B2B, copy, sizeof copy);
+        RECORD(OP_CLEAR_BUF, p_clear_buf, .addr=(uintptr_t)(copied+3), .size=8, .value=777);
+        struct { uint64_t address, size; uint32_t values[2]; } update = {(uintptr_t)(copied+4), 8, {888,889}};
+        put(&list, OP_UPDATE_UB, &update, sizeof update);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage=5, .index=0, .addr=(uintptr_t)copied, .size=sizeof copied);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage=5, .index=1, .addr=(uintptr_t)(second+1), .size=sizeof copied);
+        RECORD(OP_DISPATCH, p_dispatch, .x=16, .y=1, .z=1);
+        put(&list, OP_END, NULL, 0);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        const uint32_t want[] = {10,11,101,102,201,202,16,17,18,19,20,21,22,23,24,25};
+        const uint32_t patched[] = {10,11,101,777,888,889,16,17,18,19,20,21,22,23,24,25};
+        for (int i = 0; i < 16; i++) {
+            if (words[i]!=want[i] || copied[i]!=patched[i] || first[i+1]!=want[i]+1000 || second[i+1]!=patched[i]+1000) {
+                fprintf(stderr,"ordered buffers split%d word%d: source%u copy%u first%u second%u; want %u %u %u %u\n",
+                    split,i,words[i],copied[i],first[i+1],second[i+1],want[i],patched[i],want[i]+1000,patched[i]+1000); abort();
+            }
+        }
+        assert(first[0]==0xcafebabe && first[17]==0xcafebabe && second[0]==0xcafebabe && second[17]==0xcafebabe);
+    }
+    puts("Overlapping GPU writes, ordered buffer copy/fill/update and same-list consumers passed");
+}
+static void readback_gpu_consumer(void) {
+    tex_t texture = {.serial=0xb000, .d={.width=2,.height=2,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&texture.d, &texture.L);
+    uint32_t pixels[6], result[6] = {0};
+    for (int i=0;i<6;i++) pixels[i]=0x11111111;
+    list_t list={0};
+    RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&texture,.r={.width=2,.height=2,.depth=1},.mask=15,.c.f={0,1,0,1});
+    RECORD(OP_COPY_STRIDE,p_copy_stride,.stride=12);
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&texture,.src=(uintptr_t)pixels,.r={.width=2,.height=2,.depth=1});
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&buffer_program,.stages=0x20);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)pixels,.size=sizeof pixels);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)result,.size=sizeof result);
+    RECORD(OP_DISPATCH,p_dispatch,.x=6,.y=1,.z=1);
+    RECORD(OP_COPY_STRIDE,p_copy_stride,.stride=0);
+    put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for(int i=0;i<6;i++) {
+        uint32_t expected=i%3==2?0x11111111:0xff00ff00;
+        if(pixels[i]!=expected || result[i]!=expected+1000u) {
+            fprintf(stderr,"readback GPU consumer word%d: %#x %#x expected %#x %#x\n",i,pixels[i],result[i],expected,expected+1000u);abort();
+        }
+    }
+    mtl_tex_release(&texture);
+    puts("Pitched texture readback feeds the next compute command without a host fence");
+}
+static void buffer_range_lifetime(void) {
+    enum { COUNT=600, LARGE_BYTES=(64<<20)-256 };
+    uint32_t *large=malloc(LARGE_BYTES), words[COUNT], result[COUNT];
+    assert(large);memset(large,0,LARGE_BYTES);memset(words,0,sizeof words);memset(result,0,sizeof result);
+    list_t list={0};
+    // Almost fill one ring. The following writes roll over while its contents
+    // remain live, and grow ownership tracking beyond its former 512 entries.
+    RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)large,.size=LARGE_BYTES,.value=0x12345678);
+    put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);
+    for(int i=0;i<COUNT;i++) {
+        list.length=0;
+        uint32_t value[4]={(uint32_t)i+100,0,0,0};
+        push_constants(&list,1,240,value,sizeof value);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(words+i),.size=4);
+        RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+        put(&list,OP_END,NULL,0);mtl_exec(list.bytes);
+    }
+    list.length=0;
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&buffer_program,.stages=0x20);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)words,.size=sizeof words);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)result,.size=sizeof result);
+    RECORD(OP_DISPATCH,p_dispatch,.x=COUNT,.y=1,.z=1);
+    put(&list,OP_END,NULL,0);mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for(int i=0;i<COUNT;i++) assert(words[i]==(uint32_t)i+100 && result[i]==(uint32_t)i+1100);
+    for(size_t i=0;i<LARGE_BYTES/4;i++) assert(large[i]==0x12345678);
+    free(large);
+    puts("600 live GPU buffer ranges and ring rollover retain their data through completion");
+}
 int main(void) {
+    readback_gpu_consumer();
+    buffer_range_lifetime();
+    ordered_buffers();
     draw_parameters();
     depth_copies();
     clear_and_readback(NVN_FORMAT_RGBA8);
