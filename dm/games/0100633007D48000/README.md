@@ -40,11 +40,15 @@ Update 1.5.12620 (v589824) over the base game, SDK 20.5.21. Unity 6000.0.61f1 IL
 
 ## Android integration
 
-Current: the shared builder's `--platform android` route builds the registered v589824 update into an ARM64 development APK. All 1,812 shader stages pass SPIR-V validation and resource-sidecar checks. An Android 15 ARM64 emulator with SwiftShader reaches the title, profile selection, save commits, prologue and decoded opening movie; a subsequent launch recognizes and loads the saved King's Pass profile. Scripted movement scrolls the scene, but the player and HUD are missing or corrupted and the title lacks its background. The same build renders those layers on Mac Metal. The cause remains open; observed depth-clamp commands are disabled, and no rendering workaround was committed. This is not a playable-Android qualification or a physical-device result.
+Current: the shared builder's `--platform android` route builds the registered v589824 update into an ARM64 development APK. All 1,812 shader stages pass SPIR-V validation and resource-sidecar checks. An Android 15 ARM64 emulator with SwiftShader reaches the title, profile selection, save commits, prologue and decoded opening movie; a subsequent launch recognizes and loads the saved King's Pass profile. The original shaders now render the player, HUD, title background and scene effects; scripted movement, jumping and nail attacks are visible in King's Pass. This is an early-area emulator result, not physical-device or whole-game validation.
+
+Resolved: missing player and HUD came from [texture uploads without a sampling dependency](../../../docs/reference/rendering.md#vulkan-texture-uploads-visible-to-sampling). The player atlas is 4096x4096 ASTC 4x4 and the HUD atlas 2048x2048; both were uploaded but sampled as zero. A solid-colour replacement proved the geometry was present, and an isolated atlas replay reproduced the problem. The general image barrier fixes it with the original shaders and depth state. Geometry/runtime parity and later areas remain outside this check.
 
 The separate asset deployment uses the merged RomFS image directly. Synthetic APK checks cover shared fonts, DLC, input, pause/resume, surface recreation and save retention across reinstall; these are general integration checks, not substitutes for this game's gameplay.
 
 ## Found on this game
+
+- [Vulkan texture uploads visible to sampling](../../../docs/reference/rendering.md#vulkan-texture-uploads-visible-to-sampling): restored the Android player, HUD, title background and scene effects.
 
 - [Android assets and large RomFS images](../../../docs/reference/packing.md#android-assets-and-large-romfs-images): shared builder and APK review, with synthetic font/DLC and archive checks.
 
