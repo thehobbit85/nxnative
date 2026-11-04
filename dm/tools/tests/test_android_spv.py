@@ -42,6 +42,51 @@ OpFunctionEnd
 
 
 class AndroidShaderTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('glslc') and shutil.which('spirv-val'), 'requires glslc and SPIRV-Tools')
+    def test_separate_texture_sampler_arrays_export_guest_sources(self):
+        source = Path(__file__).resolve().parents[2] / 'gfx/nvn/vulkan/tests/separate.frag'
+        reflection = {'bindings': [dict(msl_name='images', kind='tex_ubo', reg=7, off=16),
+                                   dict(msl_name='samplers', kind='samp_ubo', reg=8, off=24),
+                                   dict(msl_name='p', kind='cbuf', reg=9)]}
+        with tempfile.TemporaryDirectory() as tmp:
+            spv = Path(tmp) / 'separate.spv'
+            for numeric, prefix in enumerate(('', 'i', 'u')):
+                text = source.read_text().replace('texture3D images', prefix + 'texture3D images')
+                text = text.replace('sampler3D(', prefix + 'sampler3D(').replace('vec4 color', prefix + 'vec4 color')
+                subprocess.run(['glslc', '-fshader-stage=fragment', '--target-env=vulkan1.1', '-', '-o', spv], input=text, text=True, check=True)
+                subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', spv], check=True)
+                binds = vk.vk_reflect(spv.read_bytes(), reflection)
+                self.assertEqual((binds[0]['type'], binds[0]['count'], binds[0]['view'], binds[0]['num']), ('tex', 2, 2, numeric))
+                self.assertEqual((binds[1]['type'], binds[1]['kind'], binds[1]['count']), ('samp', 'samp_ubo', 2))
+                self.assertIn('b 1 samp 2 samp_ubo 8 24 - -1', vk.vk_txt(dict(stage='ps', bindings=binds)))
+
+    @unittest.skipUnless(shutil.which('glslc') and shutil.which('spirv-val'), 'requires glslc and SPIRV-Tools')
+    def test_storage_readonly_requires_all_block_members(self):
+        source = '''#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) readonly buffer Input { uint count; uint words[]; } src;
+layout(set=0,binding=1,std430) buffer Output { uint words[]; } dst;
+void main() { dst.words[0]=src.words[src.count]; }
+'''
+        reflection = {'bindings': [dict(msl_name='src', kind='sbuf', reg=0), dict(msl_name='dst', kind='sbuf', reg=1)]}
+        with tempfile.TemporaryDirectory() as tmp:
+            spv = Path(tmp) / 'storage.spv'
+            subprocess.run(['glslc', '-fshader-stage=compute', '--target-env=vulkan1.1', '-', '-o', spv], input=source, text=True, check=True)
+            raw = spv.read_bytes()
+            header, instructions = vk.decode(raw)
+            for partial in (False, True):
+                words = list(header)
+                for instruction in instructions:
+                    if partial and vk.opcode(instruction) == 72 and instruction[2:4] == (1, 24):
+                        continue  # only one member remains NonWritable
+                    words.extend(instruction)
+                data = struct.pack(f'<{len(words)}I', *words)
+                spv.write_bytes(data)
+                subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', spv], check=True)
+                binds = vk.vk_reflect(data, reflection)
+                self.assertEqual(binds[0].get('read_only', False), not partial)
+                self.assertFalse(binds[1].get('read_only', False))
+
     @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val'), 'requires SPIRV-Tools')
     def test_sampled_array_reflection_retains_shape_and_numeric_class(self):
         source = '''

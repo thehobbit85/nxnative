@@ -2,6 +2,23 @@
 
 Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_build.py`, `dmsh_xlate`, `Program.cs`) and their pipelines. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Vulkan resource reflection
+
+### Separate Vulkan texture and sampler descriptors
+
+- **Symptom:** an exported shader with separate texture/sampler descriptors loses its image shape or fails with an unsupported sampler kind, and the executor rejects the draw's descriptor array.
+- **Cause:** the exporter classified these SPIR-V types but only emitted sampled-image shape/numeric metadata for combined descriptors. The runtime only populated combined image/sampler descriptors.
+- **Fix:** preserve standalone sampled-image shape/numeric class and all existing guest sampler sources. Populate sampled-image and sampler descriptors independently, including arrays, slot bindings, uniform-buffer handles, texture-packed sampler handles and fixed IDs. GPU-written uniform handles use the same CPU dependency preflight as combined descriptors. A texture array paired with one fixed sampler slot keeps sharing that slot.
+- **Check:** real SPIR-V reflection covers float, signed and unsigned 3D image arrays and independent sampler arrays. Vulkan replay checks independently selected texture/sampler elements, border versus edge sampling, missing array elements, and GPU-produced uniform handles. Both dynamic and legacy rendering paths use the same descriptors.
+- **Open:** typed texel buffers, descriptor-pool exhaustion and broader dimension/capability combinations require separate coverage.
+
+### Read-only Vulkan storage blocks retain ownership
+
+- **Symptom:** a read-only storage input is treated as a GPU writer and copied back to guest memory.
+- **Cause:** reflection only recognized NonWritable on storage-image variables; GLSL commonly decorates every member of a read-only storage block instead.
+- **Fix:** mark storage images/buffers read-only when their variable is NonWritable, or all members of the storage block are NonWritable. A block with only some read-only members remains writable.
+- **Check:** compiled and validated SPIR-V tests compare fully and partially read-only blocks, including a separate writable output. Runtime descriptor setup already excludes read-only storage from write publication.
+
 ## Containers by engine
 
 ### One scrambled archive indexed by the NRO
