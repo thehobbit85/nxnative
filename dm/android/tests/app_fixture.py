@@ -13,7 +13,7 @@ from dm.tools.tests.test_nso import make_nso
 from dm.host.tests.gate.fixture import module
 
 
-def build(output, ndk):
+def build(output, ndk, program=None):
     output.mkdir(parents=True, exist_ok=True)
     tc = ndk / 'toolchains/llvm/prebuilt' / ('darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64') / 'bin'
     asm = output / 'entry.S'
@@ -31,6 +31,11 @@ def build(output, ndk):
         'font_state': '_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE',
         'font_address': '_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE',
     }
+    if program is not None:
+        imports.update(oe_execute='_ZN2nn2oe14ExecuteProgramEiPKvm',
+                       oe_previous='_ZN2nn2oe23GetPreviousProgramIndexEv',
+                       oe_parameter='_ZN2nn2oe21TryPopLaunchParameterEPmPvm',
+                       fs_rom='_ZN2nn2fs8MountRomEPKcPvm')
     source = '.section .start,"ax"\n.global _start\n_start: b nnMain\n.word 0\n'
     for name in imports:
         slot = name + '_import'
@@ -41,6 +46,7 @@ def build(output, ndk):
     elf = output / 'guest.elf'
     subprocess.run([tc / 'aarch64-linux-android30-clang', '-O1', '-fpie', '-fvisibility=hidden', '-ffreestanding', '-fno-builtin', '-fno-stack-protector',
                     '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-nostdlib', '-static', '-Wl,--build-id=none', '-Wl,-T,' + str(script),
+                    *(['-DAPP_PROGRAM=' + str(program)] if program is not None else []),
                     '-I' + str(ROOT / 'dm/gfx/nvn'), '-I' + str(ROOT / 'dm/gfx/nvn/include'), ROOT / 'dm/android/tests/app_guest.c', asm, '-o', elf], check=True)
     symbols = {}
     for line in subprocess.check_output([tc / 'llvm-nm', '-P', '--defined-only', elf], text=True).splitlines():
@@ -87,6 +93,8 @@ def build(output, ndk):
     for sub in ('extract/synthetic/RomFS', 'shader/vk', 'font'):
         (output / sub).mkdir(parents=True, exist_ok=True)
     (output / 'extract/synthetic/RomFS/fixture.txt').write_text('Synthetic APK integration fixture\n')
+    if program is not None:
+        (output / 'extract/synthetic/RomFS/program.txt').write_bytes(bytes([program]))
     (output / 'aoc/1').mkdir(parents=True, exist_ok=True)
     (output / 'aoc/1/fixture.txt').write_text('Synthetic DLC marker\n')
     # File routing, not font rasterization: the HLE maps these synthetic bytes.
@@ -97,6 +105,7 @@ def build(output, ndk):
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('output', type=Path); p.add_argument('--ndk', type=Path, default=os.environ.get('ANDROID_NDK_HOME'))
+    p.add_argument('--program-index', type=int, choices=(0, 1, 2), help='multi-program handoff fixture')
     a = p.parse_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or --ndk')
-    build(a.output.resolve(), Path(a.ndk))
+    build(a.output.resolve(), Path(a.ndk), a.program_index)

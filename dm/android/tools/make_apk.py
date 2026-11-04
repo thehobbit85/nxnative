@@ -41,13 +41,23 @@ def configure_tools(a):
         javac = shutil.which('javac')
         if not javac:
             raise ValueError('set JAVA_HOME or put javac on PATH')
-        JAVA = str(Path(javac).resolve().parent.parent)
+        # PATH may name a wrapper (Homebrew, a version manager, or macOS's
+        # launcher), whose parent is not the JDK used to run the compiler.
+        try:
+            settings = subprocess.run([javac, '-J-XshowSettings:properties', '-version'], check=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ValueError('cannot locate the JDK used by javac; set JAVA_HOME') from error
+        home = re.search(r'^\s*java\.home\s*=\s*(.+?)\s*$', settings.stderr, re.MULTILINE)
+        if not home: raise ValueError('javac did not report java.home; set JAVA_HOME')
+        JAVA = home.group(1)
     ENV = dict(os.environ, JAVA_HOME=JAVA, PATH=os.path.join(JAVA, 'bin') + os.pathsep + os.environ.get('PATH', ''))
     for tool in [os.path.join(BT, name) for name in ('aapt2', 'd8', 'zipalign', 'apksigner')] + \
                 [os.path.join(JAVA, 'bin', name) for name in ('java', 'javac', 'keytool')]:
         if not os.path.isfile(tool) or not os.access(tool, os.X_OK):
             raise ValueError('missing executable Android build tool: ' + tool)
     if not os.path.isfile(JAR): raise ValueError('missing Android platform android.jar: ' + JAR)
+    if not os.path.isfile(os.path.join(JAVA, 'release')): raise ValueError('missing JDK release metadata: ' + JAVA)
     for tool in ('java', 'javac'):
         try:
             subprocess.run([os.path.join(JAVA, 'bin', tool), '-version'], check=True, env=ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -80,7 +90,9 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
               android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize">
       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
     </activity>
-    <activity android:name="android.app.NativeActivity" android:process=":game" android:exported="false" android:screenOrientation="sensorLandscape"
+    <activity android:name="com.nxnative.ProgramActivity" android:exported="false" android:screenOrientation="sensorLandscape"
+              android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize|density"/>
+    <activity android:name="com.nxnative.GameActivity" android:process=":game" android:exported="false" android:screenOrientation="sensorLandscape"
               android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize|density">
       <meta-data android:name="android.app.lib_name" android:value="dmhost"/>
     </activity>

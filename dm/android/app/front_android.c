@@ -9,6 +9,7 @@
 #include "dm_input.h"
 #include "front.h"
 #include "android_contract.h"
+#include "program_boot.h"
 #include <android/input.h>
 #include <android/keycodes.h>
 #include <android/looper.h>
@@ -203,6 +204,30 @@ static int input_cb(int fd, int events, void *data) {
 
 // ---------- Back to the menu: a flag for the menu, then this process ends ----------
 static char g_files[512];
+static int g_program;
+// The Java handoff activity belongs to the menu process. It observes this
+// process's Binder death before it starts a fresh host; shared C globals never
+// need an in-place reset. hle_oe has already closed its launch record here.
+void front_program_handoff(int index, const char *name) {
+    (void)index;
+    JNIEnv *env = NULL; int attached = 0;
+    if ((*g_act->vm)->GetEnv(g_act->vm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+        if ((*g_act->vm)->AttachCurrentThread(g_act->vm, &env, NULL) != JNI_OK) { LOG("[RED] program handoff: cannot attach guest thread to Java"); return; }
+        attached = 1;
+    }
+    if (!env) { LOG("[RED] program handoff: no Java environment"); return; }
+    jclass cls = (*env)->GetObjectClass(env, g_act->clazz);
+    jmethodID method = (*env)->GetMethodID(env, cls, "programHandoff", "(ILjava/lang/String;)V");
+    jstring title = name ? (*env)->NewStringUTF(env, name) : NULL;
+    if (method) (*env)->CallVoidMethod(env, g_act->clazz, method, g_program, title);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env);
+        LOG("[RED] program handoff: Android could not start the next-program activity");
+    }
+    if (title) (*env)->DeleteLocalRef(env, title);
+    (*env)->DeleteLocalRef(env, cls);
+    if (attached) (*g_act->vm)->DetachCurrentThread(g_act->vm);
+}
 static void back_to_menu(void) {
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
     char p[600]; snprintf(p, sizeof p, "%s/show_menu", g_files); FILE *f = fopen(p, "w"); if (f) fclose(f);
@@ -213,7 +238,7 @@ static void back_to_menu(void) {
 
 // ---------- Boot: environment from the menu's settings, log, then the host on its own thread ----------
 static char *g_argv[4];
-static void boot_env(const char *files, const char *ext) {
+static void boot_env(const char *files, const char *ext, int handoff, int previous) {
     char p[1024];
     snprintf(p, sizeof p, "%s/log.txt", ext);
     char prev[1024]; snprintf(prev, sizeof prev, "%s/log.prev.txt", ext); rename(p, prev);
@@ -224,18 +249,21 @@ static void boot_env(const char *files, const char *ext) {
     else fprintf(stderr, "boot: no settings.env, the defaults apply\n");
     snprintf(p, sizeof p, "%s/env.txt", ext);   // diagnostics: switches in <external>/env.txt (one KEY=VALUE per line) win
     if ((f = fopen(p, "r"))) { char ln[1024]; while (fgets(ln, sizeof ln, f)) { ln[strcspn(ln, "\r\n")] = 0; char *eq = strchr(ln, '='); if (!eq || ln[0] == '#') continue; *eq = 0; setenv(ln, eq + 1, 1); fprintf(stderr, "boot: env %s=%s\n", ln, eq + 1); } fclose(f); }
-    const char *sub[][2] = {{"DM_ROMFS", "romfs"}, {"DM_VK_DIR", "vk"}, {"DM_FONT_DIR", "font"}};
-    for (int i = 0; i < 3; i++) {
-        snprintf(p, sizeof p, "%s/romfs/romfs.img", ext);
-        if (i != 0 || access(p, R_OK) != 0) snprintf(p, sizeof p, "%s/%s", ext, sub[i][1]);
-        setenv(sub[i][0], p, 0);
-    }
-    snprintf(p, sizeof p, "%s/aoc", ext); setenv("DM_AOC_DIR", p, 0);
+#ifdef DM_GAME_MULTI
+    int have[sizeof dm_games / sizeof *dm_games];
+    for (size_t i = 0; i < sizeof have / sizeof *have; i++) have[i] = dm_games[i].program;
+#else
+    const int have[] = {0};
+#endif
+    char root[1024];
+    g_program = dm_android_program_boot(files, ext, handoff, previous, have, sizeof have / sizeof *have, root, sizeof root);
+    if (g_program < 0) die("preparing Android program resources");
     snprintf(p, sizeof p, "%s/save", files); mkdir(p, 0755); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", files); mkdir(p, 0755); setenv("DM_TEMP", p, 0);
     snprintf(p, sizeof p, "%s/cheats", files); mkdir(p, 0755); setenv("DM_CHEATS", p, 0);
     chdir(files);
-    g_argv[0] = strdup("dmhost"); snprintf(p, sizeof p, "%s/dm", ext); g_argv[1] = strdup(p);
+    g_argv[0] = strdup("dmhost");
+    if (asprintf(&g_argv[1], "%s/dm", root) < 0) die("allocating program module path");
 }
 static void *boot_thread(void *a) {
     (void)a;
@@ -283,7 +311,17 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     immersive(a);
     static int booted; if (booted++) return;   // the activity can be made again (rotation, a return): the host runs once per process
     snprintf(g_files, sizeof g_files, "%s", a->internalDataPath);
-    boot_env(a->internalDataPath, a->externalDataPath);
+    JNIEnv *env = a->env;
+    jclass cls = (*env)->GetObjectClass(env, a->clazz);
+    jobject intent = (*env)->CallObjectMethod(env, a->clazz, (*env)->GetMethodID(env, cls, "getIntent", "()Landroid/content/Intent;"));
+    jclass ic = (*env)->GetObjectClass(env, intent);
+    jstring hk = (*env)->NewStringUTF(env, "handoff"), pk = (*env)->NewStringUTF(env, "previous");
+    int handoff = (*env)->CallBooleanMethod(env, intent, (*env)->GetMethodID(env, ic, "getBooleanExtra", "(Ljava/lang/String;Z)Z"), hk, JNI_FALSE);
+    int previous = (*env)->CallIntMethod(env, intent, (*env)->GetMethodID(env, ic, "getIntExtra", "(Ljava/lang/String;I)I"), pk, -1);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); die("reading Android program launch context"); }
+    (*env)->DeleteLocalRef(env, hk); (*env)->DeleteLocalRef(env, pk); (*env)->DeleteLocalRef(env, ic);
+    (*env)->DeleteLocalRef(env, intent); (*env)->DeleteLocalRef(env, cls);
+    boot_env(a->internalDataPath, a->externalDataPath, handoff, previous);
     pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 16 << 20);
     pthread_t th; if (pthread_create(&th, &at, boot_thread, NULL)) die("front end: cannot start the host");
     pthread_attr_destroy(&at);

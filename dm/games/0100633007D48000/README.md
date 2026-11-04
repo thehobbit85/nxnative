@@ -59,7 +59,8 @@ The separate asset deployment uses the merged RomFS image directly. Synthetic AP
 - [Android prerequisite failures](../../../docs/reference/packing.md#android-prerequisite-failures-after-native-compilation): early shared tool checks and asset-directory output protection.
 - [Incremental APK reuse](../../../docs/reference/packing.md#android-apk-rebuilt-despite-unchanged-inputs): selected-input and product hashes avoid unchanged repackaging; synthetic fixtures cover invalidation and interrupted publication.
 - [Android target compatibility](../../../docs/reference/packing.md#android-apk-combines-incompatible-prepared-inputs): producer-bound host/shader records and a portable module/asset contract checked before launch.
-- [Android multi-program packaging](../../../docs/reference/packing.md#android-package-omits-secondary-programs): separate program resources and shared application identity, exercised with synthetic inputs; runtime switching remains open.
+- [Android multi-program packaging](../../../docs/reference/packing.md#android-package-omits-secondary-programs): separate program resources and shared application identity, exercised with synthetic inputs.
+- [Android program handoff](../../../docs/reference/services.md#multi-program-applications-oeexecuteprogram): synthetic programs built with this profile exercise fresh processes, launch parameters, per-program resources and shared saves; Hollow Knight itself does not supply these multi-program checks.
 - [Separate Android deployment](../../../docs/reference/packing.md#separate-android-deployment-mixes-asset-generations): the installed APK identifies expected data; the shared installer verifies, replaces and recovers managed roots.
 
 - [Vulkan export preserves packaged shader stages](../../../docs/reference/shaders.md#vulkan-export-preserves-packaged-shader-stages): Android export validates all 1,812 stages, including one geometry asset; runtime geometry support remains open.

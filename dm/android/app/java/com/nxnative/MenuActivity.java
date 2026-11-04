@@ -382,7 +382,7 @@ public class MenuActivity extends Activity {
         if (unpacking || needsUnpack() || !gameFilesPresent()) return;
         if (!new File(getFilesDir(), "settings.env").exists()) save();
         launched = true;
-        Intent i = new Intent(); i.setClassName(this, "android.app.NativeActivity");
+        Intent i = new Intent(this, GameActivity.class);
         startActivity(i);
     }
 
