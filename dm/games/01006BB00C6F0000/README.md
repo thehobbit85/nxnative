@@ -53,6 +53,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 - RomFS: bfres models and maps (`region_common/map`, `region_common/actor`), shaders in `region_common/shader/*.bfsha` (BNSH), particle effects in `region_common/effect/*.ptcl`, layouts in `*/ui/*.arc` (SARC).
 - 9,698 shaders from the bfsha archives, effects and layouts.
+- **Android shader build, 2026-11-04:** all 9,698 stages export and validate for Vulkan 1.1 through `--platform android`; the XCI base plus v131072 update produce an APK and Android-rewritten modules. Both formerly failing postprocess variants (`9d8f6b8543355374`, `9338e3f1b597fe7c`) now translate; the second needs the shared Vulkan offset lowering. This is build evidence, not a gameplay result.
 - **GLSLC.** `subsdk0` is NVN's runtime GLSL compiler and `main` imports `glslcCompile*`; `game.tsv` says the `*_uber.bfsha` are compiled at run time through it, but up to the house, the beach and the menus every shader the game loaded was in the offline tables.
 
 ## Mac routes
@@ -64,9 +65,11 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 General host changes first needed here; each applies to every game:
 
-- [Vulkan target lowers dynamic texture offsets](../../../docs/reference/shaders.md#vulkan-target-lowers-dynamic-texture-offsets): the captured postprocess shader `9338e3f1b597fe7c` now passes Vulkan 1.1 validation using the bundled Ryujinx lowering; full export and runtime validation remain open.
+- [Vulkan target lowers dynamic texture offsets](../../../docs/reference/shaders.md#vulkan-target-lowers-dynamic-texture-offsets): the captured postprocess shader `9338e3f1b597fe7c` passes Vulkan 1.1 validation using the bundled Ryujinx lowering.
 
-- [Vulkan export removes unused descriptor declarations](../../../docs/reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations): resolved the captured Android reflection failure; full export and gameplay validation remain open.
+- [Vulkan export removes unused descriptor declarations](../../../docs/reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations): resolved the captured Android reflection failure.
+- [Vulkan textures from uniform-buffer handles](../../../docs/reference/shaders.md#vulkan-textures-from-uniform-buffer-handles): the 32-element 3D texture array in `bd619b15fcd2a711` now exports; synthetic replay verifies uniform handles, pool changes and compatible missing-texture views.
+- [Android staged assets are unreadable by the app](../../../docs/reference/packing.md#android-staged-assets-are-unreadable-by-the-app): resolved the first launch's module-access failure.
 
 - **Lower-left window origin** (`g_origin_ll`), **copies drawn as passes** (`copy_t2t_draw`), **compute `c0` with the dispatch size** (`encode_args_`, `nvn_refl.m`), **stencil in depth-stencil copies**: [Lower-left window origin](../../../docs/reference/rendering.md#lower-left-window-origin), [Copies a blit cannot do, drawn](../../../docs/reference/rendering.md#copies-a-blit-cannot-do-drawn), [Compute `c0`: dispatch size and uniform buffer table](../../../docs/reference/shaders.md#compute-c0-dispatch-size-and-uniform-buffer-table), [Depth-stencil copies carry the stencil](../../../docs/reference/rendering.md#depth-stencil-copies-carry-the-stencil).
 - **Per-depth-mode vertex entry points** (`vs_depth`, `main0_z`, `mtl_set_depth_zero`): [04, section 5](../../../docs/agents/04-graphics.md#5-depth-convention).
@@ -80,9 +83,8 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- Android shader preparation: the XCI base plus v131072 update extract through the shared builder. The captured unused-descriptor failure is resolved. The full Vulkan export is being revalidated; no Android APK or Android gameplay result is established for this build.
+- Android runtime: the APK loads its modules and reaches `nnMain` on the ARM64 API 35 emulator, then faults at `main+0x1c180`. Android gameplay remains unverified.
 
 - **`SR_Y_DIRECTION`.** 2,487 of its pixel shaders read the window's Y-direction system register, which is −1 under a lower-left origin. The Ryujinx recompiler answers a constant +1 (a TODO in `InstEmitMove.cs`; LASRecomp answers −1). In the room shader the value only scales a depth slope under `abs()`; other shaders may use its sign (`dFdy`-based effects). Answering it per profile means a translator change, i.e. every game's chain.
-- **Two pixel shaders do not translate** (`9d8f6b8543355374`, `9338e3f1b597fe7c`: variants 0 and 1 of one program in `postprocess.bfsha` @0x252000; SPIRV-Cross throws on a null pointer). No run so far has loaded either.
 - development.md calls SDK 8.2.0 "the oldest so far"; Mario Kart 8 Deluxe (SDK 4.4.0) is older now.
 - `game.tsv` still says "In bring-up" and its memory values "until measured".
