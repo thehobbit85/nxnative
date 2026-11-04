@@ -1154,13 +1154,15 @@ static void descriptor_lifetime(void) {
 }
 static void typed_buffers(void) {
     enum { N = 4 };
-    for (int missing = 0; missing < 2; missing++) for (int split = 0; split < 2; split++) for (int offset = 0; offset <= 256; offset += 256) {
+    const int offsets[] = {0,4,12,60,256};
+    for (int missing = 0; missing < 2; missing++) for (int split = 0; split < 2; split++) for (unsigned c = 0; c < sizeof offsets/sizeof *offsets; c++) {
+        int offset = offsets[c];
         float f[2][N] = {{0.25f,0.5f,0.75f,1}, {2,3,4,5}};
         int32_t signed_values[N] = {-10,-20,-30,-40}; uint32_t unsigned_values[N] = {10,20,30,40};
         uint32_t storage[256], previous[N] = {0}, result[N][8] = {0}, consumer[N] = {0};
         for (int i = 0; i < 256; i++) storage[i] = 0xabcdef01;
         uint32_t *target = storage + 64 + offset / 4;
-        for (int i = 0; i < N; i++) target[i] = 500 + i;
+        for (int i = 0; i < N; i++) target[i] = 0; // produced on the GPU before the padded alias snapshot
         void *mem[] = {f[0],f[1],signed_values,unsigned_values,target,previous};
         NVNformat formats[] = {NVN_FORMAT_R32F,NVN_FORMAT_R32F,NVN_FORMAT_R32I,NVN_FORMAT_R32UI,NVN_FORMAT_R32UI,NVN_FORMAT_R32UI};
         tex_t tex[6]; pool_t pools[6];
@@ -1178,6 +1180,9 @@ static void typed_buffers(void) {
         uint32_t values[N] = {70,80,90,100}; push_constants(&list, 1, 240, values, sizeof values);
         RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &groups, .stages = 0x20);
         RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)previous, .size = sizeof previous);
+        RECORD(OP_DISPATCH, p_dispatch, .x = N, .y = 1, .z = 1);
+        uint32_t initial[N] = {500,501,502,503}; push_constants(&list, 1, 240, initial, sizeof initial);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)target, .size = 4*N);
         RECORD(OP_DISPATCH, p_dispatch, .x = N, .y = 1, .z = 1);
         put(&list, OP_END, NULL, 0); mtl_exec(list.bytes); list.length = 0;
         if (split) { mtl_sub_commit(); mtl_sub_begin(); }
