@@ -6,6 +6,8 @@
 #include <vulkan/vulkan.h>
 #include <assert.h>
 #include <time.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 uint64_t guest_ns(void) { return now_ns(); }
@@ -998,7 +1000,49 @@ static void pool_ranges(void) {
     mtl_pool_del(mem);free(mem);
     puts("Pool lookup retains 4100 registrations, rejects overflow and respects reused extents");
 }
+static void retired_texture_pool(void) {
+    size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    pool_t *pool=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);assert(pool!=MAP_FAILED);
+    uint8_t storage[64*8];memset(storage,153,sizeof storage);
+    *pool=(pool_t){.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED,.mem=storage,.size=sizeof storage};
+    tex_t source={.serial=0xc000,.mem=storage,.pool=pool,.d={.width=64,.height=8,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_R8,.flags=NVN_TEXTURE_FLAGS_LINEAR,.stride=64}};
+    tex_t cold=source;cold.serial++;
+    tex_t output={.serial=0xc003,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&source.d,&source.L);cold.L=source.L;nvn_tex_layout(&output.d,&output.L);
+    mtl_reg_tex(920,&source,NULL);mtl_reg_tex(921,&cold,NULL);
+    tex_t replacement=source;replacement.serial+=2;
+    for(int phase=0;phase<4;phase++) {
+        if(phase==2) {
+            assert(!mprotect(pool,page,PROT_READ|PROT_WRITE));
+            *pool=(pool_t){.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED,.mem=storage,.size=sizeof storage};
+            memset(storage,221,sizeof storage);
+        }
+        if(phase==3) mtl_reg_tex(920,&replacement,NULL);
+        for(int slot=0;slot<(phase?2:1);slot++) {
+            uint8_t pixels[256]={0};list_t list={0};
+            RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_copy_program,.stages=3);
+            RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1|BIND_TEX1_NOBASE,.slot=0,.h=920+slot);
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+            RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+            put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);
+            uint64_t fence=mtl_sub_commit();
+            if(!phase) { mtl_alias_drop_pool(pool);assert(!mprotect(pool,page,PROT_NONE)); }
+            assert(mtl_wait(fence,UINT64_MAX));
+            uint8_t want[]={phase==0?153:phase==3&&slot==0?221:0,0,0,255};
+            for(int i=0;i<64;i++) if(memcmp(pixels+4*i,want,4)) {
+                fprintf(stderr,"retired pool phase%d slot%d pixel%d: %u expected%u\n",phase,slot,i,pixels[4*i],want[0]);abort();
+            }
+        }
+    }
+    mtl_alias_drop_pool(pool);mtl_tex_release(&source);mtl_tex_release(&cold);mtl_tex_release(&replacement);mtl_tex_release(&output);
+    assert(!munmap(pool,page));
+    puts("Pool retirement preserves submitted draws, invalidates warm/cold IDs and requires registration after address reuse");
+}
 int main(void) {
+    if(getenv("DM_VK_TEST_RETIRE")) { retired_texture_pool();return 0; }
+    retired_texture_pool();
     const char *buffers=getenv("DM_VK_TEST_BUFFERS");
     if(buffers) { if(!strcmp(buffers,"pools")) pool_ranges();else if(!strcmp(buffers,"large")) buffer_range_lifetime();else simultaneous_aliases();return 0; }
     pool_ranges();

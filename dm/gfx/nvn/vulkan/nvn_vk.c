@@ -127,7 +127,8 @@ typedef struct {
 } ctx_t;
 static _Atomic uint64_t g_gpu_ns;
 static ctx_t g_ctx[NCTX]; static ctx_t *C; static int g_ci;
-static uint64_t g_fence, g_done;
+static _Atomic uint64_t g_fence;
+static uint64_t g_done;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static int g_pend[NCTX], g_npend;   // contexts submitted and not yet completed, in order (under g_mu)
 
@@ -708,8 +709,11 @@ static int storage_compatible(const VkImageCreateInfo *ii) {
            ii->extent.depth <= limits.maxExtent.depth && ii->mipLevels <= limits.maxMipLevels &&
            ii->arrayLayers <= limits.maxArrayLayers && (limits.sampleCounts & ii->samples);
 }
-static vtex *tex_get(const tex_t *t, int for_rt) {
-    pthread_mutex_lock(&g_rmu); vtex *v = tex_find(t->serial); pthread_mutex_unlock(&g_rmu);
+// Caller holds g_rmu through initial upload: pool finalization uses the same
+// lock before guest storage can disappear. A registry lookup must stay locked
+// from its live-ID check through this resolution.
+static vtex *tex_get_locked(const tex_t *t, int for_rt) {
+    vtex *v = tex_find(t->serial);
     if (v) {
         if (for_rt) v->gpu = 1;
         else if (!v->gpu && t->mem && (v->dirty || (v->span && nvn_dirty_since_span(v->span, t->mem, t->L.size, v->stamp)))) { v->dirty = 0; tex_upload(v, t); }   // never over what the GPU drew: a flush of the pool range around a render target is not new content
@@ -756,13 +760,19 @@ static vtex *tex_get(const tex_t *t, int for_rt) {
     }
     to_general(C->up, v->img, v->aspect); C->up_used = 1;
     v->gpu = for_rt;
-    pthread_mutex_lock(&g_rmu); v->next = g_tex[v->serial % NHASH]; g_tex[v->serial % NHASH] = v; pthread_mutex_unlock(&g_rmu);
+    v->next = g_tex[v->serial % NHASH]; g_tex[v->serial % NHASH] = v;
     int packaged = (t->has_layout || cpu_written(t->serial) || init_fill(t, &f)) && t->mem && !for_rt;
     if (packaged) tex_upload(v, t);
     else if (!for_rt) {   // contents come from the GPU (copies, render passes): start cleared, as a new texture's storage would read on hardware after a clear
         VkClearColorValue z = {{0}}; VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         if (!f.depth) vkCmdClearColorImage(C->up, v->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rr);
     }
+    return v;
+}
+static vtex *tex_get(const tex_t *t, int for_rt) {
+    pthread_mutex_lock(&g_rmu);
+    vtex *v = tex_get_locked(t, for_rt);
+    pthread_mutex_unlock(&g_rmu);
     return v;
 }
 // Packaged texture: each level and layer deswizzled from the pool storage into the ring, then copied into the image by the upload command buffer (it runs before this submission's draws)
@@ -888,6 +898,13 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
 typedef struct { tex_t t; view_t v; uint8_t ok, has_v; } treg_t;
 static treg_t *g_treg; static int g_ntreg;
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static int g_nsreg;
+static vtex *registered_texture(int id, treg_t *registration) {
+    pthread_mutex_lock(&g_rmu);
+    *registration = id > 0 && id < g_ntreg ? g_treg[id] : (treg_t){0};
+    vtex *v = registration->ok ? tex_get_locked(&registration->t, 0) : NULL;
+    pthread_mutex_unlock(&g_rmu);
+    return v;
+}
 void mtl_reg_tex(int id, const tex_t *t, const view_t *v) {
     if (id < 0) return;
     pthread_mutex_lock(&g_rmu);
@@ -1670,11 +1687,9 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int *ok, vtex **vo) {
     VkImageView dummy = sampled_dummy(b->view, b->num);
     int tid = (int)(h & 0xfffff); *ok = 0; if (vo) *vo = NULL;
     if (!tid) { g_tex_miss[0]++; return dummy; }
-    pthread_mutex_lock(&g_rmu);
-    treg_t tr = tid < g_ntreg ? g_treg[tid] : (treg_t){0};
-    pthread_mutex_unlock(&g_rmu);
+    treg_t tr; vtex *v = registered_texture(tid, &tr);
     if (!tr.ok) { g_tex_miss[1]++; return dummy; }
-    vtex *v = tex_get(&tr.t, 0); if (!v) { g_tex_miss[2]++; return dummy; }
+    if (!v) { g_tex_miss[2]++; return dummy; }
     if (b->view >= 0) {
         int one = v->target == NVN_TEXTURE_TARGET_1D || v->target == NVN_TEXTURE_TARGET_1D_ARRAY;
         int want_one = b->view == VK_IMAGE_VIEW_TYPE_1D || b->view == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
@@ -1727,9 +1742,7 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
         if (b->type != BT_CIS || (b->kind != K_TEX && b->kind != K_TEXU) || b->count > 32) continue;
         for (uint32_t element = 0; element < b->count; ++element) {
         int tid = (int)(sampled_handle(1, b, element) & 0xfffff); if (!tid) continue;
-        pthread_mutex_lock(&g_rmu); treg_t tr = tid < g_ntreg ? g_treg[tid] : (treg_t){0}; pthread_mutex_unlock(&g_rmu);
-        if (!tr.ok) continue;
-        vtex *v = tex_get(&tr.t, 0); if (!v) continue;
+        treg_t tr; vtex *v = registered_texture(tid, &tr); if (!v) continue;
         for (int a = 0; a < P.n; a++) if (P.ct[a] == v && P.cv[a] && v->target != NVN_TEXTURE_TARGET_3D && (S.chmask.mask >> (4 * a) & 0xf)) { want[a] = 1; any = 1; }
         }
     }
@@ -1834,11 +1847,8 @@ static int bind_storage(VkDescriptorSet ds, const sbind *b, int stage) {
     VkDescriptorImageInfo images[32];
     for (uint32_t i = 0; i < b->count; ++i) {
         int slot = b->reg + i, tid = (int)(S.img[stage][slot] & 0xfffff);
-        pthread_mutex_lock(&g_rmu);
-        treg_t tr = tid > 0 && tid < g_ntreg ? g_treg[tid] : (treg_t){0};
-        pthread_mutex_unlock(&g_rmu);
+        treg_t tr; vtex *v = registered_texture(tid, &tr);
         if (!tr.ok) return 0;
-        vtex *v = tex_get(&tr.t, 0);   // a read/modify/write program needs the original texels
         if (!v || !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return 0;
         VkImageView view = tex_view(v, &tr.t, &tr.v, tr.has_v, -1, VIEW_STORAGE);
         if (!view) return 0;
@@ -2918,7 +2928,16 @@ static uint64_t pool_remaining(uint64_t addr) {
     }
     pthread_mutex_unlock(&g_pool_mu); return size;
 }
-void mtl_alias_drop_pool(const void *pool) { (void)pool; }
+void mtl_alias_drop_pool(const void *pool) {
+    if (!pool) return;
+    pthread_mutex_lock(&g_rmu);
+    // Match Metal's treg_drop_pool_views: a copied ID must never dereference
+    // this retired pool, even after its object address is reused. RegisterTexture
+    // or RegisterImage explicitly makes the ID live again. Encoded Vulkan views
+    // retain their normal deferred resource lifetime through the submit fence.
+    for (int i = 0; i < g_ntreg; i++) if (g_treg[i].ok && g_treg[i].t.pool == pool) g_treg[i].ok = 0;
+    pthread_mutex_unlock(&g_rmu);
+}
 // This backend has no shared sparse-tile heap to release. Sparse residency and
 // physical-tile aliasing remain open parity items; ordinary images own storage.
 void mtl_sp_phys_gone(const void *mem, uint64_t size) { (void)mem; (void)size; }
