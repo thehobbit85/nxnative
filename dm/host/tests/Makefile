@@ -100,6 +100,17 @@ android-symbols-build: $(B)/t_symbols_android
 $(B)/t_symbols_android: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h ../android_text.h ../../android/compat/sha256.c $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $< ../../android/compat/sha256.c
 .PHONY: account-mii android-account-mii-build
+.PHONY: network android-network-build
+run: network
+network: $(B)/t_network
+	$(B)/t_network $(QUIET)
+NETWORK_SRC = t_network.c t_condvar_stub.c ../hle_thread.c
+NETWORK_HEADERS = ../hle_net.c ../hle_offline.c ../hle.h ../dm.h ../host_memory.h $(GAME_H)
+$(B)/t_network: $(NETWORK_SRC) $(NETWORK_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_GUEST_SYMBOLS -I.. $(GINC) -o $@ $(NETWORK_SRC)
+android-network-build: $(B)/t_network_android
+$(B)/t_network_android: $(NETWORK_SRC) $(NETWORK_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -DDM_TEST_GUEST_SYMBOLS -I.. -I../../android/compat $(GINC) -o $@ $(NETWORK_SRC)
 run: account-mii
 account-mii: $(B)/t_account_mii
 	$(B)/t_account_mii $(QUIET)
