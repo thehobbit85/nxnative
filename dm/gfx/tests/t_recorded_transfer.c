@@ -1,5 +1,6 @@
 // Exercise the public NVN bootstrap registration and generated entry thunks on Metal or Vulkan.
-// Only the backend's submission boundary is called directly. The recorder owns the command bytes.
+// Submit through the public queue as well: this exercises backend preparation,
+// queue-state selection and capture hooks in the same order as the application.
 #include "../nvn/hle_nvn.c"
 
 static void *(*bootstrap)(const char *);
@@ -76,6 +77,11 @@ int main(void) {
     NVNdeviceBuilder db;
     API(nvnDeviceBuilderSetDefaults)(&db);
     assert(API(nvnDeviceInitialize)(&device, &db));
+    NVNqueue queue;
+    NVNqueueBuilder qb;
+    API(nvnQueueBuilderSetDevice)(&qb, &device);
+    API(nvnQueueBuilderSetDefaults)(&qb);
+    assert(API(nvnQueueInitialize)(&queue, &qb));
 
     NVNmemoryPool pool;
     NVNmemoryPoolBuilder pb;
@@ -146,9 +152,7 @@ int main(void) {
 
     assert(API(nvnSyncWait)(&sync, 0) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
     uint64_t before = API(nvnDeviceGetCurrentTimestampInNanoseconds)(&device);
-    mtl_sub_begin();
-    mtl_exec((const uint8_t *)(uintptr_t)handle);
-    mtl_sub_commit();
+    API(nvnQueueSubmitCommands)(&queue, 1, &handle);
     NVNsyncWaitResult waited = API(nvnSyncWait)(&sync, 5000000000ull);
     assert(waited == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED || waited == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
     uint64_t after = API(nvnDeviceGetCurrentTimestampInNanoseconds)(&device);
@@ -168,6 +172,8 @@ int main(void) {
     API(nvnTexturePoolRegisterImage)(&descriptors, 256, NULL, NULL);
     API(nvnTexturePoolRegisterTexture)(&descriptors, 256, &tex, NULL);
     API(nvnTexturePoolFinalize)(&descriptors);
+    API(nvnQueueFinish)(&queue);
+    API(nvnQueueFinalize)(&queue);
     API(nvnSyncFinalize)(&sync);
     API(nvnCommandBufferFinalize)(&cb);
     API(nvnTextureFinalize)(&tex);

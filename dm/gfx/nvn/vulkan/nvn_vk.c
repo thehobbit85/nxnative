@@ -1235,7 +1235,7 @@ typedef struct {
     shader_t *vs, *fs; int prim;
     va_st attr[16]; int nattr; vs_st stream[16]; int nstream;
     blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples;
-    VkFormat cf[8]; int nc; VkFormat df; int stencil;
+    VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll;
 } pso_key;
 typedef struct { pso_key k; uint64_t h; VkPipeline p; } pso_ent;
 static pso_ent *g_pso; static int g_npso, g_cpso;
@@ -1317,7 +1317,7 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL};
     VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = (VkCullModeFlags)k->poly.cull; rs.frontFace = k->poly.front ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
-    if (g_origin_ll) rs.frontFace = rs.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    if (k->origin_ll) rs.frontFace = rs.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     rs.depthBiasEnable = k->poly.offset_en != 0; rs.lineWidth = 1;
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, (VkSampleCountFlagBits)(k->samples > 1 ? k->samples : 1)};
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -1569,6 +1569,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     int prim = dw ? dw->prim : di->prim;
     if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP || prim == NVN_DRAW_PRIMITIVE_PATCHES) { RED_ONCE(31, "primitive %d not implemented yet", prim); SKIP(4); }
     pso_key k; memset(&k, 0, sizeof k);
+    k.origin_ll = g_origin_ll;
     k.vs = vs; k.fs = fs; k.prim = prim; k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
     k.nc = P.n; for (int i = 0; i < P.n; i++) { k.cf[i] = P.ct[i] && P.cv[i] ? P.ct[i]->f.f : VK_FORMAT_UNDEFINED; k.blend[i] = S.blend[i]; }
     k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.ct[0] ? 1 : 1;
@@ -1906,14 +1907,50 @@ void mtl_exec(const uint8_t *p) { uint64_t t0 = now_ns(); mtl_exec_(p); atomic_f
 // NVN's initial command buffer state, as the Metal backend's state_reset: games set some of it only by state objects or never (Metroid Dread never sets the stencil value mask,
 // which starts at 0xff; left at 0 its G-buffer draws, stencil test "not equal 2", failed everywhere and the level's opaque geometry stayed black)
 static void state_defaults(void) {
+    memset(&S, 0, sizeof S);
     for (int i = 0; i < 8; i++) S.blend[i] = (blend_st){i, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD};
     S.color = (color_st){0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; S.chmask.mask = 0xffffffffu;
     S.poly = (poly_st){NVN_FACE_NONE, NVN_FRONT_FACE_CCW, NVN_POLYGON_MODE_FILL, 0};
     S.ds = (ds_st){0, 1, NVN_DEPTH_FUNC_LESS, 0, NVN_STENCIL_FUNC_ALWAYS, NVN_STENCIL_FUNC_ALWAYS, 1, 1, 1, 1, 1, 1};
     S.st_vmask[0] = S.st_vmask[1] = S.st_wmask[0] = S.st_wmask[1] = 0xff; S.dr[1] = 1;
 }
+// The shared recorder serializes submission and finalization. Preserve the same
+// queue/program lifetime rules as Metal: no bindings may outlive their program.
+typedef struct queue_state { uint64_t serial; typeof(S) s; typeof(P) p; struct queue_state *next; } queue_state;
+static queue_state *g_queue_states, *g_active_queue;
+static int g_state_ready;
+void mtl_queue_activate(uint64_t serial) {
+    if (g_active_queue && g_active_queue->serial == serial) return;
+    if (P.open) die("Vulkan: queue switch inside a render pass");
+    if (g_active_queue) { g_active_queue->s = S; g_active_queue->p = P; }
+    queue_state *q = g_queue_states;
+    while (q && q->serial != serial) q = q->next;
+    if (q) { S = q->s; P = q->p; }
+    else {
+        q = calloc(1, sizeof *q); if (!q) die("Vulkan: queue state allocation failed");
+        q->serial = serial; q->next = g_queue_states; g_queue_states = q;
+        state_defaults(); memset(&P, 0, sizeof P);
+    }
+    g_active_queue = q; g_state_ready = 1;
+}
+void mtl_queue_forget(uint64_t serial) {
+    queue_state **at = &g_queue_states;
+    while (*at && (*at)->serial != serial) at = &(*at)->next;
+    if (!*at) return;
+    queue_state *q = *at; *at = q->next;
+    if (g_active_queue == q) { g_active_queue = NULL; state_defaults(); memset(&P, 0, sizeof P); }
+    free(q);
+}
+static void prog_unbind(typeof(S) *s, const prog_t *p) {
+    if (s->cprog == p) s->cprog = NULL;
+    for (int st = 0; st < 5; st++) if (s->bst[st] == p) s->bst[st] = NULL;
+}
+void mtl_prog_forget(const prog_t *p) {
+    prog_unbind(&S, p);
+    for (queue_state *q = g_queue_states; q; q = q->next) if (q != g_active_queue) prog_unbind(&q->s, p);
+}
 static void mtl_exec_(const uint8_t *p) {
-    static int inited; if (!inited) { inited = 1; state_defaults(); }
+    if (!g_state_ready) { g_state_ready = 1; state_defaults(); }
     for (;;) {
         op_hdr h; memcpy(&h, p, sizeof h);
         const uint8_t *a = p + 8;
@@ -2277,6 +2314,21 @@ int mtl_display_hz(void) { return 0; }
 int mtl_fps_target(void) { static int f = -1; if (f < 0) { const char *e = getenv("DM_FPS"); f = e && atoi(e) == 30 ? 30 : 60; } return f; }
 int mtl_link_active(void) { return 0; }
 int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; return 0; }
+// Android uses the Vulkan FIFO swapchain. There is no Apple display-link clock
+// or Metal snapshot ring; the recorder uses its existing fallback pacing path.
+int mtl_link_stalled(void) { return 0; }
+int mtl_link_rate(void) { return 0; }
+int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) { (void)ticks; (void)timeout_ns; return 0; }
+int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms) {
+    (void)n; (void)target; (void)lead_ms; (void)ticks; (void)gap_ms; return 0;
+}
+int mtl_snap_on(void) { return 0; }
+uint64_t mtl_snap_acquire_wait(void) { return 0; }
+int mtl_probe_ramp_on(void) { return 0; }
+int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return mtl_wait(fence, timeout_ns); }
+void mtl_prepare(void) { mtl_init(); }
+// Shader/pipeline loading remains demand-driven, under the submission lock.
+void mtl_prog_prefetch(const prog_t *p) { (void)p; }
 uint32_t mtl_present_qos(void) { return 0; }
 void mtl_ub_present(double iv_ms) { (void)iv_ms; }
 void mtl_set_depth_zero(int on) {   // vertex shaders loaded from here on follow it (spv_gl_depth); the games set it once at device init, before their first shader
@@ -2284,6 +2336,7 @@ void mtl_set_depth_zero(int on) {   // vertex shaders loaded from here on follow
     g_depth_zero = on;
 }
 void mtl_set_origin_lower_left(int on) { g_origin_ll = on; }
+void mtl_set_queue_origin_lower_left(int on) { g_origin_ll = on; }
 void mtl_set_frame(uint64_t f) { (void)f; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
@@ -2338,3 +2391,34 @@ void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full) { *load = *store = 
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full) { *skip = *full = 0; }
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse) { *enc = *reuse = 0; }
 void mtl_alloc_stats(uint64_t *w, uint64_t *g, int *n) { *w = *g = 0; *n = 0; }
+
+// These counters describe Metal-only optimizations, never used by this backend.
+void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none) { *draws = *made = *none = 0; }
+void mtl_ab_gpu(uint64_t f, double gpu_ms, double frame_ms) { (void)f; (void)gpu_ms; (void)frame_ms; }
+uint64_t mtl_pkg_edge_skips(void) { return 0; }
+void mtl_pso_line(char *out, size_t n) { snprintf(out, n, "Vulkan graphics %d, shaders %d", g_npso, g_nsh); }
+unsigned mtl_cpu_tex_count(void) {
+    unsigned n = 0; pthread_mutex_lock(&g_rmu);
+    for (int h = 0; h < NHASH; h++) for (vtex *v = g_tex[h]; v; v = v->next) if (v->uploaded && !v->gpu) n++;
+    pthread_mutex_unlock(&g_rmu); return n;
+}
+
+// Capture-file parsing is portable; live capture and the Metal texture inspection
+// tools still require a Vulkan implementation. Report requests rather than writing
+// empty files or claiming a capture succeeded. Native Vulkan dumps remain available.
+void nvn_cap_submit(int n, const uint64_t *handles) {
+    (void)n; (void)handles;
+    if (getenv("DM_NVN_CAPTURE")) RED_ONCE(90, "live NVN capture is not implemented; use DM_VK_SHOTS / DM_VK_RTDUMP for images");
+}
+void nvn_cap_present(const tex_t *t, const int crop[4]) { (void)t; (void)crop; }
+void dm_gfx_shot_at(long k, const char *path) {
+    (void)k; (void)path; LOG("[RED] vk: DM_CTL shot is unavailable; use DM_VK_SHOTS and DM_VK_SHOT_DIR");
+}
+void dm_gfx_texdump_next(const char *path) { (void)path; LOG("[RED] vk: DM_CTL texdump is unavailable; use DM_VK_RTDUMP"); }
+void dm_gfx_passdump_next(long n) { (void)n; LOG("[RED] vk: DM_CTL passdump is unavailable; use DM_VK_PASSLOG"); }
+void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; LOG("[RED] vk: DM_CTL texraw is not implemented"); }
+void dm_gfx_texlist(int target) {
+    (void)target;
+    LOG("[RED] vk: DM_CTL texlist filtering is not implemented; use DM_VK_TEXCOUNT");
+}
+void dm_gfx_restop(void) { LOG("vk: no Metal residency set; Vulkan image-memory totals are logged every 600 presents"); }
