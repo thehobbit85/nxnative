@@ -1438,7 +1438,7 @@ def nro_modules(g, exe_dir, nros):
     return set_keys(g, {'modules': (' '.join(mods), f'the NROs the game loads at run time import from {why}, which main does not')}, 'After the NRO collection')
 
 
-def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
+def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False, thread_slots='apple'):
     """patch_nso.py on every code module (each writes its own <module>.* files, all the same build_src.sha256 line), each with its log, as many at once as the Mac has cores.
     The modules are the profile's and the NROs the game registers (collect_nros; nro.tsv beside them lists those); a provisional profile first gets the subsdks those NROs import from (nro_modules).
     Reused when the modules, patch_nso.py (with nso.py, nso_code.py, nso_asm.py and the selected profile's function rules / the patch files of their builds), its switches and capstone are as at the
@@ -1448,8 +1448,10 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     except ValueError: raise BuildError('DM_REWRITE_J must be a positive integer') from None
     if workers is not None and workers < 1: raise BuildError('DM_REWRITE_J must be a positive integer')
     PROG.stage('rewrite', step='checking the inputs')
-    nro_dir = out.with_name('nro_' + out.name.removeprefix('patched_'))
+    nro_dir = out.with_name('nro_' + out.name.removeprefix('patched_android_' if thread_slots == 'android' else 'patched_'))
     nros = collect_nros(py, repo, rfs.source(exe_dir.parent), nro_dir, env, logs)
+    if thread_slots == 'android' and (nro_dir / 'missing.tsv').is_file() and (nro_dir / 'missing.tsv').read_text().strip():
+        raise BuildError('Android rewriting needs the registered NROs captured by the shared Mac preparation first')
     if provisional and nros: g = nro_modules(g, exe_dir, nros)
     mods = g.modules_in(exe_dir)   # a version may lack a module of the profile another version has (game.py build_modules)
     manifest = nro_dir / 'nro.tsv'
@@ -1460,10 +1462,10 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
     key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
-                      {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
+                      {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own, thread_slots)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
-        return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional)
+        return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional) if thread_slots == 'apple' else g
     tmp = out.with_name(out.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True); logs.mkdir(parents=True, exist_ok=True)
     if manifest.is_file(): shutil.copyfile(manifest, tmp / 'nro.tsv')   # refused-only manifests preserve the game's offline registration path too
     PROG.set(step=', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''), done=0, total=len(names), unit='modules')
@@ -1474,7 +1476,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
         while todo or procs:
             while todo and len(procs) < cores:
                 m = todo.pop(0); logf[m] = open(logs / f'rewrite_{m}.log', 'w')
-                procs[m] = subprocess.Popen([str(py), str(repo / 'dm/tools/patch_nso.py'), str(src[m]), str(tmp), m], env=rewrite_env, stdout=logf[m], stderr=subprocess.STDOUT)
+                procs[m] = subprocess.Popen([str(py), str(repo / 'dm/tools/patch_nso.py'), str(src[m]), str(tmp), m, '--thread-slots', thread_slots], env=rewrite_env, stdout=logf[m], stderr=subprocess.STDOUT)
             for m in [m for m in procs if procs[m].poll() is not None]:
                 p = procs.pop(m); logf[m].close(); PROG.set(done=len(names) - len(todo) - len(procs))
                 if p.returncode:
@@ -1489,7 +1491,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
         for f in logf.values(): f.close()
     rmtree(kf); swap_in(tmp, out); kf.write_text(f'{key}\n')
     PROG.end(', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''))
-    return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional)
+    return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional) if thread_slots == 'apple' else g
 
 
 NRO_CAPTURE_SECS = 120   # Mario Tennis Fever's boot stub decodes its 24.7 MB NRO in under a second, with a cold file cache far less than this
@@ -2499,6 +2501,35 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     return out
 
 
+def android_shaders(py, repo, sh, env, logs, g, pkg_key):
+    """Reuse only an exact, complete Vulkan export; publish replacements atomically."""
+    PROG.stage('Android Vulkan shaders')
+    keys = sorted(shader_keys(g))
+    exporter = repo / 'dm/android/tools/spv_android.py'
+    key = fingerprint(pkg_key, keys, ('files', chain_files(repo) + [exporter] + profile_files(g)),
+                      ('stat', repo / 'dm/gfx/tools/dmsh_xlate_bin'), env=env)
+    out = sh / 'vk'; manifest = out / 'manifest.json'
+    try:
+        saved = json.loads(manifest.read_text())
+        expected = {k + suffix for k in keys for suffix in ('.spv', '.vk.txt')}
+        if saved['inputs'] == key and set(saved['files']) == expected and all(
+                hashlib.sha256((out / name).read_bytes()).hexdigest() == digest for name, digest in saved['files'].items()):
+            PROG.end(f'{len(keys)} shader stages, reused (inputs and products unchanged)')
+            return out
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    sh.mkdir(parents=True, exist_ok=True)
+    wanted = sh / 'android-keys.txt'; wanted.write_text('\n'.join(keys) + '\n')
+    tmp = sh / 'vk.partial'; rmtree(tmp)
+    run([py, exporter, sh / 'pkg', tmp, '--keys-file', wanted], logs / 'android_shaders.log', env=env)
+    files = {k + suffix: hashlib.sha256((tmp / (k + suffix)).read_bytes()).hexdigest()
+             for k in keys for suffix in ('.spv', '.vk.txt')}
+    (tmp / 'manifest.json').write_text(json.dumps({'inputs': key, 'files': files}, indent=2) + '\n')
+    swap_in(tmp, out)
+    PROG.end(f'{len(keys)} validated shader stages')
+    return out
+
+
 def check_metal(py, repo, env):
     """An NVN game's shaders are built only with the Metal compiler they were tested with (dmsh_chain.lock), unless ALLOW_OTHER_METAL: checked before the shader steps, so a Mac with
     another Xcode stops in seconds instead of after the shader split. Issue #242 reported corruption with an untested compiler; its role remains unconfirmed"""
@@ -2827,7 +2858,7 @@ def parse_args(argv):
     ap.add_argument('--romfs', choices=('bundle', 'separate'), help='bundle = the game files go into the IPA (default: the ROMFS setting, bundle); separate = they stay out of the IPA and the Xcode app: the build is small and fast, and the RomFS image '
                     'is copied to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app refuses an image of another version)')
     ap.add_argument('--prepare-xcode', action='store_true', help='prepare a per-game Xcode project and add it to the shared workspace instead of packing an IPA (requires keeping extracted files)')
-    ap.add_argument('--platform', choices=('ios', 'mac', 'mac-app'), help='ios = the IPA (or the Xcode project); mac = for development: build only what running the game on this Mac needs (the Mac shaders and the Mac host, '
+    ap.add_argument('--platform', choices=('ios', 'mac', 'mac-app', 'android'), help='android = ARM64 APK (NVN games); ios = the IPA (or the Xcode project); mac = for development: build only what running the game on this Mac needs (the Mac shaders and the Mac host, '
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
@@ -2939,13 +2970,14 @@ def main(args=None):
     repo = find_repo(here)
     prepare_xcode = args.prepare_xcode or PREPARE_XCODE
     platform = args.platform or PLATFORM
-    if platform not in ('ios', 'mac', 'mac-app'): raise BuildError(f'PLATFORM / --platform must be ios, mac or mac-app: {platform}')
+    if platform not in ('ios', 'mac', 'mac-app', 'android'): raise BuildError(f'PLATFORM / --platform must be ios, mac, mac-app or android: {platform}')
+    android = platform == 'android'
     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
     mac_pack = platform == 'mac-app'
     seen_shaders = SEEN_SHADERS if args.seen_shaders is None else args.seen_shaders
     if seen_shaders and not mac: raise BuildError('--seen-shaders / SEEN_SHADERS builds a partial library of Mac shaders: it needs --platform mac or mac-app')
     if args.mac_sign and not mac_pack: raise BuildError('--mac-sign signs the Mac app: it needs --platform mac-app')
-    if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
+    if (mac or android) and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
     if mac and not apple_silicon(): raise BuildError(f'--platform {platform} runs the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
     check_native_python()
     keep = KEEP_EXTRACTED if args.keep_extracted is None else args.keep_extracted
@@ -2956,6 +2988,7 @@ def main(args=None):
     if romfs_mode not in ('bundle', 'separate'): raise BuildError(f'ROMFS / --romfs must be bundle or separate: {romfs_mode}')
     if romfs_mode == 'separate' and mac: raise BuildError(f'--romfs separate keeps the game files off the iPhone app: it cannot be combined with --platform {platform}, which runs from the extracted files')
     if romfs_mode == 'separate' and not keep: raise BuildError('--romfs separate requires --keep-extracted: the image must remain available for the one-time transfer to the phone')
+    if android and (args.gpu or args.team_id or args.bundle_id): raise BuildError('--gpu, --team-id and --bundle-id are Apple-only options')
     nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
     if not nsp_dir.exists(): raise BuildError(f'not a folder: {nsp_dir}')
     nup = nup_file(nsp_dir)   # a NUP file given in place of the folder: its folder is the NSP folder (the build folder and the IPA go there)
@@ -3039,6 +3072,9 @@ def main(args=None):
     out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')   # by default next to the build folder (the NSP folder, beside the NSPs and <id>_build/, unless --work-dir moved it)
     if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
     if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')
+    if android:
+        out_ipa = out_ipa.with_suffix('.apk') if not (args.out or OUT_IPA) else out_ipa
+        if out_ipa.suffix != '.apk': raise BuildError('an Android output must end in .apk')
     project = work / 'xcode/DmIOS.xcodeproj'
     workspace = Path(os.path.expanduser(args.xcode_workspace or XCODE_WORKSPACE)).resolve() if (args.xcode_workspace or XCODE_WORKSPACE) else nsp_dir.parent / 'NxNative.xcworkspace'
     if prepare_xcode and workspace.suffix != '.xcworkspace': raise BuildError('--xcode-workspace must end in .xcworkspace')
@@ -3052,13 +3088,17 @@ def main(args=None):
             if not saved_signing and legacy_config.exists() and f'/gen/{g.id}/' in legacy_config.read_text():
                 saved_signing = xcode_projects.signing_settings(repo / 'dm/ios/DmIOS.xcodeproj')
         except ValueError as e: raise BuildError(str(e)) from e
-    say('Mac app: the Mac shaders and the Mac host, packed into a Mac app; no iOS shaders, Xcode project or IPA' if mac_pack else 'Mac-only build for development: the Mac shaders and the Mac host, no iOS shaders, Xcode project or IPA' if mac else f'Xcode project: {project}' if prepare_xcode else f'output IPA: {out_ipa}')
+    say(f'Android APK: {out_ipa}' if android else 'Mac app: the Mac shaders and the Mac host, packed into a Mac app; no iOS shaders, Xcode project or IPA' if mac_pack else 'Mac-only build for development: the Mac shaders and the Mac host, no iOS shaders, Xcode project or IPA' if mac else f'Xcode project: {project}' if prepare_xcode else f'output IPA: {out_ipa}')
     say(f'work folder (extracted game files in extract/, {"kept for the next build" if keep else "deleted after the IPA is built"}): {work}')
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
     logs = work / 'logs'
-    check_prereqs(env, xlate, mac)
+    check_prereqs(env, xlate, mac or android)
+    if android:
+        if not env.get('ANDROID_NDK_HOME'): raise BuildError('Android needs ANDROID_NDK_HOME')
+        if not (env.get('ANDROID_SDK_ROOT') or env.get('ANDROID_HOME')): raise BuildError('Android needs ANDROID_SDK_ROOT')
+        if not shutil.which('spirv-val', path=env.get('PATH')): raise BuildError('Android shader export needs spirv-val (SPIRV-Tools)')
     picks = pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
@@ -3097,6 +3137,7 @@ def main(args=None):
     # how the shaders are got follows from the packed version's files (profile_guess.py shader_sources): the graphics API, and the shaders made only at run time
     src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
     gfx = src['graphics'][0]   # nvn, vulkan (Hades: the host's Vulkan layer, SPIR-V shaders) or gl (Digimon Story Cyber Sleuth: the host's GL layer, GLSL sources)
+    if android and gfx != 'nvn': raise BuildError(f'Android currently supports NVN games; the guest {gfx} backend is not implemented')
     glslc = gfx == 'nvn' and src['glslc_capture'][0]   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
     vkcap = gfx == 'vulkan' and src['vk_capture'][0]   # SPIR-V shaders the game generates at run time, captured in the Mac host (capture_shaders)
     glcap = gfx == 'gl' and src['gl_capture'][0]   # GLSL the game puts together at run time (LÖVE), captured in the Mac host (capture_shaders)
@@ -3171,13 +3212,33 @@ def main(args=None):
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
         seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None
-        ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))
+        ios = android_shaders(py, repo, sh, env, logs, g, pkey) if android else build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     motion = MOTION if args.motion is None else args.motion
     jit = uses_jit(game / 'ExeFS')
-    if jit and not mac and not mac_pack: capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image
+    if jit and platform == 'ios': capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image
     env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
+    if android:
+        android_patched = work / f'patched_android_{pkg_ver}'
+        g = rewrite(py, repo, game / 'ExeFS', android_patched, env, logs, g, provisional, thread_slots='android')
+        PROG.stage('Android APK')
+        cmd = [py, repo / 'scripts/build_android.py', g.id, work, out_ipa,
+               '--patched', android_patched, '--romfs', rfs.source(game), '--label', app_name, '--language', lang]
+        if romfs_mode == 'bundle': cmd += ['--bundle']
+        if aoc: cmd += ['--aoc', aoc]
+        if icon: cmd += ['--icon', icon]
+        if env_file: cmd += ['--env-file', env_file]
+        run(cmd, logs / 'android_build.log', env=env)
+        if not out_ipa.is_file(): raise BuildError(f'no APK at {out_ipa}')
+        PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
+        if not keep: rmtree(ex)
+        say(f'done: {out_ipa}; install this development APK on an ARM64 Android device or emulator')
+        if romfs_mode == 'separate':
+            say('game assets are separate; after installing the APK, deploy with an explicit device serial:')
+            PROG.say(shlex.join([str(py), str(repo / 'dm/android/tools/make_apk.py'), g.id, str(work), '--deploy', '--serial', '<adb-serial>', '--patched', str(android_patched), '--romfs', str(rfs.source(game))] + (['--aoc', str(aoc)] if aoc else [])))
+        report_profile_status(g, reg, pkg_ver, derived, provisional, 'Android APK', android_patched)
+        return
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
             rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx}

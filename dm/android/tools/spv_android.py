@@ -193,7 +193,7 @@ def export(pkg, keys, out):
         wrapper.write_text('#!/bin/sh\nexec ' + shlex.join([sys.executable, str(Path(__file__).resolve()), '--capture']) + ' "$@"\n')
         wrapper.chmod(0o700)
         env = dict(os.environ, XLATE=str(wrapper), WORK=str(work), DMSH_SPV_CAPTURE=str(captured),
-                   DMSH_CAS=str(work / 'cas'), DMSH_PREFILL='')
+                   DMSH_CAS=str(work / 'cas'), DMSH_PREFILL='', DMSH_TARGETS='mac')
         env.pop('IOSOUT', None)
         keys = sorted(set(keys))
         for i in range(0, len(keys), 512):
