@@ -15,9 +15,11 @@ void *guest_sym(const char *name) { (void)name; return NULL; }
 #endif
 module_t *module_of(const void *p) { (void)p; return NULL; }
 #include <time.h>
+#ifndef DM_TEST_GUEST_CLOCK
 uint64_t now_ns(void) { struct timespec t; if (clock_gettime(CLOCK_MONOTONIC, &t)) abort(); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 uint64_t guest_ns(void) { return now_ns(); }
 int dm_detclock_enabled(void) { return 0; }
+#endif
 __thread _Atomic int dm_host_work;   // referenced by hle_thread.c; in the host it is defined in hle_nvn.c
 #ifdef __APPLE__
 pthread_key_t g_key18;   // read by hle_thread.c's SVC entry and pause signal; in the host it is defined in loader.c (never created here: those paths do not run)
