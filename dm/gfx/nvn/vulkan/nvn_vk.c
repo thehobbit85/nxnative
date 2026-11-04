@@ -117,13 +117,13 @@ typedef struct { int kind; void *dst; uint32_t mode, v; uint64_t addr; uint32_t 
 typedef struct vtex vtex;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer cb, up; VkFence fence; VkDescriptorPool dp;
-    VkBuffer ring; VkDeviceMemory ringm; uint8_t *ringp; VkDeviceSize used;
+    VkBuffer ring; VkDeviceMemory ringm; uint8_t *ringp; VkDeviceSize used, capacity;
     post_t *post; int npost, cpost;
     uint64_t fence_val; int up_used;
     VkQueryPool qp;   // GPU timestamps at the start and the end of the submission
     VkFramebuffer *fb; int nfb, cfb;   // render passes' framebuffers (no dynamic rendering), destroyed when the submission is done
     VkBuffer ring0; VkDeviceMemory ringm0; uint8_t *ringp0;   // the context's own ring; ring / ringp move to extra rings when a submission outgrows it (loading screens upload hundreds of MB)
-    struct { VkBuffer b; VkDeviceMemory m; } *extra; int nextra;
+    struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; } *extra; int nextra;
 } ctx_t;
 static _Atomic uint64_t g_gpu_ns;
 static ctx_t g_ctx[NCTX]; static ctx_t *C; static int g_ci;
@@ -134,10 +134,13 @@ static int g_pend[NCTX], g_npend;   // contexts submitted and not yet completed,
 static uint64_t g_wgen;   // bumped by every in-order write to guest memory (and when the ring changes): the per-submission copies are reused only within one generation
 static VkDeviceSize ring_alloc(VkDeviceSize n, VkDeviceSize align) {
     VkDeviceSize o = (C->used + align - 1) / align * align;
-    if (o + n > RING) {   // full: an extra ring for the rest of this submission (what was recorded keeps its buffer), freed when the submission is done
-        if (n > RING) { RED_ONCE(1, "one copy of %llu MB is larger than a ring buffer: dropped", (unsigned long long)(n >> 20)); return VK_WHOLE_SIZE; }
-        C->extra = realloc(C->extra, (C->nextra + 1) * sizeof *C->extra);
-        C->extra[C->nextra].b = buf_new(RING, ALL_BUF_USAGE, &C->extra[C->nextra].m, (void **)&C->ringp); C->ring = C->extra[C->nextra++].b; atomic_fetch_add(&g_extra_ring_bytes, RING);
+    if (o > C->capacity || n > C->capacity - o) {   // older backing stays live through this submission; a large single range gets its own sized allocation
+        C->capacity = n > RING ? n : RING;
+        void *next = realloc(C->extra, (C->nextra + 1) * sizeof *C->extra);
+        if (!next) die("Vulkan: cannot track submission buffers");
+        C->extra = next;
+        C->extra[C->nextra].size = C->capacity;
+        C->extra[C->nextra].b = buf_new(C->capacity, ALL_BUF_USAGE, &C->extra[C->nextra].m, (void **)&C->ringp); C->ring = C->extra[C->nextra++].b; atomic_fetch_add(&g_extra_ring_bytes, C->capacity);
         C->used = 0; o = 0; g_wgen++;   // copies cached in the old ring are not reused from the new one
     }
     C->used = o + n; return o;
@@ -239,7 +242,7 @@ static void ctx_complete(ctx_t *c) {
     }
     c->npost = 0;
     gw_expire(c->fence_val);
-    for (int i = 0; i < c->nextra; i++) { vkDestroyBuffer(g_dev, c->extra[i].b, NULL); vkFreeMemory(g_dev, c->extra[i].m, NULL); atomic_fetch_sub(&g_extra_ring_bytes, RING); }
+    for (int i = 0; i < c->nextra; i++) { vkDestroyBuffer(g_dev, c->extra[i].b, NULL); vkFreeMemory(g_dev, c->extra[i].m, NULL); atomic_fetch_sub(&g_extra_ring_bytes, c->extra[i].size); }
     c->nextra = 0;
     for (int i = 0; i < c->nfb; i++) vkDestroyFramebuffer(g_dev, c->fb[i], NULL);
     c->nfb = 0;
@@ -1741,9 +1744,16 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
 // ranges share one backing allocation, so writes and atomics through either
 // descriptor see the same bytes, including across vertex and fragment sets.
 static gw_t g_storage[128]; static size_t g_nstorage;
-static const p_bind_buf *storage_binding(const sbind *b, int stage) {
-    if (b->type != BT_SSBO || b->count != 1 || b->reg < 0 || b->reg >= 16) return NULL;
-    return b->kind == K_SBUF ? &S.ssbo[stage][b->reg] : b->kind == K_UBOP ? &S.ubo[stage][b->reg] : NULL;
+static uint64_t pool_remaining(uint64_t addr);
+static p_bind_buf storage_binding(const sbind *b, int stage) {
+    p_bind_buf u = {0};
+    if (b->type != BT_SSBO || b->count != 1 || b->reg < 0 || b->reg >= 16) return u;
+    if (b->kind == K_SBUF) u = S.ssbo[stage][b->reg];
+    else if (b->kind == K_UBOP) u = S.ubo[stage][b->reg];
+    // Like Metal's sbw_len: size zero means the rest of the registered pool,
+    // not an empty descriptor. Resolve it afresh after pool replacement.
+    if (u.addr && !u.size) u.size = pool_remaining(u.addr);
+    return u;
 }
 static int storage_order(const void *a, const void *b) {
     uint64_t x = ((const gw_t *)a)->addr, y = ((const gw_t *)b)->addr;
@@ -1755,11 +1765,12 @@ static int prepare_storage(shader_t **first, shader_t **second) {
     for (int st = 0; st < 2; st++) {
         shader_t *s = stages[st]; if (!s) continue;
         for (int i = 0; i < s->nb; i++) {
-            const p_bind_buf *u = storage_binding(&s->b[i], s->stage);
-            if (!u || !u->addr || !u->size) continue;
-            if (u->size > UINT64_MAX - u->addr) return 0;
+            p_bind_buf u = storage_binding(&s->b[i], s->stage);
+            if (!u.addr || !u.size) continue;
+            if (u.size > UINT64_MAX - u.addr) return 0;
+            if (u.size > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "storage range exceeds the device descriptor limit: requires shader address lowering"); return 0; }
             if (g_nstorage == sizeof g_storage / sizeof *g_storage) die("Vulkan: too many storage bindings");
-            g_storage[g_nstorage++] = (gw_t){.addr=u->addr, .size=u->size};
+            g_storage[g_nstorage++] = (gw_t){.addr=u.addr, .size=u.size};
         }
     }
     qsort(g_storage, g_nstorage, sizeof *g_storage, storage_order);
@@ -1785,10 +1796,10 @@ static int prepare_storage(shader_t **first, shader_t **second) {
         shader_t *s=stages[st];if(!s) continue;
         uint32_t bias[64]={0};
         for (int b=0;b<s->nb;b++) {
-            const p_bind_buf *u=storage_binding(&s->b[b],s->stage);
-            if(!u || !u->addr || !u->size) continue;
-            for(size_t i=0;i<n;i++) if(u->addr>=g_storage[i].addr && u->addr-g_storage[i].addr<g_storage[i].size) {
-                bias[b]=(uint32_t)((u->addr-g_storage[i].addr)%align);break;
+            p_bind_buf u=storage_binding(&s->b[b],s->stage);
+            if(!u.addr || !u.size) continue;
+            for(size_t i=0;i<n;i++) if(u.addr>=g_storage[i].addr && u.addr-g_storage[i].addr<g_storage[i].size) {
+                bias[b]=(uint32_t)((u.addr-g_storage[i].addr)%align);break;
             }
         }
         shader_t *variant=buffer_variant(s,bias);
@@ -1875,7 +1886,8 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
             } else if (b->kind == K_C1 && s->c1_len) { VkDeviceSize o = ring_put(s->c1, s->c1_len, 256); if (o != VK_WHOLE_SIZE) *d = (VkDescriptorBufferInfo){C->ring, o, s->c1_len}; }
             else if (b->kind == K_SUPPORT) *d = (VkDescriptorBufferInfo){g_support_buf, 0, 4096};
             else if ((b->kind == K_SBUF || b->kind == K_UBOP) && b->reg >= 0 && b->reg < 16) {   // preserve prior GPU writes, then publish writable bindings after the command
-                const p_bind_buf *u = b->kind == K_SBUF ? &S.ssbo[stage][b->reg] : &S.ubo[stage][b->reg];
+                p_bind_buf range = storage_binding(b, stage);
+                const p_bind_buf *u = &range;
                 VkBuffer gb = VK_NULL_HANDLE; VkDeviceSize go = 0; uint8_t *gp = NULL;
                 if (u->addr && u->size && (prepared_storage(u->addr, u->size, &gb, &go, &gp) || gw_find(u->addr, u->size, 256, &gb, &go, &gp))) *d = (VkDescriptorBufferInfo){gb, go, u->size};
                 else if (u->addr && u->size) { VkDeviceSize o = copy_in(u->addr, u->size, 256); if (o != VK_WHOLE_SIZE) { *d = (VkDescriptorBufferInfo){C->ring, o, u->size}; gb = C->ring; go = o; gp = C->ringp + o; } }
@@ -1924,6 +1936,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                 }
             }
             d->offset -= s->buffer_bias[i]; d->range += s->buffer_bias[i];
+            if (b->type == BT_SSBO && d->range > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "biased storage range exceeds the device descriptor limit"); return VK_NULL_HANDLE; }
             x->descriptorType = b->type == BT_UBO ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; x->pBufferInfo = d;
         } else if (b->type == BT_CIS) {
             VkDescriptorImageInfo images[32];
@@ -2387,7 +2400,7 @@ void mtl_sub_begin(void) {
     uint64_t w0 = now_ns();
     pthread_mutex_lock(&g_mu); while (c->fence_val > g_done) pthread_cond_wait(&g_cv, &g_mu); pthread_mutex_unlock(&g_mu);
     atomic_fetch_add(&g_wait_ns, now_ns() - w0);
-    C = c; C->used = 0; C->up_used = 0; g_ndc = 0; g_wgen++; C->ring = C->ring0; C->ringp = C->ringp0;
+    C = c; C->used = 0; C->capacity = RING; C->up_used = 0; g_ndc = 0; g_wgen++; C->ring = C->ring0; C->ringp = C->ringp0;
     VKCHECK(vkResetDescriptorPool(g_dev, C->dp, 0));
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     VKCHECK(vkBeginCommandBuffer(C->cb, &bi)); VKCHECK(vkBeginCommandBuffer(C->up, &bi));
@@ -2873,17 +2886,37 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     memset(dst, 0, img * (size_t)(r->depth > 0 ? r->depth : 1));
 }
 
-// Memory pools: nothing to do (draws copy what they read); mtl_addr answers for the NVN layer whether an address is in one
-#define NPOOL 4096
-static struct { const uint8_t *mem; uint64_t size; } g_pool[NPOOL];
-static int g_npool;
+// Guest extents for checked address lookup and open-ended storage bindings.
+typedef struct { const uint8_t *mem; uint64_t size; } pool_range;
+static pool_range *g_pool;
+static size_t g_npool, g_cpool;
 static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
-void mtl_pool_add(const void *mem, uint64_t size) { pthread_mutex_lock(&g_pool_mu); if (g_npool < NPOOL) { g_pool[g_npool].mem = mem; g_pool[g_npool].size = size; g_npool++; } pthread_mutex_unlock(&g_pool_mu); }
-void mtl_pool_del(const void *mem) { pthread_mutex_lock(&g_pool_mu); for (int i = 0; i < g_npool; i++) if (g_pool[i].mem == mem) { g_pool[i] = g_pool[--g_npool]; break; } pthread_mutex_unlock(&g_pool_mu); }
+void mtl_pool_add(const void *mem, uint64_t size) {
+    if (size > UINT64_MAX - (uintptr_t)mem) die("Vulkan: memory pool address overflow");
+    pthread_mutex_lock(&g_pool_mu);
+    if (g_npool == g_cpool) {
+        if (g_cpool > SIZE_MAX / 2 / sizeof *g_pool) die("Vulkan: memory pool table size overflow");
+        size_t capacity = g_cpool ? g_cpool * 2 : 64;
+        pool_range *next = realloc(g_pool, capacity * sizeof *next);
+        if (!next) die("Vulkan: cannot track memory pools");
+        g_pool = next; g_cpool = capacity;
+    }
+    g_pool[g_npool++] = (pool_range){mem, size};
+    pthread_mutex_unlock(&g_pool_mu);
+}
+void mtl_pool_del(const void *mem) { pthread_mutex_lock(&g_pool_mu); for (size_t i = 0; i < g_npool; i++) if (g_pool[i].mem == mem) { g_pool[i] = g_pool[--g_npool]; break; } pthread_mutex_unlock(&g_pool_mu); }
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     int hit = 0; pthread_mutex_lock(&g_pool_mu);
-    for (int i = 0; i < g_npool && !hit; i++) { uint64_t b = (uint64_t)(uintptr_t)g_pool[i].mem; if (addr >= b && addr + len <= b + g_pool[i].size) { if (buf) *buf = (void *)g_pool[i].mem; if (off) *off = addr - b; hit = 1; } }
+    for (size_t i = 0; i < g_npool && !hit; i++) { uint64_t b = (uintptr_t)g_pool[i].mem; if (addr >= b && addr - b <= g_pool[i].size && len <= g_pool[i].size - (addr - b)) { if (buf) *buf = (void *)g_pool[i].mem; if (off) *off = addr - b; hit = 1; } }
     pthread_mutex_unlock(&g_pool_mu); return hit;
+}
+static uint64_t pool_remaining(uint64_t addr) {
+    uint64_t size = 0; pthread_mutex_lock(&g_pool_mu);
+    for (size_t i = 0; i < g_npool && !size; i++) {
+        uint64_t b = (uintptr_t)g_pool[i].mem;
+        if (addr >= b && addr - b < g_pool[i].size) size = g_pool[i].size - (addr - b);
+    }
+    pthread_mutex_unlock(&g_pool_mu); return size;
 }
 void mtl_alias_drop_pool(const void *pool) { (void)pool; }
 // This backend has no shared sparse-tile heap to release. Sparse residency and

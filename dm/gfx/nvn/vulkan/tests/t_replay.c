@@ -835,12 +835,12 @@ static void readback_gpu_consumer(void) {
     puts("Pitched texture readback feeds the next compute command without a host fence");
 }
 static void buffer_range_lifetime(void) {
-    enum { COUNT=600, LARGE_BYTES=(64<<20)-256 };
+    enum { COUNT=600, LARGE_BYTES=(66<<20)+256 };
     uint32_t *large=malloc(LARGE_BYTES), words[COUNT], result[COUNT];
     assert(large);memset(large,0,LARGE_BYTES);memset(words,0,sizeof words);memset(result,0,sizeof result);
     list_t list={0};
-    // Almost fill one ring. The following writes roll over while its contents
-    // remain live, and grow ownership tracking beyond its former 512 entries.
+    // Exceed the usual ring size in one write. Following writes roll over while
+    // it remains live, and grow ownership tracking beyond its former 512 entries.
     RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)large,.size=LARGE_BYTES,.value=0x12345678);
     put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);
     for(int i=0;i<COUNT;i++) {
@@ -860,6 +860,16 @@ static void buffer_range_lifetime(void) {
     put(&list,OP_END,NULL,0);mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
     for(int i=0;i<COUNT;i++) assert(words[i]==(uint32_t)i+100 && result[i]==(uint32_t)i+1100);
     for(size_t i=0;i<LARGE_BYTES/4;i++) assert(large[i]==0x12345678);
+    // A subsequent submission snapshots the entire open-ended range afresh;
+    // it cannot reuse the retired backing from the fill above.
+    mtl_pool_add(large,LARGE_BYTES);list.length=0;
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&buffer_program,.stages=0x20);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)large,.size=0);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)result,.size=16);
+    RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
+    put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for(int i=0;i<4;i++) assert(result[i]==0x12345678+1000);
+    mtl_pool_del(large);
     free(large);
     puts("600 live GPU buffer ranges and ring rollover retain their data through completion");
 }
@@ -899,15 +909,16 @@ static void graphics_storage(void) {
     puts("Vertex and fragment storage writes survive successive draws, compute consumers and fences");
 }
 static void simultaneous_aliases(void) {
-    for(int mode=0;mode<8;mode++) {
+    for(int mode=0;mode<9;mode++) {
         uint32_t storage[260], result[6]={0xcafebabe,0,0,0,0,0xcafebabe};
         for(int i=0;i<260;i++) storage[i]=0xcafebabe;
-        const uint32_t deltas[]={0,64,1,3,4,7,63,65};
+        const uint32_t deltas[]={0,64,1,3,4,7,63,65,4};
         uint32_t delta=deltas[mode];
+        if(mode==8) mtl_pool_add(storage+1,1024);
         list_t list={0};push_constants(&list,1,240,&delta,sizeof delta);
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&alias_program,.stages=0x20);
-        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(storage+1),.size=mode?512:256);
-        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)(storage+1+delta),.size=mode?256:512);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(storage+1),.size=mode==8?0:mode?512:256);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)(storage+1+delta),.size=mode==8?0:mode?256:512);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=2,.addr=(uintptr_t)(result+1),.size=16);
         RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
         put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
@@ -916,7 +927,8 @@ static void simultaneous_aliases(void) {
             fprintf(stderr,"simultaneous aliases mode%d word%d: %u expected %u\n",mode,i,result[i+1],expected[i]);abort();
         }
         for(int i=0;i<260;i++) assert(storage[i]==(i==1+delta?1001:i==2+delta?2002:i==3+delta?3004:0xcafebabe));
-        assert(result[4]==192&&result[0]==0xcafebabe&&result[5]==0xcafebabe);
+        assert(result[4]==(mode==8?508:192)&&result[0]==0xcafebabe&&result[5]==0xcafebabe);
+        if(mode==8) mtl_pool_del(storage+1);
     }
     puts("Overlapping storage bindings share writes and atomics within one dispatch");
 }
@@ -967,7 +979,29 @@ static void gpu_indices(void) {
     mtl_tex_release(&target);
     puts("GPU-generated 8/16/32-bit indices reach indexed draws within and across submissions");
 }
+static void pool_ranges(void) {
+    enum { COUNT=4100, BYTES=32 };
+    uint8_t *mem=calloc(COUNT,BYTES);assert(mem);
+    for(int i=0;i<COUNT;i++) mtl_pool_add(mem+i*BYTES,BYTES);
+    for(int i=0;i<COUNT;i++) {
+        void *base=NULL;uint64_t off=0;
+        assert(mtl_addr((uintptr_t)(mem+i*BYTES+3),BYTES-3,&base,&off));
+        assert(base==mem+i*BYTES&&off==3);
+    }
+    assert(!mtl_addr((uintptr_t)mem+1,UINT64_MAX,NULL,NULL));
+    assert(!mtl_addr(UINT64_MAX-8,32,NULL,NULL));
+    for(int i=0;i<COUNT;i++) mtl_pool_del(mem+i*BYTES);
+    assert(!mtl_addr((uintptr_t)mem,1,NULL,NULL));
+    mtl_pool_add(mem,BYTES/2);
+    assert(mtl_addr((uintptr_t)mem+BYTES/2-1,1,NULL,NULL));
+    assert(!mtl_addr((uintptr_t)mem+BYTES/2,1,NULL,NULL));
+    mtl_pool_del(mem);free(mem);
+    puts("Pool lookup retains 4100 registrations, rejects overflow and respects reused extents");
+}
 int main(void) {
+    const char *buffers=getenv("DM_VK_TEST_BUFFERS");
+    if(buffers) { if(!strcmp(buffers,"pools")) pool_ranges();else if(!strcmp(buffers,"large")) buffer_range_lifetime();else simultaneous_aliases();return 0; }
+    pool_ranges();
     if(getenv("DM_VK_TEST_HANDLES")) { uniform_texture_array();return 0; }
     gpu_indices();
     graphics_storage_alias();
