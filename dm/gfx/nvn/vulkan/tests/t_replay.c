@@ -269,6 +269,45 @@ static void vertex_fetch(void) {
     puts("Vulkan vertex fetch values and rejected conversions passed");
 }
 
+// Two queues retain independent render targets and copy strides across submissions.
+// Finalizing a program must also clear bindings saved on an inactive queue.
+static void queue_lifetime(void) {
+    tex_t target[2] = {0};
+    uint8_t pixels[2][80];
+    for (int q = 0; q < 2; q++) {
+        target[q] = (tex_t){.serial = 0x8000 + q, .d = {.width = 4, .height = 4, .depth = 1,
+            .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+        nvn_tex_layout(&target[q].d, &target[q].L);
+        list_t list = {0};
+        RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&target[q]});
+        RECORD(OP_COPY_STRIDE, p_copy_stride, .stride = q ? 20 : 16);
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &program, .stages = 3);
+        put(&list, OP_END, NULL, 0);
+        mtl_queue_activate(100 + q); mtl_sub_begin(); mtl_exec(list.bytes);
+        assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    }
+    mtl_prog_forget(&program);
+    for (int q = 0; q < 2; q++) {
+        list_t list = {0};
+        memset(pixels[q], 0xcc, sizeof pixels[q]);
+        RECORD(OP_CLEAR_COLOR, p_clear_color, .mask = 15, .rgba = {q ? 0 : 1, q ? 1 : 0, 0, 1});
+        // With the finalized program unbound this draw is skipped, leaving the clear.
+        RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+        RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &target[q], .src = (uintptr_t)pixels[q],
+               .r = {.width = 4, .height = 4, .depth = 1});
+        put(&list, OP_END, NULL, 0);
+        mtl_queue_activate(100 + q); mtl_sub_begin(); mtl_exec(list.bytes);
+        assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
+            const uint8_t expected[] = {q ? 0 : 255, q ? 255 : 0, 0, 255};
+            assert(!memcmp(pixels[q] + y * (q ? 20 : 16) + x * 4, expected, 4));
+        }
+        if (q) for (int y = 0; y < 4; y++) for (int x = 16; x < 20; x++) assert(pixels[q][y * 20 + x] == 0xcc);
+    }
+    mtl_queue_forget(100); mtl_queue_forget(101);
+    puts("Vulkan queue targets, copy strides and finalized program bindings passed");
+}
+
 int main(void) {
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
@@ -278,5 +317,6 @@ int main(void) {
     vertex_fetch();
     registered_images();
     strided_layers();
+    queue_lifetime();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
