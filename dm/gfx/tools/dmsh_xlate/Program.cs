@@ -7,6 +7,7 @@
 // Usage: dmsh_xlate <job.json> <output dir>
 //   Job: [{ "key", "stage": "vs|ps|cs", "code": machine code file (graphics = 0x50-byte SPH + instructions, compute = instructions),
 //           "arch": "sm86" for Ampere code (NVN2, Switch 2: a 0x80-byte SPH and 128-bit instructions; absent = Maxwell),
+//           "host_target": "vulkan" for Vulkan 1.1-compatible texture operations (absent = Metal chain),
 //           "tex": { "slot": "2d|2darray|cube|cubearray|3d|buffer|1d|1darray|2dms|2dmsarray", ... }, "img": { "slot": { "type", "fmt" } },
 //           "attr": { "location": "float|sint|uint" }, "fout": { "target": "float|sint|uint" }, "local": [x, y, z] }]
 //   Output: <key>.spv and <key>.res.json (offsets of storage buffer slots in c0, etc.; decoding texture handle → slot number is done in the script that builds the metallib;
@@ -162,6 +163,9 @@ static class SwshXlate
                 false /* no Y flip */, true /* origin upper-left */, false);
         }
         public bool QueryHostSupportsTextureShadowLod() => true;
+        // Vulkan 1.1 sampling offsets must be constants. Reuse Ryujinx's texture
+        // pass to add dynamic texel offsets to coordinates with the mip's size.
+        public bool QueryHostSupportsNonConstantTextureOffset() => (string)_job["host_target"] != "vulkan";
         public bool QueryHostSupportsDepthClipControl() => false;   // Metal has no -1..1 clip control; the depth convention is not left to the translator, the rewrite is added per entry point in the MSL (see the file header)
         // Job reduced = true: relaxed precision - the translator marks NoContraction only on operations that must be exact (the default marks all: keeps the bit-exact results of Maxwell's separate rounding, at the cost of many optimization-disabled spvFMul etc. in the MSL)
         public bool QueryHostReducedPrecision() => _job["reduced"] is JsonNode n && (bool)n;

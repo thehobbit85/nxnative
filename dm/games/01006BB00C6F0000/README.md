@@ -64,6 +64,8 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 General host changes first needed here; each applies to every game:
 
+- [Vulkan target lowers dynamic texture offsets](../../../docs/reference/shaders.md#vulkan-target-lowers-dynamic-texture-offsets): the captured postprocess shader `9338e3f1b597fe7c` now passes Vulkan 1.1 validation using the bundled Ryujinx lowering; full export and runtime validation remain open.
+
 - [Vulkan export removes unused descriptor declarations](../../../docs/reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations): resolved the captured Android reflection failure; full export and gameplay validation remain open.
 
 - **Lower-left window origin** (`g_origin_ll`), **copies drawn as passes** (`copy_t2t_draw`), **compute `c0` with the dispatch size** (`encode_args_`, `nvn_refl.m`), **stencil in depth-stencil copies**: [Lower-left window origin](../../../docs/reference/rendering.md#lower-left-window-origin), [Copies a blit cannot do, drawn](../../../docs/reference/rendering.md#copies-a-blit-cannot-do-drawn), [Compute `c0`: dispatch size and uniform buffer table](../../../docs/reference/shaders.md#compute-c0-dispatch-size-and-uniform-buffer-table), [Depth-stencil copies carry the stencil](../../../docs/reference/rendering.md#depth-stencil-copies-carry-the-stencil).

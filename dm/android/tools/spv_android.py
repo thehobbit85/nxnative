@@ -21,8 +21,16 @@ def capture(args):
     if args == ['--source-sha']:
         return subprocess.call([XLATE, *args])
     job, directory = map(Path, args)
-    subprocess.run([XLATE, job, directory], check=True)
-    for item in json.loads(job.read_text()):
+    jobs = json.loads(job.read_text())
+    directory.mkdir(parents=True, exist_ok=True)
+    # The shared chain also translates through SPIR-V for Metal, whose allowed
+    # operations differ. Request the existing translator's Vulkan lowering without
+    # changing the caller's job or the normal Apple translation target.
+    with tempfile.TemporaryDirectory(prefix='vk-job-', dir=directory) as temporary:
+        targeted = Path(temporary) / 'jobs.json'
+        targeted.write_text(json.dumps([dict(item, host_target='vulkan') for item in jobs]))
+        subprocess.run([XLATE, targeted, directory], check=True)
+    for item in jobs:
         name = item['key'] + '.spv'
         if (directory / name).is_file():
             shutil.copyfile(directory / name, Path(os.environ['DMSH_SPV_CAPTURE']) / name)

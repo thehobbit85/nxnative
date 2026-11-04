@@ -649,7 +649,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the Vulkan exporter declares the capability for such writes, preserves required optional capabilities, and validates the finished module against Vulkan 1.1 before publishing its descriptor bindings.
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#found-on-this-game) on two shader stages requested during Android startup.
 
-For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/tools/spv_android.py <build>/shader/pkg <new-output-directory> --keys-file <keys.txt>`. List one 16-digit stage key per line. The build uses the existing locked translator and requires `spirv-val` on PATH. Each stage produces a `.spv` binary and a `.vk.txt` descriptor table for the Android Vulkan backend. The exporter publishes the output directory after every requested stage passes.
+For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/tools/spv_android.py <build>/shader/pkg <new-output-directory> --keys-file <keys.txt>`. List one 16-digit stage key per line. The build uses the existing locked translator and requires `spirv-val` and `spirv-opt` on PATH. Each stage produces a `.spv` binary and a `.vk.txt` descriptor table for the Android Vulkan backend. The exporter publishes the output directory after every requested stage passes.
+
+### Vulkan target lowers dynamic texture offsets
+
+- **Symptom:** Android export fails Vulkan 1.1 validation with `Image Operand Offset can only be used with OpImage*Gather operations` on an `OpImageSampleExplicitLod` instruction.
+- **Cause:** the shared translator's default host capability allows nonconstant texture offsets for its Metal route. Vulkan 1.1 does not permit those sample operands. Shader constant-bank loads still appear as runtime offsets in the captured SPIR-V, even when the packaged bank contains fixed values.
+- **Fix:** Android capture sets `host_target=vulkan` in a temporary translation job. The accessor then disables nonconstant-offset support and reuses Ryujinx's existing `TexturePass.InsertConstOffsets` lowering: add integer offsets to fetch coordinates, or normalized offsets using the mip dimensions to sampled coordinates. The normal Apple job keeps its previous capability. A synthetic Maxwell shader loads offsets from a guest uniform buffer and checks that the actual bundled translator removes the illegal sample operand and passes Vulkan 1.1 validation; the capture check also verifies that the caller's job is unchanged. Validation remains strict.
+- **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#found-on-this-game), captured postprocess shader `9338e3f1b597fe7c`.
 
 ### Tested tools and compiler-specific shader caches
 
