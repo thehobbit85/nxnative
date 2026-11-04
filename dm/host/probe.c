@@ -5,10 +5,12 @@
 #include <dlfcn.h>
 #include <sys/ucontext.h>
 #include <sys/mman.h>
+#ifdef __APPLE__
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #if !TARGET_OS_IPHONE
 #include <mach/mach_vm.h>   // the write watch (DM_PROBE_WATCH): iOS's SDK has no mach_vm.h
+#endif
 #endif
 #include <pthread.h>
 #include <stdatomic.h>
@@ -17,7 +19,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
-#if !TARGET_OS_IPHONE
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 // DM_PROBE_WATCH=<address>[+<length>] (hex guest address, length 8 by default): who writes these bytes, without a debugger. Their host page is write-protected for good once it is writable,
 // and every store that faults on it is carried out by the fault handler through a writable alias of the page (STR / STUR / STP of general and SIMD registers in their immediate, pre- and
 // post-index forms, register-offset STR, DC ZVA), so a burst of stores to a busy page cannot slip past. A store reaching the watched bytes prints the thread, pc, lr, the store address,
@@ -217,6 +219,14 @@ void probe_install(void) {
 #if !TARGET_OS_IPHONE
     void dm_probe_text_install(void);
     dm_probe_text_install();
+#ifdef __APPLE__
     watch_install();
+#else
+    // The write-watch/poll implementation above depends on Mach aliases and task-wide
+    // thread snapshots. Android instruction probes are supported by probe_text.c;
+    // these additional diagnostics remain an explicit platform gap.
+    if (getenv("DM_PROBE_WATCH") || getenv("DM_PROBE_POLL"))
+        LOG("[RED] DM_PROBE_WATCH and DM_PROBE_POLL require the Apple host");
+#endif
 #endif
 }
