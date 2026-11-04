@@ -9,9 +9,15 @@
 
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 uint64_t guest_ns(void) { return now_ns(); }
-static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
+static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
+static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
+int nvn_dpool_base(const void *pool, int texture) {
+    return texture && pool == &texture_pool ? 2048 : texture && pool == &alternate_texture_pool ? 4096 :
+           !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
+}
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &compute || p == &groups) { assert(stage == 0); memset(key, 0, 8); key[7] = p == &groups ? 4 : 3; return 1; }
+    if (p == &bindless_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x31 : 1; return 1; }
     assert((p == &program || p == &numeric_program) && stage < 2);
     memset(key, 0, 8); key[7] = (uint8_t)((p == &numeric_program ? 0x21 : 1) + stage); return 1;
 }
@@ -203,6 +209,65 @@ static void uploaded_texture(NVNformat format) {
     mtl_tex_release(&texture); mtl_tex_release(&output);
     free(texture.mem);
     printf("Uploaded format %#x and changed CPU content sampled correctly\n", format);
+}
+
+static void uniform_texture_array(void) {
+    tex_t textures[3], output = {.serial = 0x5100, .d = {.width = 4, .height = 4,
+        .depth = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d, &output.L);
+    for (int i = 0; i < 3; ++i) {
+        textures[i] = (tex_t){.serial = 0x5000 + i, .d = {.width = 1, .height = 1, .depth = 1,
+            .levels = 1, .target = i == 2 ? NVN_TEXTURE_TARGET_2D : NVN_TEXTURE_TARGET_3D, .format = NVN_FORMAT_RGBA8}};
+        nvn_tex_layout(&textures[i].d, &textures[i].L);
+        mtl_reg_tex(2053 + i, &textures[i], NULL);
+    }
+    samp_par edge = {0}, border = {.ws = NVN_WRAP_MODE_CLAMP_TO_BORDER, .border = {1,1,1,1}};
+    mtl_reg_samp(257, &edge); mtl_reg_samp(258, &border); mtl_reg_samp(513, &border);
+    mtl_reg_tex(4101, &textures[1], NULL);
+    uint64_t handles[80] = {0}, samplers[64] = {0};
+    mtl_pool_add(handles, sizeof handles); mtl_pool_add(samplers, sizeof samplers);
+    handles[44 + 7] = 5; samplers[16 + 7] = 1u << 20;
+    float positions[] = {-1,-1, 3,-1, -1,3}, white[] = {1,1,1,1};
+    const uint8_t expected[][4] = {{0,255,0,255}, {0,0,255,255}, {0,0,0,255},
+                                   {255,255,255,255}, {0,0,0,255}, {0,0,0,255}, {0,0,255,255}, {255,255,255,255}};
+    for (int pass = 0; pass < 8; ++pass) {
+        list_t list = {0}; uint8_t pixels[64] = {0};
+        struct { uint32_t index; float coordinate; uint32_t pad[2]; } parameters = {pass == 2 ? 31u : 7u, pass == 3 || pass == 7 ? 1.5f : 0.5f, {0}};
+        for (int i = 0; i < 3; ++i) {
+            p_clear_tex clear = {.tex = &textures[i], .r = {.width = 1, .height = 1, .depth = 1}, .mask = 15};
+            clear.c.f[i == 0 ? 1 : i == 1 ? 2 : 0] = 1; clear.c.f[3] = 1;
+            put(&list, OP_CLEAR_TEX, &clear, sizeof clear);
+        }
+        RECORD(OP_SET_TEX_POOL, p_set_pool, .pool = pass == 6 ? &alternate_texture_pool : &texture_pool);
+        RECORD(OP_SET_SAMP_POOL, p_set_pool, .pool = pass == 7 ? &alternate_sampler_pool : &sampler_pool);
+        struct { uint64_t address, size, value; } update = {(uintptr_t)&handles[44 + 7], 8, pass >= 6 ? 5u : pass >= 4 ? 7u : pass ? 6u : 5u};
+        put(&list, OP_UPDATE_UB, &update, sizeof update);
+        samplers[16 + 7] = (uint64_t)(pass == 3 ? 2 : 1) << 20;
+        push_constants(&list, 0, 240, white, sizeof white);
+        RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &bindless_program, .stages = 3);
+        va_st va = {.fmt = NVN_FORMAT_RG32F}; p_bind_vattr attr = {.n = 1};
+        memcpy(attr.st, &va, sizeof va); put(&list, OP_BIND_VATTR, &attr, sizeof attr);
+        RECORD(OP_BIND_VSTREAM, p_bind_vstream, .n = 1, .st = {{.stride = 8}});
+        RECORD(OP_BIND_VBUF1, p_bind_vbuf1, .index = 0, .size = sizeof positions, .addr = (uintptr_t)positions);
+        RECORD(OP_BIND_UBO, p_bind_buf, .stage = 1, .index = 7, .addr = (uintptr_t)handles,
+               .size = pass == 5 ? 352 : sizeof handles);
+        RECORD(OP_BIND_UBO, p_bind_buf, .stage = 1, .index = 8, .addr = (uintptr_t)samplers, .size = sizeof samplers);
+        RECORD(OP_BIND_UBO, p_bind_buf, .stage = 1, .index = 9, .addr = (uintptr_t)&parameters, .size = sizeof parameters);
+        RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+        RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels, .r = {.width = 4, .height = 4, .depth = 1});
+        put(&list, OP_END, NULL, 0);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (size_t i = 0; i < sizeof pixels; i += 4) if (memcmp(pixels + i, expected[pass], 4)) {
+            fprintf(stderr, "uniform texture array pass %d pixel %zu: %u %u %u %u\n", pass, i / 4, pixels[i],pixels[i+1],pixels[i+2],pixels[i+3]);
+            abort();
+        }
+    }
+    mtl_pool_del(handles); mtl_pool_del(samplers);
+    mtl_reg_tex(4101, NULL, NULL);
+    for (int i = 0; i < 3; ++i) { mtl_reg_tex(2053 + i, NULL, NULL); mtl_tex_release(&textures[i]); }
+    mtl_tex_release(&output);
+    puts("Uniform texture arrays, pool bases, inline updates, independent samplers and missing handles passed");
 }
 
 // First create and clear the backing, then register image views of its layers and
@@ -418,6 +483,7 @@ int main(void) {
     uploaded_texture(NVN_FORMAT_RGBA8);
     if (astc_supported()) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
+    uniform_texture_array();
     textured_draw(0, 0);  // CPU argument block, followed by a fully GPU-generated block
     textured_draw(1, 0);  // X is GPU-generated, Y and Z are CPU-written
     textured_draw(0, 1);  // argument producer and consumer in successive submissions

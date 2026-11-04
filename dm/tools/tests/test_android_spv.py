@@ -42,6 +42,70 @@ OpFunctionEnd
 
 
 class AndroidShaderTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val'), 'requires SPIRV-Tools')
+    def test_sampled_array_reflection_retains_shape_and_numeric_class(self):
+        source = '''
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %out
+OpExecutionMode %main OriginUpperLeft
+OpName %images "images"
+OpDecorate %images DescriptorSet 0
+OpDecorate %images Binding 3
+OpDecorate %out Location 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%uint = OpTypeInt 32 0
+%component = COMPONENT
+%value4 = OpTypeVector %component 4
+%float3 = OpTypeVector %float 3
+%zero = OpConstant %uint 0
+%length = OpConstant %uint 32
+%half = OpConstant %float 0.5
+%coord = OpConstantComposite %float3 %half %half %half
+%image = OpTypeImage %component 3D 0 0 0 1 Unknown
+%sampled = OpTypeSampledImage %image
+%array = OpTypeArray %sampled %length
+%arrayptr = OpTypePointer UniformConstant %array
+%elementptr = OpTypePointer UniformConstant %sampled
+%images = OpVariable %arrayptr UniformConstant
+%outptr = OpTypePointer Output %value4
+%out = OpVariable %outptr Output
+%main = OpFunction %void None %fn
+%label = OpLabel
+%element = OpAccessChain %elementptr %images %zero
+%loaded = OpLoad %sampled %element
+%color = OpImageSampleImplicitLod %value4 %loaded %coord
+OpStore %out %color
+OpReturn
+OpFunctionEnd
+'''
+        reflection = {'bindings': [dict(msl_name='images', kind='tex_ubo', reg=7, off=352),
+                                   dict(msl_name='imagesSmplr', kind='samp_ubo', reg=8, off=128)]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'array.spv'
+            for numeric, component in enumerate(('OpTypeFloat 32', 'OpTypeInt 32 1', 'OpTypeInt 32 0')):
+                # SPIR-V scalar types must be unique; reuse the coordinate/count
+                # type when it is also the sampled component type.
+                text = source.replace('COMPONENT', component)
+                if numeric in (0, 2):
+                    text = text.replace('%component = ' + component + '\n', '').replace('%component', '%float' if numeric == 0 else '%uint')
+                subprocess.run(['spirv-as', '--target-env', 'vulkan1.1', '-o', path, '-'], input=text, text=True, check=True)
+                subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', path], check=True)
+                binding, = vk.vk_reflect(path.read_bytes(), reflection)
+                self.assertEqual((binding['type'], binding['count'], binding['view'], binding['num']), ('cis', 32, 2, numeric))
+                self.assertEqual(binding['samp']['off'], 128)
+
+    def test_uniform_texture_array_preserves_independent_sampler_source(self):
+        binding = dict(binding=3, type='cis', count=32, kind='tex_ubo', reg=7, off=352,
+                       view=2, num=0, samp=dict(kind='samp_ubo', reg=8, off=128))
+        text = vk.vk_txt(dict(stage='ps', bindings=[binding]))
+        self.assertIn('b 3 cis 32 tex_ubo 7 352 samp_ubo 8', text)
+        self.assertIn('soff=128', text)
+        self.assertIn('view=2', text)
+        self.assertIn('num=0', text)
+
     def test_retry_reuses_content_addressed_compiles_but_recaptures_spirv(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
