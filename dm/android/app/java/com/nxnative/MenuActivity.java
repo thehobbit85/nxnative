@@ -281,10 +281,13 @@ public class MenuActivity extends Activity {
         fit = spinner(col, "Picture", new String[]{"Keep aspect ratio (black bars)", "Stretch to fill"}, prefs.getBoolean("stretch", false) ? 1 : 0);
         String sys = systemLang();
         String selectedLang = prefs.getString("lang", "system");
-        languageCodes = new String[]{"es-419", "en-US", "system", selectedLang};
+        boolean extraLang = !selectedLang.equals("es-419") && !selectedLang.equals("en-US") && !selectedLang.equals("system");
+        languageCodes = extraLang ? new String[]{"es-419", "en-US", "system", selectedLang} : new String[]{"es-419", "en-US", "system"};
         String[] langs = languageCodes;
         int ls = 2; for (int i = 0; i < langs.length; i++) if (langs[i].equals(prefs.getString("lang", "system"))) ls = i;
-        lang = spinner(col, "Game language", new String[]{"Spanish (Latin America)", "English", "System language (" + sys + ")", selectedLang}, ls);
+        String[] languageLabels = extraLang ? new String[]{"Spanish (Latin America)", "English", "System language (" + sys + ")", selectedLang}
+                                          : new String[]{"Spanish (Latin America)", "English", "System language (" + sys + ")"};
+        lang = spinner(col, "Game language", languageLabels, ls);
         showFps = new CheckBox(this); showFps.setText("Show frame rate"); showFps.setTextColor(Color.WHITE); showFps.setChecked(prefs.getBoolean("showfps", false));
         col.addView(showFps);
         List<String> cheats = cheatNames();
