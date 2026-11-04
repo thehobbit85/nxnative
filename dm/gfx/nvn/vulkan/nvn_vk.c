@@ -1212,6 +1212,9 @@ static struct {
 } S;
 static int g_depth_zero = 1, g_queue_origin_ll;
 static _Atomic int g_origin_ll;
+static uint32_t g_dispatch_dim[3];
+static VkBuffer g_dispatch_args;
+static VkDeviceSize g_dispatch_offset;
 static struct {   // the current render targets and the open dynamic rendering; clears that come before the pass's first draw become its load actions (a tiler then never reads the old contents)
     int n; vtex *ct[8]; VkImageView cv[8]; vtex *dt; VkImageView dv; uint32_t w, h; int open;
     uint32_t clv[8], cly[8]; uint8_t cwr[8], cdrawn[8];   // each colour attachment's level and layer, and whether a draw wrote it since its last same-pass snapshot (fb_prepare)
@@ -1616,9 +1619,30 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                 } else {
                     int base = stage == 0 ? 0x110 : stage == 1 ? 0x510 : stage == 5 ? 0x310 : -1;
                     if (base >= 0) for (int r = 0; r < 16; r++) { uint64_t a = S.ssbo[stage][r].addr; uint32_t n = (uint32_t)S.ssbo[stage][r].size; memcpy(seg + base + 16 * r, &a, 8); memcpy(seg + base + 16 * r + 8, &n, 4); }
+                    if (stage == 5) {
+                        // Shared Switch driver ABI, as filled by Metal: the
+                        // lighting shader indexes its tiles with the X count.
+                        memcpy(seg + DMSH_C0_DISPATCH, g_dispatch_dim, sizeof g_dispatch_dim);
+                        for (int r = 0; r < DMSH_C0_CS_UBO_SLOTS; ++r) {
+                            uint64_t address = S.ubo[5][r].addr;
+                            uint32_t size = (uint32_t)S.ubo[5][r].size;
+                            memcpy(seg + DMSH_C0_CS_UBO + DMSH_C0_ROW * r, &address, 8);
+                            memcpy(seg + DMSH_C0_CS_UBO + DMSH_C0_ROW * r + 8, &size, 4);
+                        }
+                    }
                     if (stage != 5) { const float mp = 2047.0f; memcpy(seg + 0x610, &mp, 4); }
                 }
-                VkDeviceSize o = ring_put(seg, sizeof seg, 256); if (o != VK_WHOLE_SIZE) *d = (VkDescriptorBufferInfo){C->ring, o, sizeof seg};
+                VkDeviceSize o = ring_put(seg, sizeof seg, 256);
+                if (o != VK_WHOLE_SIZE) {
+                    *d = (VkDescriptorBufferInfo){C->ring, o, sizeof seg};
+                    if (stage == 5 && b->off == 0 && g_dispatch_args) {
+                        // Use the same resolved GPU/CPU argument bytes as the
+                        // indirect command, without reading unfinished GPU writes.
+                        VkBufferCopy copy = {g_dispatch_offset, o + DMSH_C0_DISPATCH, sizeof g_dispatch_dim};
+                        vkCmdCopyBuffer(C->cb, g_dispatch_args, C->ring, 1, &copy);
+                        barrier_all(C->cb);
+                    }
+                }
             }
             x->descriptorType = b->type == BT_UBO ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; x->pBufferInfo = d;
         } else if (b->type == BT_CIS) {
@@ -1770,7 +1794,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
 // Resolve the 12 argument bytes at execution time. A shader may supply just X,
 // with Y and Z initialized by the CPU. A current submission's ring is live
 // through its fence. Older rings must finish copying back before taking CPU bytes.
-static void dispatch_indirect(uint64_t addr) {
+static VkDeviceSize prepare_dispatch_indirect(uint64_t addr, VkBuffer *buffer) {
     enum { BYTES = sizeof(VkDispatchIndirectCommand) };
     struct { VkBuffer buf; VkDeviceSize off; } source[BYTES] = {0};
     uint64_t wait = 0;
@@ -1790,6 +1814,7 @@ static void dispatch_indirect(uint64_t addr) {
     pthread_mutex_unlock(&g_gwmu);
     if (wait) mtl_wait(wait, UINT64_MAX);
     VkDeviceSize dst = ring_alloc(BYTES, 4);
+    if (dst == VK_WHOLE_SIZE) return dst;
     int copied = 0;
     for (int first = 0; first < BYTES;) {
         VkBuffer src = source[first].buf;
@@ -1806,7 +1831,8 @@ static void dispatch_indirect(uint64_t addr) {
         first = end;
     }
     if (copied) barrier_all(C->cb);
-    vkCmdDispatchIndirect(C->cb, C->ring, dst);
+    *buffer = C->ring;
+    return dst;
 }
 // Compute: the bound compute program's shader, its own pipeline and layout (one set), recorded outside render passes; afterwards every storage buffer it had is
 // GPU-written: written back to guest memory at completion and read from the ring by the work recorded until then (gw_add)
@@ -1827,11 +1853,17 @@ static void dispatch(const p_dispatch *d) {
         if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &cs->cpp) != VK_SUCCESS) { LOG("[RED] vk: compute pipeline for %s not created", cs->key); cs->mod = VK_NULL_HANDLE; return; }
     }
     pass_end();
+    g_dispatch_args = VK_NULL_HANDLE;
+    g_dispatch_dim[0] = (uint32_t)d->x; g_dispatch_dim[1] = (uint32_t)d->y; g_dispatch_dim[2] = (uint32_t)d->z;
+    if (d->ind) {
+        g_dispatch_offset = prepare_dispatch_indirect(d->ind, &g_dispatch_args);
+        if (g_dispatch_offset == VK_WHOLE_SIZE) return;
+    }
     VkDescriptorSet ds = write_set(cs, 5); if (!ds) return;
     if (g_plog) LOG("plog:  dispatch cs %s %dx%dx%d, %d storage buffers", cs->key, d->x, d->y, d->z, g_nwb);
     vkCmdBindPipeline(C->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cs->cpp);
     vkCmdBindDescriptorSets(C->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cs->cpl, 0, 1, &ds, 0, NULL);
-    if (d->ind) dispatch_indirect(d->ind);
+    if (d->ind) vkCmdDispatchIndirect(C->cb, g_dispatch_args, g_dispatch_offset);
     else vkCmdDispatch(C->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     mark_image_writes(5);
     barrier_all(C->cb);
