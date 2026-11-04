@@ -57,7 +57,7 @@ static VkBuffer buf_new(VkDeviceSize n, VkBufferUsageFlags u, VkDeviceMemory *m,
     return b;
 }
 #define ALL_BUF_USAGE (VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | \
-                       VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
+                       VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
 
 static _Atomic uint64_t g_big_bytes, g_extra_ring_bytes;   // memory of the big images and of the extra rings now held (the frame stats line)
 // ---------- Image memory: 64 MB blocks, each with a list of its free ranges (first fit; a freed range joins its neighbours; a block with no image left is freed) ----------
@@ -135,6 +135,7 @@ typedef struct vtex vtex;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer cb, up; VkFence fence; VkDescriptorPool dp;
     VkDescriptorPool dp0, *extra_dp; size_t nextra_dp, cextra_dp; // older sets remain valid until this context's fence
+    VkBufferView *bv; size_t nbv, cbv; // typed views retain their submission's backing
     VkBuffer ring; VkDeviceMemory ringm; uint8_t *ringp; VkDeviceSize used, capacity;
     post_t *post; int npost, cpost;
     uint64_t fence_val; int up_used;
@@ -261,6 +262,8 @@ static void ctx_complete(ctx_t *c) {
     }
     c->npost = 0;
     gw_expire(c->fence_val);
+    for (size_t i = 0; i < c->nbv; i++) vkDestroyBufferView(g_dev, c->bv[i], NULL);
+    c->nbv = 0;
     for (int i = 0; i < c->nextra; i++) { vkDestroyBuffer(g_dev, c->extra[i].b, NULL); vkFreeMemory(g_dev, c->extra[i].m, NULL); atomic_fetch_sub(&g_extra_ring_bytes, c->extra[i].size); }
     c->nextra = 0;
     for (int i = 0; i < c->nfb; i++) vkDestroyFramebuffer(g_dev, c->fb[i], NULL);
@@ -1688,7 +1691,7 @@ static uint32_t uniform_handle(int stage, int reg, int64_t off) {
 }
 static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     uint64_t handle = 0;
-    if (b->kind == K_TEX && b->reg >= 0 && (uint32_t)b->reg + element < NTEX) handle = S.tex[stage][b->reg + element];
+    if ((b->kind == K_TEX || b->kind == K_TBUF) && b->reg >= 0 && (uint32_t)b->reg + element < NTEX) handle = S.tex[stage][b->reg + element];
     else if (b->kind == K_TEXU && b->off >= 0) {
         uint32_t raw = uniform_handle(stage, b->reg, b->off + 8ll * element);
         uint32_t tid = raw & 0xfffff;
@@ -1781,7 +1784,43 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
 // All storage descriptors of a command are resolved together. Overlapping
 // ranges share one backing allocation, so writes and atomics through either
 // descriptor see the same bytes, including across vertex and fragment sets.
-static gw_t g_storage[128]; static size_t g_nstorage;
+#define MAX_BUFFER_BINDINGS (2 * 64 * 32) // two stages, reflected bindings, descriptor-array elements
+static gw_t g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
+static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
+typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes; } texel_range;
+static int texel_binding(const sbind *b, int stage, uint32_t element, texel_range *out) {
+    *out = (texel_range){0};
+    uint64_t handle = b->kind == K_IMG && b->reg >= 0 && (uint32_t)b->reg + element < 32 ? S.img[stage][b->reg + element] : sampled_handle(stage, b, element);
+    int id = (int)(handle & 0xfffff), ok = 1;
+    pthread_mutex_lock(&g_rmu);
+    treg_t tr = id > 0 && id < g_ntreg ? g_treg[id] : (treg_t){0};
+    if (tr.ok && tr.t.d.target == NVN_TEXTURE_TARGET_BUFFER && tr.t.mem) {
+        int original_bw, original_bh, original_bytes = nvn_fmt_bpb(tr.t.d.format, &original_bw, &original_bh);
+        int format = tr.has_v && tr.v.set_format ? tr.v.format : tr.t.d.format;
+        fmt_t f = fmt_of(format);
+        int bw, bh, bytes = nvn_fmt_bpb(format, &bw, &bh);
+        uint64_t size = (uint64_t)tr.t.d.width * (unsigned)original_bytes;
+        if (original_bytes <= 0 || original_bw != 1 || original_bh != 1 || bytes <= 0 || bw != 1 || bh != 1 || f.dec || f.depth || f.noalpha || f.f == VK_FORMAT_UNDEFINED ||
+            !size || size % bytes || size / bytes > g_props.limits.maxTexelBufferElements || size > UINT64_MAX - (uintptr_t)tr.t.mem ||
+            (tr.t.set_swz && tr.t.swz != (2 | 3<<3 | 4<<6 | 5<<9)) ||
+            (tr.has_v && (tr.v.set_swizzle || (tr.v.set_target && tr.v.target != NVN_TEXTURE_TARGET_BUFFER)))) ok = 0;
+        if (ok && tr.t.pool) {
+            uint64_t base = (uintptr_t)tr.t.pool->mem, addr = (uintptr_t)tr.t.mem;
+            if (addr < base || addr - base > tr.t.pool->size || size > tr.t.pool->size - (addr - base)) ok = 0;
+        }
+        VkFormatProperties fp = {0};
+        if (ok) vkGetPhysicalDeviceFormatProperties(g_pd, f.f, &fp);
+        // Ring buffers support both texel usages; Vulkan 1.1 requires the
+        // view's format to support each usage carried by its backing buffer.
+        VkFormatFeatureFlags need = VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT | VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+        if (ok && (fp.bufferFeatures & need) != need) ok = 0;
+        if (ok) *out = (texel_range){.range = {.addr = (uintptr_t)tr.t.mem, .size = size}, .format = f.f, .bytes = (uint32_t)bytes};
+    }
+    pthread_mutex_unlock(&g_rmu);
+    if (!out->range.addr && b->type == BT_STB) ok = 0; // unbound writable images require a format-aware private dummy
+    if (!ok) RED_ONCE(21, "unsupported typed buffer range, format, view or storage binding");
+    return ok;
+}
 static uint64_t pool_remaining(uint64_t addr);
 static p_bind_buf storage_binding(const sbind *b, int stage) {
     p_bind_buf u = {0};
@@ -1803,12 +1842,18 @@ static int prepare_storage(shader_t **first, shader_t **second) {
     for (int st = 0; st < 2; st++) {
         shader_t *s = stages[st]; if (!s) continue;
         for (int i = 0; i < s->nb; i++) {
-            p_bind_buf u = storage_binding(&s->b[i], s->stage);
+            const sbind *b = &s->b[i];
+            uint32_t count = is_texel(b) ? b->count : 1;
+            if (count > 32) return 0;
+            for (uint32_t element = 0; element < count; element++) {
+            p_bind_buf u = storage_binding(b, s->stage);
+            if (is_texel(b)) { texel_range t; if (!texel_binding(b, s->stage, element, &t)) return 0; u = t.range; }
             if (!u.addr || !u.size) continue;
             if (u.size > UINT64_MAX - u.addr) return 0;
-            if (u.size > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "storage range exceeds the device descriptor limit: requires shader address lowering"); return 0; }
+            if (!is_texel(b) && u.size > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "storage range exceeds the device descriptor limit: requires shader address lowering"); return 0; }
             if (g_nstorage == sizeof g_storage / sizeof *g_storage) die("Vulkan: too many storage bindings");
             g_storage[g_nstorage++] = (gw_t){.addr=u.addr, .size=u.size};
+            }
         }
     }
     qsort(g_storage, g_nstorage, sizeof *g_storage, storage_order);
@@ -1823,6 +1868,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
     }
     g_nstorage = n;
     VkDeviceSize align = g_props.limits.minStorageBufferOffsetAlignment;
+    if (align < g_props.limits.minTexelBufferOffsetAlignment) align = g_props.limits.minTexelBufferOffsetAlignment;
     for (size_t i = 0; i < n; i++) {
         gw_t *r = &g_storage[i];
         if (gw_find(r->addr, r->size, align, &r->buf, &r->off, &r->p)) continue;
@@ -1837,7 +1883,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             p_bind_buf u=storage_binding(&s->b[b],s->stage);
             if(!u.addr || !u.size) continue;
             for(size_t i=0;i<n;i++) if(u.addr>=g_storage[i].addr && u.addr-g_storage[i].addr<g_storage[i].size) {
-                bias[b]=(uint32_t)((u.addr-g_storage[i].addr)%align);break;
+                bias[b]=(uint32_t)((u.addr-g_storage[i].addr)%g_props.limits.minStorageBufferOffsetAlignment);break;
             }
         }
         shader_t *variant=buffer_variant(s,bias);
@@ -1855,7 +1901,37 @@ static int prepared_storage(uint64_t addr, uint64_t size, VkBuffer *buf, VkDevic
     }
     return 0;
 }
-static gw_t g_wb[128]; static int g_nwb;   // writable buffers of this draw or dispatch, published only after command encoding
+static gw_t g_wb[MAX_BUFFER_BINDINGS]; static int g_nwb;   // writable buffers of this draw or dispatch, published only after command encoding
+static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
+    VkBufferView views[32];
+    for (uint32_t element = 0; element < b->count; element++) {
+        texel_range t; if (!texel_binding(b, stage, element, &t)) return 0;
+        VkBuffer buffer = g_zero_buf; VkDeviceSize offset = 0, size = 256; uint8_t *mapped = NULL;
+        if (t.range.addr) {
+            if (!prepared_storage(t.range.addr, t.range.size, &buffer, &offset, &mapped)) return 0;
+            size = t.range.size;
+            if (offset % g_props.limits.minTexelBufferOffsetAlignment) {
+                RED_ONCE(23, "overlapping typed buffers need texel-coordinate lowering for this alignment"); return 0;
+            }
+        } else t.format = b->num == 1 ? VK_FORMAT_R32G32B32A32_SINT : b->num == 2 ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT;
+        VkBufferViewCreateInfo vi = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, buffer, t.format, offset, size};
+        VKCHECK(vkCreateBufferView(g_dev, &vi, NULL, &views[element]));
+        if (C->nbv == C->cbv) {
+            if (C->cbv > SIZE_MAX / 2 / sizeof *C->bv) die("Vulkan: typed view tracking size overflow");
+            size_t capacity = C->cbv ? C->cbv * 2 : 64;
+            void *next = realloc(C->bv, capacity * sizeof *C->bv);
+            if (!next) die("Vulkan: cannot track typed buffer views");
+            C->bv = next; C->cbv = capacity;
+        }
+        C->bv[C->nbv++] = views[element];
+        if (t.range.addr && b->type == BT_STB && !b->read_only) {
+            if (g_nwb == sizeof g_wb / sizeof *g_wb) die("Vulkan: too many writable buffer bindings");
+            g_wb[g_nwb++] = (gw_t){.addr = t.range.addr, .size = size, .buf = buffer, .off = offset, .p = mapped};
+        }
+    }
+    VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0, b->count, descriptor_type[b->type], NULL, NULL, views};
+    vkUpdateDescriptorSets(g_dev, 1, &write, 0, NULL); return 1;
+}
 // The descriptor set is populated before the draw/dispatch. Only transfer ownership
 // to the GPU after a command using it has actually been recorded.
 static vtex *g_bound_images[6][32];
@@ -1890,6 +1966,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
     for (int i = 0; i < s->nb; ++i) {
         const sbind *b = &s->b[i];
         if (b->type == BT_SIMG) continue;
+        if (is_texel(b) && b->count <= 32) continue;
         if ((b->type == BT_CIS || b->type == BT_TEX) && b->count <= 32 && (b->kind == K_TEXU || b->kind == K_TEX)) continue;
         if (b->type == BT_SAMP && b->count <= 32 && b->skind != S_NONE) continue;
         if (b->count != 1 || (b->type != BT_UBO && b->type != BT_SSBO && b->type != BT_CIS)) {
@@ -1920,6 +1997,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
     for (int i = 0; i < s->nb; i++) {
         const sbind *b = &s->b[i];
         VkWriteDescriptorSet *x = &w[nw]; *x = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0, 1};
+        if (is_texel(b)) { if (!bind_texel(ds, b, stage)) return VK_NULL_HANDLE; continue; }
         if (b->type == BT_SIMG) {
             if (!bind_storage(ds, b, stage)) {
                 RED_ONCE(80, "invalid storage image for shader %s binding %u (guest image slot %d)", s->key, b->binding, b->reg);

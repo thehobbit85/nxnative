@@ -18,7 +18,11 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/0000000000000037.spv $(B)/shaders/0000000000000038.spv \
          $(B)/shaders/0000000000000039.spv $(B)/shaders/000000000000003a.spv $(B)/shaders/0000000000000040.spv \
          $(B)/shaders/0000000000000041.spv $(B)/shaders/0000000000000042.spv $(B)/shaders/0000000000000043.spv \
-         $(B)/shaders/0000000000000044.spv $(B)/shaders/0000000000000045.spv $(B)/shaders/0000000000000046.spv $(B)/shaders/0000000000000047.spv
+         $(B)/shaders/0000000000000044.spv $(B)/shaders/0000000000000045.spv $(B)/shaders/0000000000000046.spv $(B)/shaders/0000000000000047.spv $(B)/shaders/0000000000000048.spv
+$(B)/shaders/0000000000000048.spv: tests/texel.comp tests/texel.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/texel.vk.txt $(@:.spv=.vk.txt)
 $(B)/shaders/0000000000000044.spv: tests/separate.frag tests/separate.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@

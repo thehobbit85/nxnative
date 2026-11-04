@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x=1) in;
+layout(set=0,binding=0) uniform samplerBuffer floats[2];
+layout(set=0,binding=1) uniform isamplerBuffer integers;
+layout(set=0,binding=2) uniform utextureBuffer unsignedValues;
+layout(set=0,binding=3,r32ui) coherent uniform uimageBuffer destination;
+layout(set=0,binding=4,r32ui) readonly uniform uimageBuffer previous;
+layout(set=0,binding=5,std430) coherent buffer Alias { uint words[]; } alias;
+layout(set=0,binding=6,std430) buffer Result { uint words[]; } result;
+layout(set=0,binding=7,std140) uniform Push { uvec4 rows[16]; } constants;
+void main() {
+    int i=int(gl_GlobalInvocationID.x);
+    uint old=imageAtomicAdd(destination,i,10);
+    memoryBarrier();
+    uint fromBuffer=atomicAdd(alias.words[i+constants.rows[15].x],100);
+    memoryBarrier();
+    result.words[8*i+0]=old;
+    result.words[8*i+1]=fromBuffer;
+    result.words[8*i+2]=imageLoad(destination,i).x;
+    result.words[8*i+3]=uint(texelFetch(floats[0],i).x*16.0);
+    result.words[8*i+4]=uint(texelFetch(floats[1],i).x*16.0);
+    result.words[8*i+5]=uint(texelFetch(integers,i).x+100);
+    result.words[8*i+6]=texelFetch(unsignedValues,i).x+imageLoad(previous,i).x;
+    result.words[8*i+7]=uint(textureSize(floats[0])+textureSize(unsignedValues)+imageSize(destination));
+}

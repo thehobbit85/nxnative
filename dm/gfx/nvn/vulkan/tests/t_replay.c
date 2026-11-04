@@ -14,6 +14,7 @@ uint64_t guest_ns(void) { return now_ns(); }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
 static prog_t alias_program = {.nstage = 1};
+static prog_t texel_program = {.nstage = 1};
 static prog_t separate_program[4]={{.nstage=2},{.nstage=2},{.nstage=2},{.nstage=2}};
 static prog_t storage_program = {.nstage = 2};
 static prog_t buffer_program = {.nstage = 1};
@@ -29,6 +30,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &texel_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x48; return 1; }
     for(int i=0;i<4;i++) if(p==&separate_program[i]) { assert(stage<2);memset(key,0,8);key[7]=stage?0x44+i:1;return 1; }
     if (p == &alias_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x43; return 1; }
     if (p == &storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x41 + stage; return 1; }
@@ -1148,7 +1150,61 @@ static void descriptor_lifetime(void) {
     mtl_tex_release(&output); mtl_queue_forget(950);
     puts("Descriptor pools preserve 400 dispatches and 400 draws across exhaustion and context reuse without submission cuts");
 }
+static void typed_buffers(void) {
+    enum { N = 4 };
+    for (int missing = 0; missing < 2; missing++) for (int split = 0; split < 2; split++) for (int offset = 0; offset <= 256; offset += 256) {
+        float f[2][N] = {{0.25f,0.5f,0.75f,1}, {2,3,4,5}};
+        int32_t signed_values[N] = {-10,-20,-30,-40}; uint32_t unsigned_values[N] = {10,20,30,40};
+        uint32_t storage[256], previous[N] = {0}, result[N][8] = {0}, consumer[N] = {0};
+        for (int i = 0; i < 256; i++) storage[i] = 0xabcdef01;
+        uint32_t *target = storage + 64 + offset / 4;
+        for (int i = 0; i < N; i++) target[i] = 500 + i;
+        void *mem[] = {f[0],f[1],signed_values,unsigned_values,target,previous};
+        NVNformat formats[] = {NVN_FORMAT_R32F,NVN_FORMAT_R32F,NVN_FORMAT_R32I,NVN_FORMAT_R32UI,NVN_FORMAT_R32UI,NVN_FORMAT_R32UI};
+        tex_t tex[6]; pool_t pools[6];
+        for (int i = 0; i < 6; i++) {
+            pools[i] = (pool_t){.mem = mem[i], .size = 4*N, .flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED};
+            tex[i] = (tex_t){.serial = 0xf000 + missing*1024 + split*16 + offset + i, .mem = mem[i], .pool = &pools[i],
+                .d = {.width = N, .height = 1, .depth = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_BUFFER, .format = formats[i]}};
+            nvn_tex_layout(&tex[i].d, &tex[i].L); mtl_reg_tex(960 + i, &tex[i], NULL);
+        }
+        // A format view changes interpretation while retaining the same bytes.
+        tex[3].d.format = NVN_FORMAT_R32F;
+        view_t view = {.set_format = 1, .format = NVN_FORMAT_R32UI}; mtl_reg_tex(963, &tex[3], &view);
+        if (missing) mtl_reg_tex(961, NULL, NULL);
+        mtl_queue_activate(960); mtl_sub_begin(); list_t list = {0};
+        uint32_t values[N] = {70,80,90,100}; push_constants(&list, 1, 240, values, sizeof values);
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &groups, .stages = 0x20);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)previous, .size = sizeof previous);
+        RECORD(OP_DISPATCH, p_dispatch, .x = N, .y = 1, .z = 1);
+        put(&list, OP_END, NULL, 0); mtl_exec(list.bytes); list.length = 0;
+        if (split) { mtl_sub_commit(); mtl_sub_begin(); }
+        uint32_t params[N] = {offset / 4, 0, 0, 0}; push_constants(&list, 1, 240, params, sizeof params);
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &texel_program, .stages = 0x20);
+        RECORD(OP_BIND_TEX, p_bind_handles, .stage = 5, .first = 0, .n = 4, .h = {960,961,962,963});
+        RECORD(OP_BIND_IMG, p_bind_handles, .stage = 5, .first = 0, .n = 2, .h = {964,965});
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)(target-offset/4), .size = offset+4*N);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 1, .addr = (uintptr_t)result, .size = sizeof result);
+        RECORD(OP_DISPATCH, p_dispatch, .x = N, .y = 1, .z = 1);
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &buffer_program, .stages = 0x20);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)target, .size = 4*N);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 1, .addr = (uintptr_t)consumer, .size = sizeof consumer);
+        RECORD(OP_DISPATCH, p_dispatch, .x = N, .y = 1, .z = 1);
+        put(&list, OP_END, NULL, 0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (int i = 0; i < N; i++) {
+            uint32_t want[8] = {500+i,510+i,610+i,(uint32_t)(f[0][i]*16),missing?0:(uint32_t)(f[1][i]*16),(uint32_t)(signed_values[i]+100),unsigned_values[i]+values[i],3*N};
+            if (memcmp(result[i], want, sizeof want)) fprintf(stderr, "typed buffers split%d offset%d element%d: %u,%u,%u expected%u,%u,%u\n", split,offset,i,result[i][0],result[i][1],result[i][2],want[0],want[1],want[2]);
+            assert(!memcmp(result[i], want, sizeof want)); assert(target[i] == 610u+i); assert(consumer[i] == 1610u+i);
+        }
+        for (int i = 0; i < 256; i++) if (i < 64+offset/4 || i >= 64+offset/4+N) assert(storage[i] == 0xabcdef01);
+        for (int i = 0; i < 6; i++) { mtl_reg_tex(960+i, NULL, NULL); mtl_tex_release(&tex[i]); }
+        mtl_queue_forget(960);
+    }
+    puts("Typed float/int/uint buffer views, arrays, sizes, image/SSBO atomics, prior GPU writes and following consumers passed");
+}
 int main(void) {
+    if (getenv("DM_VK_TEST_TEXEL")) { typed_buffers(); return 0; }
+    typed_buffers();
     if (getenv("DM_VK_TEST_DESCRIPTOR_POOLS")) { descriptor_lifetime(); return 0; }
     descriptor_lifetime();
     if(getenv("DM_VK_TEST_SEPARATE")) { separate_descriptors();return 0; }

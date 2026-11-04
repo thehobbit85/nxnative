@@ -110,19 +110,20 @@ def vk_reflect(data, reflection):
                 raise ValueError(f'no guest resource for descriptor {binding} ({name!r})')
             resource = {'kind': 'support'}
         entry = dict(resource, binding=binding, count=count, type=descriptor_type(ty, types, dec, x[3]))
-        if entry['type'] in ('cis', 'tex'):
-            image = types[ty[2]] if entry['type'] == 'cis' else ty
+        if entry['type'] in ('cis', 'tex', 'tbuf', 'utb', 'stb'):
+            image = types[ty[2]] if entry['type'] in ('cis', 'tbuf') else ty
             # Vulkan image view type, including the array shape; used for views
             # and zero textures when an unselected bindless element is absent.
-            entry['view'] = {(0, 0): 0, (1, 0): 1, (2, 0): 2, (3, 0): 3,
-                             (0, 1): 4, (1, 1): 5, (3, 1): 6}[image[3], image[5]]
+            if image[3] != 5:  # texel buffers use VkBufferView, not an image view
+                entry['view'] = {(0, 0): 0, (1, 0): 1, (2, 0): 2, (3, 0): 3,
+                                 (0, 1): 4, (1, 1): 5, (3, 1): 6}[image[3], image[5]]
             component = types[image[2]]
             entry['num'] = (1 if component[3] else 2) if opcode(component) == 21 else 0
         # GLSL storage blocks commonly put NonWritable on every member rather
         # than the variable. A partially read-only block still owns GPU writes.
         readonly_block = (opcode(ty) == 30 and len(ty) > 2 and
                           all(24 in member_dec[ty[1]][i] for i in range(len(ty) - 2)))
-        if entry['type'] in ('simg', 'ssbo') and (24 in dec[x[2]] or readonly_block):
+        if entry['type'] in ('simg', 'ssbo', 'stb') and (24 in dec[x[2]] or readonly_block):
             entry['read_only'] = True
         if name + 'Smplr' in resources:
             entry['samp'] = resources[name + 'Smplr']

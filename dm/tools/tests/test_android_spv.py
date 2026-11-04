@@ -43,6 +43,24 @@ OpFunctionEnd
 
 class AndroidShaderTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('glslc') and shutil.which('spirv-val'), 'requires glslc and SPIRV-Tools')
+    def test_typed_buffer_numeric_classes_and_readonly_storage(self):
+        source = Path(__file__).resolve().parents[2] / 'gfx/nvn/vulkan/tests/texel.comp'
+        resources = [('floats', 'tbuf', 0), ('integers', 'tbuf', 2), ('unsignedValues', 'tex', 3),
+                     ('destination', 'img', 0), ('previous', 'img', 1), ('alias', 'sbuf', 0),
+                     ('result', 'sbuf', 1), ('constants', 'drvcb', -1)]
+        reflection = {'bindings': [dict(msl_name=name, kind=kind, reg=reg) for name, kind, reg in resources]}
+        with tempfile.TemporaryDirectory() as tmp:
+            spv = Path(tmp) / 'texel.spv'
+            subprocess.run(['glslc', '--target-env=vulkan1.1', source, '-o', spv], check=True)
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', spv], check=True)
+            binds = vk.vk_reflect(spv.read_bytes(), reflection)
+        self.assertEqual([b['type'] for b in binds[:5]], ['tbuf', 'tbuf', 'utb', 'stb', 'stb'])
+        self.assertEqual([b['num'] for b in binds[:5]], [0, 1, 2, 2, 2])
+        self.assertEqual(binds[0]['count'], 2)
+        self.assertNotIn('read_only', binds[3])
+        self.assertTrue(binds[4]['read_only'])
+
+    @unittest.skipUnless(shutil.which('glslc') and shutil.which('spirv-val'), 'requires glslc and SPIRV-Tools')
     def test_separate_texture_sampler_arrays_export_guest_sources(self):
         source = Path(__file__).resolve().parents[2] / 'gfx/nvn/vulkan/tests/separate.frag'
         reflection = {'bindings': [dict(msl_name='images', kind='tex_ubo', reg=7, off=16),
