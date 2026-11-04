@@ -451,6 +451,24 @@ static VkImageView sampled_dummy(int view, int num) {
 enum { DEC_NONE, DEC_BC1, DEC_BC2, DEC_BC3, DEC_BC4, DEC_BC4S, DEC_BC5, DEC_BC5S, DEC_BC7, DEC_BC6H, DEC_BC6HS };
 static int dec_bpp(int dec) { return dec == DEC_BC4 || dec == DEC_BC4S ? 1 : dec == DEC_BC5 || dec == DEC_BC5S ? 2 : dec == DEC_BC6HS ? 8 : 4; }   // bytes per decoded pixel
 typedef struct { VkFormat f; uint8_t noalpha, dec, depth, stencil; } fmt_t;
+// Adapted from LAS Recomp (Copyright 2026 Peiikai, MIT; dm/third_party/lasrecomp).
+// Capability-based depth format choice: D24S8 is optional in
+// Vulkan (SwiftShader reports no features for it). Copies have their own blit
+// fallback below, so only the image's actual sampling/attachment/transfer uses
+// are required here. Keep D24 where all of those uses are supported.
+static VkFormat depth24_stencil8(void) {
+    static VkFormat chosen;
+    if (!chosen) {
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(g_pd, VK_FORMAT_D24_UNORM_S8_UINT, &p);
+        chosen = (p.optimalTilingFeatures & need) == need ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT;
+        vkGetPhysicalDeviceFormatProperties(g_pd, chosen, &p);
+        if ((p.optimalTilingFeatures & need) != need) die("Vulkan: no sampled depth/stencil attachment format with transfer support");
+        LOG("vk: depth24/stencil8 uses %s", chosen == VK_FORMAT_D24_UNORM_S8_UINT ? "D24_UNORM_S8_UINT" : "D32_SFLOAT_S8_UINT");
+    }
+    return chosen;
+}
 static fmt_t fmt_of(int nvn) {
     fmt_t r = {VK_FORMAT_UNDEFINED, 0, 0, 0, 0};
     if (nvn >= 0x79 && nvn <= 0x94) {   // ASTC: 4x4 5x4 5x5 6x5 6x6 8x5 8x6 8x8 10x5 10x6 10x8 10x10 12x10 12x12, LDR then sRGB; Vulkan lists UNORM / SRGB in pairs
@@ -477,9 +495,9 @@ static fmt_t fmt_of(int nvn) {
         case 0x76: r.noalpha = 1; /* fall through */ case 0x2E: r.f = VK_FORMAT_R32G32B32A32_SFLOAT; break;
         case 0x77: r.noalpha = 1; /* fall through */ case 0x2F: r.f = VK_FORMAT_R32G32B32A32_UINT; break;
         case 0x78: r.noalpha = 1; /* fall through */ case 0x30: r.f = VK_FORMAT_R32G32B32A32_SINT; break;
-        case 0x31: r.f = VK_FORMAT_D24_UNORM_S8_UINT; r.depth = 1; r.stencil = 1; break;   // STENCIL8 has no sampled / attachment support on Mali: a D24S8 image's stencil
+        case 0x31: r.f = depth24_stencil8(); r.depth = 1; r.stencil = 1; break;   // STENCIL8 uses a depth/stencil image's stencil plane
         case 0x32: r.f = VK_FORMAT_D16_UNORM; r.depth = 1; break;
-        case 0x33: case 0x35: r.f = VK_FORMAT_D24_UNORM_S8_UINT; r.depth = 1; r.stencil = 1; break;
+        case 0x33: case 0x35: r.f = depth24_stencil8(); r.depth = 1; r.stencil = 1; break;
         case 0x34: r.f = VK_FORMAT_D32_SFLOAT; r.depth = 1; break;
         case 0x36: r.f = VK_FORMAT_D32_SFLOAT_S8_UINT; r.depth = 1; r.stencil = 1; break;
         case 0x37: r.noalpha = 1; /* fall through */ case 0x38: r.f = VK_FORMAT_R8G8B8A8_SRGB; break;
@@ -619,6 +637,8 @@ static uint64_t *g_cpu_written; static int g_ncpu, g_ccpu;   // serials WriteTex
 static int cpu_written(uint64_t ser) { for (int i = 0; i < g_ncpu; i++) if (g_cpu_written[i] == ser) return 1; return 0; }
 
 static int g_plog;   // DM_VK_PASSLOG=<frame>[+]: that frame's (or every frame's from there) passes, draws, copies, clears and uploads are logged (diagnostics)
+static _Atomic long g_passdump_request;
+static long g_passdump_left;
 // Diagnostics: DM_VK_SKIP=<mask> leaves out kinds of GPU work, to find which one a lost device comes from: 1 buffer-to-texture copies, 2 texture copies, 4 texture-to-buffer
 // copies, 8 texture clears, 16 texture uploads, 32 draws, 64 attachment clears
 enum { SK_B2T = 1, SK_T2T = 2, SK_T2B = 4, SK_CLEAR = 8, SK_UPLOAD = 16, SK_DRAW = 32, SK_ACLEAR = 64 };
@@ -1925,15 +1945,66 @@ static void copy_b2t(const p_copy_b2t *c) {
     vkCmdCopyBufferToImage(C->cb, C->ring, v->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bc);
     barrier_all(C->cb);
 }
+// LAS Recomp's transfer-only depth scaling: depth -> buffer -> integer colour
+// image -> nearest blit -> buffer -> depth. Preserve stencil through the same
+// path with R8_UINT. Integer images keep the depth bits exactly, including D24.
+// Scratch images grow on demand; old allocations use the normal fence retirement.
+static vtex *depth_copy_scratch(int bytes, int side, uint32_t w, uint32_t h) {
+    static vtex *cache[3][2]; int k = bytes == 1 ? 0 : bytes == 2 ? 1 : 2;
+    vtex *v = cache[k][side];
+    if (v && v->w >= w && v->h >= h) return v;
+    if (v) { if (v->w > w) w = v->w; if (v->h > h) h = v->h; }
+    VkFormat format = bytes == 1 ? VK_FORMAT_R8_UINT : bytes == 2 ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
+    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    if ((fmt_feat(format) & need) != need) return NULL;
+    vtex *next = calloc(1, sizeof *next); if (!next) return NULL;
+    VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, format, {w,h,1}, 1, 1, VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+    if (vkCreateImage(g_dev,&ii,NULL,&next->img) != VK_SUCCESS) { free(next); return NULL; }
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_dev,next->img,&mr);
+    next->blk=img_mem(mr,&next->m,&next->moff); next->msize=mr.size; next->w=w; next->h=h;
+    VKCHECK(vkBindImageMemory(g_dev,next->img,next->m,next->moff));
+    to_general(C->cb,next->img,VK_IMAGE_ASPECT_COLOR_BIT);
+    if(v) tex_free(v); cache[k][side]=next; return next;
+}
+static int depth_copy_scaled(vtex *s, vtex *d, const p_copy_t2t *c, uint32_t sl, uint32_t sly, uint32_t dl, uint32_t dly) {
+    VkImageAspectFlags aspects=s->aspect & d->aspect;
+    for (unsigned aspect=VK_IMAGE_ASPECT_DEPTH_BIT; aspect<=VK_IMAGE_ASPECT_STENCIL_BIT; aspect<<=1) {
+        if (!(aspects & aspect)) continue;
+        int bytes=aspect==VK_IMAGE_ASPECT_STENCIL_BIT ? 1 : s->f.f==VK_FORMAT_D16_UNORM || s->f.f==VK_FORMAT_D16_UNORM_S8_UINT ? 2 : 4;
+        const NVNcopyRegion *sr=&c->sr, *dr=&c->dr;
+        vtex *a=depth_copy_scratch(bytes,0,sr->width,sr->height), *b=depth_copy_scratch(bytes,1,dr->width,dr->height);
+        if (!a || !b) return 0;
+        VkDeviceSize ns=(VkDeviceSize)sr->width*sr->height*bytes, nd=(VkDeviceSize)dr->width*dr->height*bytes;
+        VkDeviceSize off=ring_alloc(ns>nd?ns:nd,16); if(off==VK_WHOLE_SIZE) return 0;
+        VkBuffer buffer=C->ring;
+        VkBufferImageCopy ic={off,0,0,{aspect,sl,sly,1},{sr->xoffset,sr->yoffset,0},{sr->width,sr->height,1}};
+        vkCmdCopyImageToBuffer(C->cb,s->img,VK_IMAGE_LAYOUT_GENERAL,buffer,1,&ic); barrier_all(C->cb);
+        ic.imageSubresource=(VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; ic.imageOffset=(VkOffset3D){0,0,0};
+        vkCmdCopyBufferToImage(C->cb,buffer,a->img,VK_IMAGE_LAYOUT_GENERAL,1,&ic); barrier_all(C->cb);
+        VkImageBlit bl={{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{{0,0,0},{sr->width,sr->height,1}},
+                       {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{{0,0,0},{dr->width,dr->height,1}}};
+        vkCmdBlitImage(C->cb,a->img,VK_IMAGE_LAYOUT_GENERAL,b->img,VK_IMAGE_LAYOUT_GENERAL,1,&bl,VK_FILTER_NEAREST); barrier_all(C->cb);
+        ic.imageExtent=(VkExtent3D){dr->width,dr->height,1};
+        vkCmdCopyImageToBuffer(C->cb,b->img,VK_IMAGE_LAYOUT_GENERAL,buffer,1,&ic); barrier_all(C->cb);
+        ic.imageSubresource=(VkImageSubresourceLayers){aspect,dl,dly,1}; ic.imageOffset=(VkOffset3D){dr->xoffset,dr->yoffset,0};
+        vkCmdCopyBufferToImage(C->cb,buffer,d->img,VK_IMAGE_LAYOUT_GENERAL,1,&ic); barrier_all(C->cb);
+    }
+    return 1;
+}
 static void copy_t2t(const p_copy_t2t *c) {
     if (vk_skip() & SK_T2T) return;
-    if (g_plog) LOG("plog:  t2t %llu (fmt %#x) %dx%d → %llu (fmt %#x) %dx%d", (unsigned long long)c->src->serial, c->src->d.format, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial, c->dst->d.format, c->dr.width, c->dr.height);
+    if (g_plog) LOG("plog:  t2t %llu (fmt %#x) %dx%d → %llu (fmt %#x) %dx%d flags %#x", (unsigned long long)c->src->serial, c->src->d.format, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial, c->dst->d.format, c->dr.width, c->dr.height, c->flags);
     vtex *s = tex_get(c->src, 0), *d = tex_get(c->dst, 1); if (!s || !d) return;
     pass_end();
     uint32_t sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
-    VkImageAspectFlags sa = s->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, da = d->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
-    if (!lvl_fits(s, sl, (uint32_t)c->sr.zoffset, 1, c->sr.xoffset, c->sr.yoffset, 0, (uint32_t)c->sr.width, (uint32_t)c->sr.height, 1) ||
-        !lvl_fits(d, dl, (uint32_t)c->dr.zoffset, 1, c->dr.xoffset, c->dr.yoffset, 0, (uint32_t)c->dr.width, (uint32_t)c->dr.height, 1) || !c->sr.width || !c->sr.height || !c->dr.width || !c->dr.height) {
+    uint32_t sly=(c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0)+(uint32_t)c->sr.zoffset;
+    uint32_t dly=(c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0)+(uint32_t)c->dr.zoffset;
+    VkImageAspectFlags sa=s->aspect, da=d->aspect;
+    int depth=!!((sa|da)&(VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT));
+    if (depth && s->f.f!=d->f.f) { RED_ONCE(52,"depth copy between different host formats is unsupported"); return; }
+    if (!lvl_fits(s, sl, sly, 1, c->sr.xoffset, c->sr.yoffset, 0, (uint32_t)c->sr.width, (uint32_t)c->sr.height, 1) ||
+        !lvl_fits(d, dl, dly, 1, c->dr.xoffset, c->dr.yoffset, 0, (uint32_t)c->dr.width, (uint32_t)c->dr.height, 1) || !c->sr.width || !c->sr.height || !c->dr.width || !c->dr.height) {
         static int n; if (n++ < 8) LOG("[RED] vk: texture copy %dx%d at %d,%d (level %u) → %dx%d at %d,%d (level %u) outside its textures (%ux%u, %ux%u): skipped", c->sr.width, c->sr.height, c->sr.xoffset, c->sr.yoffset, sl,
                                        c->dr.width, c->dr.height, c->dr.xoffset, c->dr.yoffset, dl, s->w, s->h, d->w, d->h);
         return;
@@ -1941,13 +2012,16 @@ static void copy_t2t(const p_copy_t2t *c) {
     int same = c->sr.width == c->dr.width && c->sr.height == c->dr.height;
     VkFormatFeatureFlags sf = fmt_feat(s->f.f), df = fmt_feat(d->f.f);
     int lin = (c->flags & 1) && !same, blit_ok = (sf & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && (df & VK_FORMAT_FEATURE_BLIT_DST_BIT) && (!lin || (sf & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) && sa == da;
+    if (depth && (lin || getenv("DM_VK_DEPTH_COPY_TRANSFER"))) blit_ok = 0;   // depth blits require NEAREST; the switch exercises the transfer fallback on capable drivers
     if (same && (!blit_ok || s->f.f == d->f.f) && sa == da) {   // one size: a copy (formats of one size class), which every format supports
-        VkImageCopy ic = {{sa, sl, (uint32_t)c->sr.zoffset, 1}, {c->sr.xoffset, c->sr.yoffset, 0}, {da, dl, (uint32_t)c->dr.zoffset, 1}, {c->dr.xoffset, c->dr.yoffset, 0}, {(uint32_t)c->sr.width, (uint32_t)c->sr.height, 1}};
+        VkImageCopy ic = {{sa, sl, sly, 1}, {c->sr.xoffset, c->sr.yoffset, 0}, {da, dl, dly, 1}, {c->dr.xoffset, c->dr.yoffset, 0}, {(uint32_t)c->sr.width, (uint32_t)c->sr.height, 1}};
         vkCmdCopyImage(C->cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
     } else if (blit_ok) {
-        VkImageBlit b = {{sa, sl, (uint32_t)c->sr.zoffset, 1}, {{c->sr.xoffset, c->sr.yoffset, 0}, {c->sr.xoffset + c->sr.width, c->sr.yoffset + c->sr.height, 1}},
-                         {da, dl, (uint32_t)c->dr.zoffset, 1}, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + c->dr.height, 1}}};
+        VkImageBlit b = {{sa, sl, sly, 1}, {{c->sr.xoffset, c->sr.yoffset, 0}, {c->sr.xoffset + c->sr.width, c->sr.yoffset + c->sr.height, 1}},
+                         {da, dl, dly, 1}, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + c->dr.height, 1}}};
         vkCmdBlitImage(C->cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &b, lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    } else if (depth && !lin && c->src->d.samples<=1 && c->dst->d.samples<=1 && depth_copy_scaled(s,d,c,sl,sly,dl,dly)) {
+        // All supported aspects were copied by the transfer fallback.
     } else { static int n; if (n++ < 8) LOG("[RED] vk: scaled texture copy between formats %d → %d that cannot be blitted: skipped", (int)s->f.f, (int)d->f.f); return; }
     barrier_all(C->cb);
 }
@@ -2442,7 +2516,11 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     rt_dump(n);
     if (n % 1800 == 0) pcache_save();
     { static int64_t pl = -2; static int on; if (pl == -2) { const char *e = getenv("DM_VK_PASSLOG"); pl = e ? atoll(e) : -1; on = e && strchr(e, '+'); }   // <frame>+: every frame from there on
-      g_plog = on ? (int64_t)n + 1 >= pl && pl >= 0 : (int64_t)n + 1 == pl; if (g_plog && on) LOG("plog: frame %llu", (unsigned long long)n + 1); }
+      long request = atomic_exchange(&g_passdump_request, 0);
+      if (request) g_passdump_left = request;
+      g_plog = (on ? (int64_t)n + 1 >= pl && pl >= 0 : (int64_t)n + 1 == pl) || g_passdump_left > 0;
+      if (g_plog && (on || g_passdump_left)) LOG("plog: frame %llu", (unsigned long long)n + 1);
+      if (g_passdump_left > 0) g_passdump_left--; }
     return n;
 }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }
@@ -2553,7 +2631,7 @@ void dm_gfx_shot_at(long k, const char *path) {
     (void)k; (void)path; LOG("[RED] vk: DM_CTL shot is unavailable; use DM_VK_SHOTS and DM_VK_SHOT_DIR");
 }
 void dm_gfx_texdump_next(const char *path) { (void)path; LOG("[RED] vk: DM_CTL texdump is unavailable; use DM_VK_RTDUMP"); }
-void dm_gfx_passdump_next(long n) { (void)n; LOG("[RED] vk: DM_CTL passdump is unavailable; use DM_VK_PASSLOG"); }
+void dm_gfx_passdump_next(long n) { if (n > 0) atomic_store(&g_passdump_request, n); }
 void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; LOG("[RED] vk: DM_CTL texraw is not implemented"); }
 void dm_gfx_texlist(int target) {
     (void)target;

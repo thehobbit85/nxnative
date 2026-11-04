@@ -1,0 +1,2 @@
+stage ps
+b 0 cis 1 tex 0 -1 samp_tex 0
