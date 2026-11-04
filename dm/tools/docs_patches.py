@@ -274,9 +274,9 @@ def page():
         m = mods.get(g.id)
         if not m and g.id not in host_games: continue
         text = files[g.id].read_text() if m else ''
-        cuts, obs, fs, mc, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'CAPABILITIES'))
-        bids = list(dict.fromkeys([*cuts, *obs, *fs, *caps, *sorted(host_games.get(g.id, ()))]))
-        n_fs = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
+        cuts, obs, fs, mc, caps, stubs = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'CAPABILITIES', 'CODE_STUBS'))
+        bids = list(dict.fromkeys([*cuts, *obs, *fs, *caps, *stubs, *sorted(host_games.get(g.id, ()))]))
+        n_fs = n_code = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
         es = list(bound(m, rel(files[g.id]), own=True)) if m else []
         for b in sorted(host_games.get(g.id, ())):
             for _, _, _, e in host.get(b, []):
@@ -291,6 +291,10 @@ def page():
             lines.append(f'- **{version(builds, bid, g)}** {short(bid)}' + (f' ({link(files[g.id], lineno(text, repr(bid)))})' if bid in text else ''))
             for off, ob, nb, why in cuts.get(bid, []): lines.append(f'  - cut `+{off:#x}`: {why}')
             for off, gate, word, why in obs.get(bid, []): lines.append(f'  - gate {gate} at `+{off:#x}`: {why}')
+            if bid in stubs:
+                sites, _ = frame_step_sites(stubs[bid])
+                n_code += len(sites)
+                for off, why in sites: lines.append(f'  - code repair `+{off:#x}`: {why}')
             if bid in fs:
                 sites, scale = frame_step_sites(fs[bid]); n_fs += len(sites)
                 fold = len(sites) > 12   # a long list (ASTRAL CHAIN's) folds
@@ -308,7 +312,7 @@ def page():
         n_host = sum(len(host.get(b, [])) for b in bids)
         kinds = {}
         for e in es: kinds[arrow(e)] = kinds.get(arrow(e), 0) + 1
-        summary.append(f'| [{name(g)}](#{slug(name(g))}) | {sum(map(len, cuts.values()))} | {sum(map(len, obs.values()))} | {n_fs} | '
+        summary.append(f'| [{name(g)}](#{slug(name(g))}) | {sum(map(len, cuts.values())) + n_code} | {sum(map(len, obs.values()))} | {n_fs} | '
                        f'{sum(len(v) for v in mc.values())} | {n_host} | {", ".join(k + (f" ×{n}" if n > 1 else "") for k, n in kinds.items())} |')
 
     orphans = [f'- {short(bid)}: {link(p, n)}: {what}' for bid, rows in host.items() if bid not in builds for p, n, what, _ in rows]

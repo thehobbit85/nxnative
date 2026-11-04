@@ -91,6 +91,8 @@ else:
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
+#   CODE_STUBS = {build ID: function(ctx)}: build-specific code repairs needing extra instructions; ctx.site asserts an untouched source range and selects its nearby patch area,
+#     ctx.here/emit assemble the body, ctx.put writes the checked detour and records its reason. No frame-step state or host feature is enabled.
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
@@ -108,7 +110,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'CODE_STUBS': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -1539,6 +1541,28 @@ if UE_REGION is not None:
         struct.pack_into('<I', IMG, UE_REGION_X1, 0xAA0003E1 | UE_REGION_REG << 16)
 for off, oid, ow, why in region_obs: use_area(off); put_branch(off, site_obs(off, oid, int(ow, 16))); stat('obs')
 obs += region_obs
+
+# ---- Build-specific code repairs, separate from frame pacing ----
+if BUILD_ID in PATCHES['CODE_STUBS']:
+    checked_stub_sites = {}
+    def code_site(off, original):
+        old = bytes.fromhex(original)
+        assert off >= 0 and off % 4 == 0 and old and len(old) % 4 == 0 and off + len(old) <= TEXT_END, 'code stub site outside text'
+        assert IMG[off:off + len(old)] == old, f'code stub original bytes mismatch {off:#x}'
+        for at in range(off, off + len(old), 4):
+            assert at not in kinds and not any(seg[0].address <= at < seg[-1].address + 4 for seg in windows), f'code stub site is a rewrite site {at:#x}'
+            assert not any(co <= at < co + len(ob) // 2 for co, ob, nb, why in cuts), f'code stub overlaps a cut {at:#x}'
+            assert not any(at == oo for oo, oid, ow, why in obs), f'code stub overlaps an observation gate {at:#x}'
+        checked_stub_sites[off] = old
+        use_area(off)
+    def code_put(off, words, why):
+        old = checked_stub_sites.pop(off, None)
+        assert old is not None and len(old) == 4 * len(words) and why, 'code stub detour must match a checked site'
+        new = struct.pack('<' + 'I' * len(words), *words)
+        IMG[off:off + len(new)] = new
+        cuts.append((off, old.hex(), new.hex(), why)); stat('code_stub')
+    PATCHES['CODE_STUBS'][BUILD_ID](types.SimpleNamespace(here=here, emit=emit, site=code_site, put=code_put))
+    assert not checked_stub_sites, 'code stub has checked sites without detours'
 
 # ---- Frame step in whole vsyncs (the mains whose patch file has FRAME_STEP: The Legend of Zelda: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0, Hyrule Warriors: Age of Calamity 1.3.0,
 # Paper Mario: The Thousand-Year Door 1.0.1 and ASTRAL CHAIN 1.0.1; host only) ----
