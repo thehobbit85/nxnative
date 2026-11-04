@@ -16,6 +16,7 @@
 #include "nvn_timestamp.h"
 #include "dmsh_abi.h"
 #include "spv_vertex_fetch.h"
+#include "spv_output_defaults.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -1045,6 +1046,7 @@ static uint32_t *spv_gl_depth(const uint32_t *w, size_t nw, size_t *out_n) {
 }
 static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
     size_t ns = *bytes;
+    { size_t nn; uint32_t *w2 = spv_output_defaults(spv, ns / 4, &nn); if (w2) { free(spv); spv = w2; ns = nn * 4; } }
     { size_t nn; uint32_t *w2 = spv_invariant(spv, ns / 4, &nn); if (w2) { free(spv); spv = w2; ns = nn * 4; } }
     { size_t nn; uint32_t *w2 = spv_point_size(spv, ns / 4, &nn); if (w2) { free(spv); spv = w2; ns = nn * 4; } }
     if (!s->depth_zero) {   // NVN's GL depth convention (see spv_gl_depth)

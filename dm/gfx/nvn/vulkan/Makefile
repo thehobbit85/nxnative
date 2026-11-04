@@ -12,10 +12,11 @@ SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswiz
 replay-test: fixture
 	DM_VK_DIR="$(abspath $(B))/shaders" $(B)/t_replay
 fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000000002.spv \
-         $(B)/shaders/0000000000000003.spv $(B)/shaders/0000000000000004.spv $(B)/shaders/0000000000000021.spv $(B)/shaders/0000000000000022.spv $(B)/shaders/0000000000000031.spv $(B)/shaders/0000000000000032.spv
+         $(B)/shaders/0000000000000003.spv $(B)/shaders/0000000000000004.spv $(B)/shaders/0000000000000021.spv $(B)/shaders/0000000000000022.spv $(B)/shaders/0000000000000031.spv $(B)/shaders/0000000000000032.spv \
+         $(B)/shaders/0000000000000033.spv $(B)/shaders/0000000000000034.spv
 profile:
 	$(MAKE) -C $(HOST) GAME=$(GAME) game_profile
-$(B)/t_replay: $(SRC) spv_vertex_fetch.h spv_scaled32.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
+$(B)/t_replay: $(SRC) spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile
@@ -57,6 +58,15 @@ $(B)/shaders/0000000000000032.spv: tests/driver.comp tests/driver.vk.txt
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/driver.vk.txt $(@:.spv=.vk.txt)
 
+$(B)/shaders/0000000000000033.spv: tests/output_defaults.vert tests/output_defaults.vert.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/output_defaults.vert.vk.txt $(@:.spv=.vk.txt)
+$(B)/shaders/0000000000000034.spv: tests/output_defaults.frag tests/output_defaults.frag.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/output_defaults.frag.vk.txt $(@:.spv=.vk.txt)
+
 # For a Mac build, point VULKAN_SDK at the Mac SDK
 # with an offscreen driver installed, or provide RECORDER_CPPFLAGS and LIBS for a local loader.
 RECORDER_CPPFLAGS = $(if $(VULKAN_SDK),-I$(VULKAN_SDK)/include)
@@ -68,7 +78,7 @@ recorded-transfer-test: $(B)/t_recorded_transfer
 	$(B)/t_recorded_transfer
 recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
-$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
+$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
 
