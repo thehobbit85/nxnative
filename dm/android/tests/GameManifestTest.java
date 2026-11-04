@@ -18,6 +18,8 @@ public final class GameManifestTest {
         String row = "romfs/romfs.img\t5\t=d\t" + digest + "\n";
         GameAssets.Manifest manifest = parse(row);
         check(parse(row.replace("romfs/romfs.img", "programs/1/romfs/romfs.img")).entries.containsKey("programs/1/romfs/romfs.img"), "child RomFS omitted");
+        for (String path : new String[]{"html/html-document/index.html", "programs/1/html/html0/html-document/index.html"})
+            check(parse(row.replace("romfs/romfs.img", path)).entries.containsKey(path), "HTML omitted: " + path);
         check(manifest.identity.equals(hash(row.getBytes(StandardCharsets.UTF_8))), "identity does not cover complete manifest");
         check(manifest.entries.get("romfs/romfs.img").size == 5 && manifest.entries.get("romfs/romfs.img").data, "data entry differs");
         check(parse("romfs/empty\t0\t\t" + hash(new byte[0]) + "\n").entries.get("romfs/empty").pieces.length == 0, "empty file needs no pieces");
