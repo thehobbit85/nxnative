@@ -56,21 +56,29 @@ static void fixture(int i) {
 static void load(int i) { assert(h_ro_LoadModule(&handles[i - 1], raw[i - 1], NULL, 32, 1) == 0); }
 static void unload(int i) { h_ro_UnloadModule(&handles[i - 1]); assert(!g_mod[i].loaded); }
 
-// A valid historical Apple header has no TP_SLOT. Android's rewriter adds slot 2
-// for the bionic thread pointer. Reject the latter before mapping any module.
+// Accept the target's layout and reject the other host ABI before mapping.
 static void test_thread_slot_layout(void) {
-    char dir[] = "/tmp/dm-layout-XXXXXX", path[128];
+    char dir[512], path[640];
+    snprintf(dir, sizeof dir, "%s/dm-layout-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
     assert(mkdtemp(dir));
     snprintf(path, sizeof path, "%s/main.fixups.tsv", dir);
     FILE *f = fopen(path, "w"); assert(f);
     fputs("# PATCH_OFF\t0x8000\n# KEY_PAGE_OFF\t0x4000\n# KEY_PAGE_SIZE\t0x4000\n"
           "# KEY_K18_IDX\t0\n# KEY_KTLS_IDX\t1\n# KEY_KTLR_IDX\t2\n# KEY_KGATE_IDX\t3\n", f);
+#ifdef __ANDROID__
+    fputs("# TP_SLOT\t2\n", f);
+#endif
     assert(!fclose(f));
     module_t m = {.name = "main"};
     read_layout(&m, dir);
 
     f = fopen(path, "a"); assert(f);
-    fputs("# TP_SLOT\t2\n", f); assert(!fclose(f));
+#ifdef __ANDROID__
+    fputs("# TP_SLOT\t0\n", f);
+#else
+    fputs("# TP_SLOT\t2\n", f);
+#endif
+    assert(!fclose(f));
     pid_t pid = fork(); assert(pid >= 0);
     if (!pid) {
         struct rlimit limit = {0, 0}; setrlimit(RLIMIT_CORE, &limit);
@@ -83,6 +91,8 @@ static void test_thread_slot_layout(void) {
 }
 
 int main(void) {
+    alarm(15);
+    unsetenv("DM_NRO_CAPTURE");
     test_thread_slot_layout();
     FILE *manifest = tmpfile(); assert(manifest);
     fputs("# NRO manifest\n\nrefused 00 128\n", manifest);
@@ -118,6 +128,30 @@ int main(void) {
     unload(2);
     assert(!guest_sym("shared") && images[0].slots[0] == (uint64_t)&missing + 8);
     assert(inits == 3 && finis == 3);
+
+    // Rejected requests preserve the caller's handle, all bindings and the
+    // activation list. A later successful load proves the lock was released.
+    uint8_t unknown[128]; memcpy(unknown, raw[0], sizeof unknown); unknown[0x50] = 1;
+    ro_module rejected = {.module = &missing, .state = 7, .pad = 11, .image = unknown, .buffer = raw[0]};
+    ro_module before = rejected;
+    size_t unchanged = 1234;
+    assert(h_ro_GetBufferSize(&unchanged, NULL) != 0 && unchanged == 1234);
+    assert(h_ro_LoadModule(&rejected, NULL, NULL, 32, 1) != 0);
+    assert(h_ro_LoadModule(&rejected, unknown, NULL, 32, 1) != 0);
+    assert(!memcmp(&before, &rejected, sizeof before));
+    assert(g_nloaded == 1 && !g_mod[1].loaded && !g_mod[2].loaded);
+    assert(images[0].slots[0] == (uint64_t)&missing + 8 && images[0].slots[1] == 0);
+    for (int cycle = 0; cycle < 64; cycle++) {
+        load(1); load(2);
+        assert((uint64_t)guest_sym("shared") == first && images[2].slots[0] == first + 8);
+        assert(images[1].value == 123 && !images[1].bss);
+        images[1].value = 999; images[1].bss = 456;
+        unload(1);
+        assert((uint64_t)guest_sym("shared") == second && images[0].slots[1] == 0);
+        unload(2);
+        assert(g_nloaded == 1 && !guest_sym("shared") && images[0].slots[0] == (uint64_t)&missing + 8);
+    }
+    assert(inits == 131 && finis == 131);
 
     // The last manifest slot must support the same lookup, relocation and unload lifecycle as the first ones.
     module_t *first_slot = &g_mod[1];
