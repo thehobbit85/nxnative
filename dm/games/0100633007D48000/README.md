@@ -40,6 +40,8 @@ Update 1.5.12620 (v589824) over the base game, SDK 20.5.21. Unity 6000.0.61f1 IL
 
 ## Found on this game
 
+- [Vulkan export preserves packaged shader stages](../../../docs/reference/shaders.md#vulkan-export-preserves-packaged-shader-stages): Android export validates all 1,812 stages, including one geometry asset; runtime geometry support remains open.
+
 - [The prepare step inside the shader map's once](../../../docs/reference/shaders.md#the-prepare-step-inside-the-shader-maps-once): the crash at the first program with a window, already found and fixed on other games; this port added the kept prefetch items and the test.
 - Existing [Unity 6 Shader objects](../../../docs/reference/shaders.md#unity-6-shader-objects) and the node area's [function-matched cut](../../../docs/reference/memory.md#the-sdks-address-region-node-area) work without another change.
 
