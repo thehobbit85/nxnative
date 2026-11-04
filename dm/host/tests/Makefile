@@ -293,6 +293,8 @@ $(B)/t_time: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
 # Run a synthetic worker through thread_main, the guest stack switch, the SVC gate and bionic signals.
+.PHONY: android-scheduler-build
+android-scheduler-build: $(B)/t_android_scheduler $(B)/t_thread_leak
 ANDROID_SCHED_SRC = t_android_scheduler.c ../hle_thread.c ../thread.c ../entry.S ../crash.c ../hle_os.c ../loader.c ../hle.c ../hle_svc.c
 $(B)/t_android_scheduler: $(ANDROID_SCHED_SRC) ../dm.h ../dm_uc.h ../host_memory.h ../android_text.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -UNDEBUG -fPIC -fvisibility=hidden \
