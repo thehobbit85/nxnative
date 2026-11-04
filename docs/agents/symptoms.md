@@ -577,6 +577,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Rendering
 
+- Packaged ASTC textures sample as transparent black on Android SwiftShader: the player, HUD, title background and scene effects disappear, while their geometry and other textures render. → [Vulkan texture uploads visible to sampling](../reference/rendering.md#vulkan-texture-uploads-visible-to-sampling)
 - Vulkan rejects a cube view because the underlying image lacks `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT`. → [Vulkan cube views of two-dimensional arrays](../reference/rendering.md#vulkan-cube-views-of-two-dimensional-arrays)
 - clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`. → [Null textures in diagnostic logs](../reference/rendering.md#null-textures-in-diagnostic-logs)
 - Metal aborts on a texture descriptor with an absurd size (`height (1869367126) greater than … 16384`). → [Texture objects copied into command records](../reference/rendering.md#texture-objects-copied-into-command-records)

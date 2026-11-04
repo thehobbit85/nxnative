@@ -2,6 +2,8 @@
 #include "hle.h"
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
+#include "../../tex/nvn_deswizzle.h"
+#include <vulkan/vulkan.h>
 #include <assert.h>
 #include <time.h>
 
@@ -131,6 +133,76 @@ static void textured_draw(int compact, int split_submit) {
             abort();
         }
     }
+}
+
+static int astc_supported(void) {
+    VkInstance instance;
+    VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "upload replay", 0, NULL, 0, VK_API_VERSION_1_1};
+    info.pApplicationInfo = &app;
+    assert(vkCreateInstance(&info, NULL, &instance) == VK_SUCCESS);
+    uint32_t count = 1;
+    VkPhysicalDevice physical;
+    VkResult result = vkEnumeratePhysicalDevices(instance, &count, &physical);
+    assert((result == VK_SUCCESS || result == VK_INCOMPLETE) && count);
+    VkPhysicalDeviceFeatures features;
+    vkGetPhysicalDeviceFeatures(physical, &features);
+    vkDestroyInstance(instance, NULL);
+    return features.textureCompressionASTC_LDR;
+}
+
+// Uploads execute in a separate command buffer before the draw buffer. Queue
+// ordering alone does not make their writes visible to sampling. In particular,
+// SwiftShader samples zero from ASTC images without the image dependency.
+static void uploaded_texture(NVNformat format) {
+    tex_t texture = {.serial = 0x4000 + format, .has_layout = 1,
+        .d = {.width = 4, .height = 4, .depth = 6, .levels = 1,
+              .target = NVN_TEXTURE_TARGET_CUBEMAP, .format = format}};
+    tex_t output = {.serial = texture.serial + 0x100, .d = {.width = 4, .height = 4,
+        .depth = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&texture.d, &texture.L); nvn_tex_layout(&output.d, &output.L);
+    texture.mem = calloc(1, texture.L.size); assert(texture.mem);
+    mtl_reg_tex(800, &texture, NULL);
+    float positions[] = {-1,-1, 3,-1, -1,3}, white[] = {1,1,1,1};
+    for (int pass = 0; pass < 2; ++pass) {
+        uint8_t color[] = {pass ? 255 : 0, pass ? 0 : 255, 255, 255};
+        uint8_t linear[4 * 4 * 4];
+        for (size_t i = 0; i < sizeof linear; i += 4) memcpy(linear + i, color, 4);
+        // ASTC LDR void-extent block, followed by four UNORM16 constant channels.
+        uint8_t block[16] = {0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        for (int c = 0; c < 4; ++c) block[8 + c * 2] = block[9 + c * 2] = color[c];
+        for (unsigned layer = 0; layer < 6; ++layer)
+            assert(!nvn_swizzle(&texture.d, 0, layer,
+                format == NVN_FORMAT_RGBA8 ? linear : block, 16, texture.mem));
+        if (pass) mtl_tex_cpu_written(&texture);
+        list_t list = {0};
+        uint8_t pixels[4 * 4 * 4] = {0};
+        push_constants(&list, 0, 240, white, sizeof white);
+        RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &program, .stages = 3);
+        va_st va = {.fmt = NVN_FORMAT_RG32F}; p_bind_vattr attr = {.n = 1};
+        memcpy(attr.st, &va, sizeof va); put(&list, OP_BIND_VATTR, &attr, sizeof attr);
+        RECORD(OP_BIND_VSTREAM, p_bind_vstream, .n = 1, .st = {{.stride = 8}});
+        RECORD(OP_BIND_VBUF1, p_bind_vbuf1, .index = 0, .size = sizeof positions, .addr = (uintptr_t)positions);
+        RECORD(OP_BIND_UBO_SMALL, p_bind_ubo_small, .stage = 1, .index = 2, .size = sizeof white, .addr = (uintptr_t)white);
+        RECORD(OP_BIND_TEX1, p_bind_tex1, .stage = 1 | BIND_TEX1_NOBASE, .slot = 3, .h = 800);
+        RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+        RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels,
+               .r = {.width = 4, .height = 4, .depth = 1});
+        put(&list, OP_END, NULL, 0);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (size_t i = 0; i < sizeof pixels; i += 4) {
+            if (memcmp(pixels + i, color, 4)) {
+                fprintf(stderr, "uploaded format %#x pass %d pixel %zu: %u %u %u %u\n",
+                        format, pass, i / 4, pixels[i], pixels[i+1], pixels[i+2], pixels[i+3]);
+                abort();
+            }
+        }
+    }
+    mtl_reg_tex(800, NULL, NULL);
+    mtl_tex_release(&texture); mtl_tex_release(&output);
+    free(texture.mem);
+    printf("Uploaded format %#x and changed CPU content sampled correctly\n", format);
 }
 
 // First create and clear the backing, then register image views of its layers and
@@ -343,6 +415,9 @@ static void queue_viewport_origin(void) {
 int main(void) {
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
+    uploaded_texture(NVN_FORMAT_RGBA8);
+    if (astc_supported()) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
+    else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
     textured_draw(0, 0);  // CPU argument block, followed by a fully GPU-generated block
     textured_draw(1, 0);  // X is GPU-generated, Y and Z are CPU-written
     textured_draw(0, 1);  // argument producer and consumer in successive submissions

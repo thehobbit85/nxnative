@@ -4,6 +4,16 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Textures and formats
 
+### Vulkan texture uploads visible to sampling
+
+- **Symptom:** Packaged ASTC textures sample as transparent black on Android SwiftShader: the player, HUD, title background and scene effects disappear, while their geometry and other textures render.
+
+- **Cause:** The Vulkan backend copied texture data in the upload command buffer, then submitted that buffer before the draw buffer without an upload-to-sampling image dependency. Submission order alone does not make transfer writes visible to shader reads. The source atlas decoded correctly on Metal; a standalone Vulkan atlas replay returned only zero pixels, while a constant-colour fragment control rendered correctly.
+
+- **Fix:** After all mip/layer copies, publish the image's transfer writes to shader reads with an image memory barrier, keeping its GENERAL layout. Apply the dependency to initial uploads and CPU re-uploads. The synthetic replay samples constant-colour RGBA8 and ASTC cube textures, changes their CPU content and samples again; the old backend fails on the first ASTC sample and the corrected backend passes both updates. ASTC coverage is explicitly skipped only when the device does not advertise it. See the [Vulkan upload synchronization example](https://docs.vulkan.org/guide/latest/synchronization_examples.html).
+
+- **Found on:** [Hollow Knight](../../dm/games/0100633007D48000/README.md#android-integration), Android 15 ARM64 emulator with SwiftShader. No game-specific shader replacement or depth workaround is needed.
+
 ### Vulkan cube views of two-dimensional arrays
 
 - **Symptom:** Vulkan rejects a cube view because the underlying image lacks `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT`.
