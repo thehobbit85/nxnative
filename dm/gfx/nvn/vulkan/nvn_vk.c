@@ -113,10 +113,28 @@ static void img_mem_free(int blk, VkDeviceMemory m, VkDeviceSize off, VkDeviceSi
 // ---------- Submission contexts: command buffers, ring buffer, descriptor pool, the writes that wait for completion ----------
 #define NCTX 3
 #define RING (64u << 20)
+// Replay fixtures use small real driver pools to exercise exhaustion and reuse.
+#ifndef DM_VK_DESCRIPTOR_POOL_DIVISOR
+#define DM_VK_DESCRIPTOR_POOL_DIVISOR 1
+#endif
+static VkDescriptorPool descriptor_pool_new(const uint32_t *need) {
+    VkDescriptorPoolSize ps[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 65536}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 65536}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192},
+                                 {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 4096}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096}, {VK_DESCRIPTOR_TYPE_SAMPLER, 4096},
+                                 {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 4096}};
+    for (unsigned i = 0; i < sizeof ps / sizeof *ps; i++) {
+        uint32_t minimum = need && need[ps[i].type] ? need[ps[i].type] : 1;
+        ps[i].descriptorCount /= DM_VK_DESCRIPTOR_POOL_DIVISOR;
+        if (ps[i].descriptorCount < minimum) ps[i].descriptorCount = minimum;
+    }
+    uint32_t sets = 32768 / DM_VK_DESCRIPTOR_POOL_DIVISOR;
+    VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, sets ? sets : 1, sizeof ps / sizeof *ps, ps};
+    VkDescriptorPool pool; VKCHECK(vkCreateDescriptorPool(g_dev, &dpi, NULL, &pool)); return pool;
+}
 typedef struct { int kind; void *dst; uint32_t mode, v; uint64_t addr; uint32_t type; const uint8_t *src; size_t n; } post_t;   // kind 1 event, 2 counter, 3 copy ring → guest
 typedef struct vtex vtex;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer cb, up; VkFence fence; VkDescriptorPool dp;
+    VkDescriptorPool dp0, *extra_dp; size_t nextra_dp, cextra_dp; // older sets remain valid until this context's fence
     VkBuffer ring; VkDeviceMemory ringm; uint8_t *ringp; VkDeviceSize used, capacity;
     post_t *post; int npost, cpost;
     uint64_t fence_val; int up_used;
@@ -247,6 +265,8 @@ static void ctx_complete(ctx_t *c) {
     c->nextra = 0;
     for (int i = 0; i < c->nfb; i++) vkDestroyFramebuffer(g_dev, c->fb[i], NULL);
     c->nfb = 0;
+    for (size_t i = 0; i < c->nextra_dp; i++) vkDestroyDescriptorPool(g_dev, c->extra_dp[i], NULL);
+    c->nextra_dp = 0;
 }
 static void garbage_free(uint64_t done);
 static void *completion_thread(void *a) {
@@ -382,10 +402,7 @@ static void vk_init_(void) {
         VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, NULL, VK_FENCE_CREATE_SIGNALED_BIT};
         VKCHECK(vkCreateFence(g_dev, &fi, NULL, &c->fence));
         c->ring = c->ring0 = buf_new(RING, ALL_BUF_USAGE, &c->ringm, (void **)&c->ringp); c->ringm0 = c->ringm; c->ringp0 = c->ringp;
-        VkDescriptorPoolSize ps[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 65536}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 65536}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192},
-                                     {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 4096}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096}, {VK_DESCRIPTOR_TYPE_SAMPLER, 4096}};
-        VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 32768, sizeof ps / sizeof *ps, ps};
-        VKCHECK(vkCreateDescriptorPool(g_dev, &dpi, NULL, &c->dp));
+        c->dp = c->dp0 = descriptor_pool_new(NULL);
         VkQueryPoolCreateInfo qi2 = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, 2};
         VKCHECK(vkCreateQueryPool(g_dev, &qi2, NULL, &c->qp));
     }
@@ -967,6 +984,8 @@ static VkSampler samp_get(int sid) {
 
 // ---------- Shaders and pipelines ----------
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
+static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+    VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
 enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
 static int sampler_source(const char *kind) {
@@ -1250,9 +1269,7 @@ static shader_t *shader_get(const uint8_t md[8]) {
     VkResult r = vkCreateShaderModule(g_dev, &mi, NULL, &s->mod); free(spv);
     if (r != VK_SUCCESS) { LOG("[RED] vk: shader %s rejected (%d)", key, (int)r); s->mod = VK_NULL_HANDLE; }
     VkDescriptorSetLayoutBinding lb[64]; VkShaderStageFlags sf = s->stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : s->stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
-    static const VkDescriptorType DT[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
-                                          VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-    for (int i = 0; i < s->nb; i++) lb[i] = (VkDescriptorSetLayoutBinding){s->b[i].binding, DT[s->b[i].type], s->b[i].count, sf, NULL};
+    for (int i = 0; i < s->nb; i++) lb[i] = (VkDescriptorSetLayoutBinding){s->b[i].binding, descriptor_type[s->b[i].type], s->b[i].count, sf, NULL};
     VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, (uint32_t)s->nb, lb};
     VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &s->dsl));
     return s;
@@ -1882,7 +1899,23 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
     }
     memset(g_bound_images[stage], 0, sizeof g_bound_images[stage]);
     VkDescriptorSet ds; VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, C->dp, 1, &s->dsl};
-    if (vkAllocateDescriptorSets(g_dev, &ai, &ds) != VK_SUCCESS) { RED_ONCE(20, "descriptor pool exhausted in one submission: draws are dropped"); return VK_NULL_HANDLE; }
+    VkResult result = vkAllocateDescriptorSets(g_dev, &ai, &ds);
+    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+        uint32_t need[VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT + 1] = {0};
+        for (int i = 0; i < s->nb; i++) need[descriptor_type[s->b[i].type]] += s->b[i].count;
+        if (C->nextra_dp == C->cextra_dp) {
+            if (C->cextra_dp > SIZE_MAX / 2 / sizeof *C->extra_dp) die("Vulkan: descriptor pool tracking size overflow");
+            size_t capacity = C->cextra_dp ? C->cextra_dp * 2 : 8;
+            void *next = realloc(C->extra_dp, capacity * sizeof *C->extra_dp);
+            if (!next) die("Vulkan: cannot track submission descriptor pools");
+            C->extra_dp = next; C->cextra_dp = capacity;
+        }
+        C->dp = descriptor_pool_new(need);
+        C->extra_dp[C->nextra_dp++] = C->dp;
+        ai.descriptorPool = C->dp;
+        result = vkAllocateDescriptorSets(g_dev, &ai, &ds);
+    }
+    VKCHECK(result);
     VkWriteDescriptorSet w[64]; VkDescriptorBufferInfo bi[64]; int nw = 0;
     for (int i = 0; i < s->nb; i++) {
         const sbind *b = &s->b[i];
@@ -2425,7 +2458,7 @@ void mtl_sub_begin(void) {
     pthread_mutex_lock(&g_mu); while (c->fence_val > g_done) pthread_cond_wait(&g_cv, &g_mu); pthread_mutex_unlock(&g_mu);
     atomic_fetch_add(&g_wait_ns, now_ns() - w0);
     C = c; C->used = 0; C->capacity = RING; C->up_used = 0; g_ndc = 0; g_wgen++; C->ring = C->ring0; C->ringp = C->ringp0;
-    VKCHECK(vkResetDescriptorPool(g_dev, C->dp, 0));
+    C->dp = C->dp0; VKCHECK(vkResetDescriptorPool(g_dev, C->dp, 0));
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     VKCHECK(vkBeginCommandBuffer(C->cb, &bi)); VKCHECK(vkBeginCommandBuffer(C->up, &bi));
     vkCmdResetQueryPool(C->up, C->qp, 0, 2); vkCmdWriteTimestamp(C->up, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->qp, 0);

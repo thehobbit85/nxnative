@@ -1100,7 +1100,57 @@ static void separate_descriptors(void) {
     mtl_tex_release(&output);
     puts("Separate texture/sampler arrays use independent slots, GPU uniform handles, texture-packed and fixed sampler IDs");
 }
+static void descriptor_lifetime(void) {
+    enum { N = 100 };
+    tex_t source[2], output = {.serial = 0xe002, .d = {.width = 8, .height = 8, .depth = 1, .levels = 1,
+        .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d, &output.L);
+    samp_par nearest = {0}; mtl_reg_samp(950, &nearest);
+    for (int i = 0; i < 2; i++) {
+        source[i] = output; source[i].serial = 0xe000 + i; mtl_reg_tex(950 + i, &source[i], NULL);
+    }
+    mtl_queue_activate(950);
+    // More than three submissions reuse every context. Keep all sets alive
+    // until its fence: earlier draws/dispatches must retain their descriptors.
+    for (int round = 0; round < 4; round++) {
+        uint32_t words[N][4] = {0}; uint8_t pixels[N][256] = {0};
+        uint64_t before = mtl_last_fence(); mtl_sub_begin();
+        for (int i = 0; i < N; i++) {
+            list_t list = {0}; uint32_t values[4] = {1000u * round + 4u * i + 1, 2, 3, 4};
+            push_constants(&list, 1, 240, values, sizeof values);
+            RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &groups, .stages = 0x20);
+            RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)words[i], .size = sizeof words[i]);
+            RECORD(OP_DISPATCH, p_dispatch, .x = 4, .y = 1, .z = 1);
+            put(&list, OP_END, NULL, 0); mtl_exec(list.bytes);
+        }
+        for (int i = 0; i < N; i++) {
+            list_t list = {0};
+            if (!i) for (int j = 0; j < 2; j++) {
+                RECORD(OP_CLEAR_TEX, p_clear_tex, .tex = &source[j], .r = {.width = 8, .height = 8, .depth = 1}, .mask = 15, .c.f = {j ? 1 : 0, 0, 0, 1});
+            }
+            RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
+            RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &depth_copy_program, .stages = 3);
+            RECORD(OP_BIND_TEX1, p_bind_tex1, .stage = 1 | BIND_TEX1_NOBASE, .slot = 0, .h = (950 + (i & 1)) | (950ull << 20));
+            RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+            RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)pixels[i], .r = {.width = 8, .height = 8, .depth = 1});
+            put(&list, OP_END, NULL, 0); mtl_exec(list.bytes);
+        }
+        uint64_t fence = mtl_sub_commit(); assert(fence == before + 1); assert(mtl_wait(fence, UINT64_MAX));
+        for (int i = 0; i < N; i++) {
+            uint32_t want[4] = {1000u * round + 4u * i + 1, 2, 3, 4};
+            if (memcmp(words[i], want, sizeof want)) fprintf(stderr, "descriptor lifetime round%d dispatch%d: %u expected%u\n", round, i, words[i][0], want[0]);
+            assert(!memcmp(words[i], want, sizeof want));
+            uint8_t color[4] = {i & 1 ? 255 : 0, 0, 0, 255};
+            for (int p = 0; p < 64; p++) assert(!memcmp(pixels[i] + p * 4, color, 4));
+        }
+    }
+    for (int i = 0; i < 2; i++) { mtl_reg_tex(950 + i, NULL, NULL); mtl_tex_release(&source[i]); }
+    mtl_tex_release(&output); mtl_queue_forget(950);
+    puts("Descriptor pools preserve 400 dispatches and 400 draws across exhaustion and context reuse without submission cuts");
+}
 int main(void) {
+    if (getenv("DM_VK_TEST_DESCRIPTOR_POOLS")) { descriptor_lifetime(); return 0; }
+    descriptor_lifetime();
     if(getenv("DM_VK_TEST_SEPARATE")) { separate_descriptors();return 0; }
     separate_descriptors();
     if(getenv("DM_VK_TEST_RETIRE")) { retired_texture_pool();return 0; }

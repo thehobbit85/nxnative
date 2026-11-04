@@ -4,6 +4,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Textures and formats
 
+### Vulkan descriptor exhaustion within one submission
+
+- **Symptom:** later draws or dispatches disappear after `descriptor pool exhausted in one submission: draws are dropped`.
+- **Cause:** each submission had one fixed descriptor pool. Exhausting either its sets or a descriptor type made subsequent commands return without encoding their work.
+- **Fix:** allocate another pool on `VK_ERROR_OUT_OF_POOL_MEMORY` or `VK_ERROR_FRAGMENTED_POOL`, sized to hold at least the requested layout. Keep earlier pools and their sets until the submission fence completes, then destroy the extra pools. Reuse the context's original pool for its next submission. Other allocation failures remain explicit errors; rollover neither submits early nor resets live descriptors.
+- **Found on:** synthetic Vulkan replay, `descriptor_lifetime`. Small real driver pools expose the original loss; 400 dispatches and 400 independently checked draws span exhaustion and reuse of all submission contexts. The fixture covers dynamic rendering and legacy render passes.
+
 ### Ordered Vulkan buffer writes and partial overlaps
 
 - **Symptom:** a compute consumer reads stale words after overlapping GPU writes, buffer copy/fill/update, or pitched texture readback; more than 512 outstanding writes lose earlier ranges.

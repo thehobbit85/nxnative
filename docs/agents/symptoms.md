@@ -580,6 +580,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Rendering
 
+- later draws or dispatches disappear after `descriptor pool exhausted in one submission: draws are dropped`. → [Vulkan descriptor exhaustion within one submission](../reference/rendering.md#vulkan-descriptor-exhaustion-within-one-submission)
 - a compute consumer reads stale words after overlapping GPU writes, buffer copy/fill/update, or pitched texture readback; more than 512 outstanding writes lose earlier ranges. → [Ordered Vulkan buffer writes and partial overlaps](../reference/rendering.md#ordered-vulkan-buffer-writes-and-partial-overlaps)
 - a draw disappears when compute writes its indices, or samples a missing texture when compute writes its texture/sampler handles. → [Vulkan CPU consumers of GPU-produced buffers](../reference/rendering.md#vulkan-cpu-consumers-of-gpu-produced-buffers)
 - a vertex or fragment program updates a storage buffer, but a following dispatch and the fenced guest memory retain its old values (`what a draw writes to it is lost`). → [Vulkan vertex and fragment storage writes](../reference/rendering.md#vulkan-vertex-and-fragment-storage-writes)
