@@ -35,6 +35,17 @@ The development signing key stays at `<prepared-folder>/android-debug.keystore` 
 
 The packer retains the donor's deduplicated asset pieces and separate data ZIP for large games. It validates Android rewrite metadata and requires a new data file to match the package/version. The menu checks file lengths and confines extraction to game asset roots.
 
+Packaging and cheat selection regressions run without a device or game files:
+
+```sh
+python3 -m unittest dm.android.tests.test_packaging
+mkdir -p /tmp/nx-android-java-tests
+javac --release 11 -d /tmp/nx-android-java-tests dm/android/app/java/com/nxnative/CheatSelections.java dm/android/tests/CheatSelectionsTest.java
+java -cp /tmp/nx-android-java-tests com.nxnative.CheatSelectionsTest
+```
+
+The cheat menu writes the shared host's stable keys (including duplicate-name suffixes), and deployment with `--test` selects the separate test app's asset directory.
+
 A synthetic test needs no game dump:
 
 ```sh

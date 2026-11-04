@@ -752,6 +752,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - read-only depth/stencil attachments are written back after every pass, and the periodic unwritten-store savings counter remains zero with the default configuration. → [Unwritten attachment stores without lookahead](../reference/rendering.md#unwritten-attachment-stores-without-lookahead)
 - portrait gameplay overlaps the touch controls, touch coordinates land outside the game picture, or a TV's picture renders at 4K again after a layout pass. → [iOS layouts: portrait, a half-folded Duo, iPad windows](../reference/rendering.md#ios-layouts-portrait-a-half-folded-duo-ipad-windows)
 - with *Picture shape* at 1.43:1 (`DM_SCREEN_ASPECT`) the game renders 1920x1344, but on an iPhone Duo in Fit (the default) the picture comes out smaller than the 16:9 one, with black bars on all four sides; it fills the screen only in Fill. On the Mac a click lands off the point under the pointer (it was mapped on a 16:9 rectangle of the window). → [The picture laid out in the shape the game presents](../reference/rendering.md#the-picture-laid-out-in-the-shape-the-game-presents)
+- LLVM reports an uninitialized window-generation value when the Android CLI presents without a NativeActivity window. → [Android presentation without a window](../reference/rendering.md#android-presentation-without-a-window)
 
 ## Shaders
 
@@ -994,6 +995,10 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - geometry vertex-capture passes consume substantial GPU time before geometry compute or depth rasterization. → [Geometry capture initializes only missing words](../reference/shaders.md#geometry-capture-initializes-only-missing-words)
 - Apple's performance HUD (`DM_METAL_HUD=1`) says `Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler for more fine grained compilations` during play, with a dip in the frame-rate graph at that moment, for example when a new room first issues a scissored clear. → [The host's own shaders compiled from source at run time](../reference/shaders.md#the-hosts-own-shaders-compiled-from-source-at-run-time)
 - a raw global memory read of a memory pool made after the shader's arguments were encoded gets 0, though the pool exists when the GPU runs it; a task shader that reads both ends of a range this way loops `(0 - 1) >> 5` times and hangs the GPU. The memory report's `raw pool table words at commit` line counts the words that were out of date. → [Raw pool table words that predate the pools](../reference/shaders.md#raw-pool-table-words-that-predate-the-pools)
+
+## Cheats on a Switch
+
+- choosing the second cheat with the same display name enables the first one. → [Android menu selections with duplicate names](../reference/cheats.md#android-menu-selections-with-duplicate-names)
 
 ## Game state
 

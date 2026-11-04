@@ -2128,7 +2128,7 @@ static _Atomic uint64_t g_presents;
 
 // ---------- Android window ----------
 #ifdef __ANDROID__
-__attribute__((weak)) void *front_native_window(int *gen) { (void)gen; return NULL; }   // app/front_android.c; none in the adb front end
+__attribute__((weak)) void *front_native_window(int *gen) { *gen = 0; return NULL; }   // app/front_android.c; none in the adb front end
 __attribute__((weak)) void front_window_lock(int on) { (void)on; }
 static struct { VkSurfaceKHR surf; VkSwapchainKHR sc; VkImage img[8]; VkImageView view[8]; uint32_t n; VkFormat fmt; VkExtent2D ext; int gen; } W;
 #define NPRES 3
@@ -2315,7 +2315,7 @@ int mtl_display_hz(void) { return 0; }
 int mtl_fps_target(void) { static int f = -1; if (f < 0) { const char *e = getenv("DM_FPS"); f = e && atoi(e) == 30 ? 30 : 60; } return f; }
 int mtl_link_active(void) { return 0; }
 int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; return 0; }
-// Android uses the Vulkan FIFO swapchain. There is no Apple display-link clock
+// Android uses a Vulkan mailbox swapchain when available, otherwise FIFO. There is no Apple display-link clock
 // or Metal snapshot ring; the recorder uses its existing fallback pacing path.
 int mtl_link_stalled(void) { return 0; }
 int mtl_link_rate(void) { return 0; }
