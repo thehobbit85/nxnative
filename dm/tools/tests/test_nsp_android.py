@@ -20,6 +20,28 @@ class AndroidTarget(unittest.TestCase):
         with self.assertRaisesRegex(nsp.BuildError, 'prepare-xcode'):
             nsp.main(args)
 
+    def test_android_fonts_are_prepared_on_a_fresh_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); standard = root / 'source.ttf'; standard.write_bytes(b'standard')
+            def generate(cmd, log, env=None):
+                Path(cmd[2]).write_bytes(b'icons')
+            with mock.patch.object(nsp, 'run', generate):
+                font = nsp.android_fonts(sys.executable, REPO, root, {'STD_FONT': str(standard)}, root)
+            self.assertEqual((font / 'standard.ttf').read_bytes(), b'standard')
+            self.assertEqual((font / 'nintendo_ext.ttf').read_bytes(), b'icons')
+
+    def test_alias_build_keeps_profile_and_application_ids_separate(self):
+        spec = importlib.util.spec_from_file_location('android_wrapper', REPO / 'scripts/build_android.py')
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(module.subprocess, 'run') as run, mock.patch.object(sys, 'argv',
+                ['build_android.py', '0100000000000002', tmp, tmp + '/out.apk', '--profile', '0100000000000001', '--ndk', tmp]):
+            module.main()
+            native, apk = [c.args[0] for c in run.call_args_list]
+            self.assertIn('GAME=0100000000000001', native)
+            self.assertEqual(apk[2], '0100000000000002')
+            self.assertIn('0100000000000001/libdmhost.so', apk[apk.index('--library') + 1])
+
     def test_export_reuses_only_complete_unchanged_products(self):
         with tempfile.TemporaryDirectory() as tmp:
             sh = Path(tmp) / 'shader'; sh.mkdir()

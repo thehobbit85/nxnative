@@ -2,6 +2,8 @@
 from pathlib import Path
 import importlib.util
 import struct
+import io
+import zipfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,6 +15,19 @@ spec.loader.exec_module(pack)
 
 
 class Packaging(unittest.TestCase):
+    def test_large_image_spills_to_bounded_data_chunks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); src = root / 'RomFS.img'; src.write_bytes(b'abcde' * 1000000)
+            archive = root / 'data.zip'
+            with zipfile.ZipFile(io.BytesIO(), 'w') as apk:
+                self.assertTrue(pack.needs_data_archive(apk, src, 1024))
+            with zipfile.ZipFile(archive, 'w', allowZip64=True) as data:
+                pack.write_data_file(data, 'romfs/romfs.img', src)
+            with zipfile.ZipFile(archive) as data:
+                self.assertGreater(len(data.infolist()), 1)
+                self.assertTrue(all(i.file_size <= 2 << 20 for i in data.infolist()))
+                self.assertEqual(b''.join(data.read(i) for i in data.infolist()), src.read_bytes())
+
     def test_selected_version_uses_android_modules_and_romfs_image(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

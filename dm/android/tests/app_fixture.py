@@ -27,6 +27,9 @@ def build(output, ndk):
         'fs_write': '_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE',
         'fs_close': '_ZN2nn2fs9CloseFileENS0_10FileHandleE',
         'fs_commit': '_ZN2nn2fs6CommitEPKc',
+        'aoc_count': '_ZN2nn3aoc17CountAddOnContentEv',
+        'font_state': '_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE',
+        'font_address': '_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE',
     }
     source = '.section .start,"ax"\n.global _start\n_start: b nnMain\n.word 0\n'
     for name in imports:
@@ -84,6 +87,11 @@ def build(output, ndk):
     for sub in ('extract/synthetic/RomFS', 'shader/vk', 'font'):
         (output / sub).mkdir(parents=True, exist_ok=True)
     (output / 'extract/synthetic/RomFS/fixture.txt').write_text('Synthetic APK integration fixture\n')
+    (output / 'aoc/1').mkdir(parents=True, exist_ok=True)
+    (output / 'aoc/1/fixture.txt').write_text('Synthetic DLC marker\n')
+    # File routing, not font rasterization: the HLE maps these synthetic bytes.
+    for name in ('standard.ttf', 'nintendo_ext.ttf'):
+        (output / 'font' / name).write_bytes(b'\x00\x01\x00\x00synthetic font')
 
 
 if __name__ == '__main__':

@@ -101,13 +101,17 @@ public class MenuActivity extends Activity {
     private long versionCode() { try { return getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode(); } catch (Exception e) { return 0; } }
     private boolean bundled() { try (InputStream in = getAssets().open("game/files.txt")) { return true; } catch (Exception e) { return false; } }
     private static File gameFile(File root, String name) throws java.io.IOException {
-        if (!name.matches("(?:dm|romfs|vk|font|aoc)/.+") || name.contains("\\"))
-            throw new java.io.IOException("Invalid game asset path: " + name);
-        File result = new File(root, name).getCanonicalFile();
-        if (!result.getPath().startsWith(root.getCanonicalPath() + File.separator))
-            throw new java.io.IOException("Game asset leaves its storage folder: " + name);
-        return result;
+        return GameAssets.path(root, name);
     }
+    private void finishUnpack(File ext) throws java.io.IOException {
+        boolean image = false;
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("game/files.txt"), StandardCharsets.UTF_8))) {
+            String line; while ((line = r.readLine()) != null) if (line.startsWith("romfs/romfs.img\t")) image = true;
+        }
+        GameAssets.finishRomfs(ext, image);
+        try (OutputStream o = new FileOutputStream(new File(ext, ".unpacked"))) { o.write((versionCode() + "\n").getBytes(StandardCharsets.UTF_8)); }
+    }
+
     private boolean needsUnpack() {
         if (!bundled()) return false;
         File mark = new File(getExternalFilesDir(null), ".unpacked");
@@ -148,7 +152,7 @@ public class MenuActivity extends Activity {
                 if (!later.isEmpty()) {   // the rest is in the data file beside the APK: listed for the import, which asks for that file
                     StringBuilder sb = new StringBuilder(versionCode() + "\n"); for (String[] f : later) sb.append(f[0]).append('\t').append(f[1]).append('\n');
                     try (OutputStream o = new FileOutputStream(new File(ext, ".pending_data"))) { o.write(sb.toString().getBytes(StandardCharsets.UTF_8)); }
-                } else try (OutputStream o = new FileOutputStream(new File(ext, ".unpacked"))) { o.write((versionCode() + "\n").getBytes(StandardCharsets.UTF_8)); }
+                } else finishUnpack(ext);
             } catch (Exception e) { err = e.getMessage() != null ? e.getMessage() : e.toString(); }
             final String fe = err;
             runOnUiThread(() -> {
@@ -198,6 +202,7 @@ public class MenuActivity extends Activity {
         new Thread(() -> {
             String err = null; File ext = getExternalFilesDir(null);
             try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(new java.io.BufferedInputStream(getContentResolver().openInputStream(uri), 1 << 20))) {
+                GameAssets.DataImport assets = new GameAssets.DataImport(ext, left);
                 java.util.zip.ZipEntry e; long done = 0; byte[] buf = new byte[1 << 20]; int lastPct = -1; boolean checked = false;
                 while ((e = zin.getNextEntry()) != null) {
                     String name = e.getName();
@@ -209,21 +214,17 @@ public class MenuActivity extends Activity {
                         checked = true; continue;
                     }
                     if (!checked) throw new Exception("this is not the data file for this game.");
-                    if (!left.containsKey(name) || name.contains("..")) continue;
-                    File to = gameFile(ext, name); to.getParentFile().mkdirs();
-                    try (OutputStream out = new FileOutputStream(to)) {
-                        int n; while ((n = zin.read(buf)) > 0) { out.write(buf, 0, n); done += n;
-                            int pct = (int) (done * 100 / Math.max(1, tot));
-                            if (pct != lastPct) { lastPct = pct; final int p = pct; final long d = done; runOnUiThread(() -> { bar.setProgress(p);
-                                status.setText(String.format(Locale.ROOT, "Copying game data: %d%% (%.1f of %.1f GB)", p, d / 1e9, tot / 1e9)); }); } }
-                    }
-                    if (to.length() != left.get(name)) throw new Exception("incomplete file: " + name);
-                    left.remove(name);
+                    done += assets.copy(name, zin);
+                    int pct = (int) (done * 100 / Math.max(1, tot));
+                    if (pct != lastPct) { lastPct = pct; final int p = pct; final long d = done;
+                        runOnUiThread(() -> { bar.setProgress(p); status.setText(String.format(Locale.ROOT,
+                            "Copying game data: %d%% (%.1f of %.1f GB)", p, d / 1e9, tot / 1e9)); }); }
+
                 }
                 if (!checked) throw new Exception("this is not the data file for this game.");
-                if (!left.isEmpty()) throw new Exception(left.size() + " files are missing from the data archive.");
+                if (!assets.complete()) throw new Exception("Game assets are missing from the data archive.");
+                finishUnpack(ext);
                 new File(ext, ".pending_data").delete();
-                try (OutputStream o = new FileOutputStream(new File(ext, ".unpacked"))) { o.write((versionCode() + "\n").getBytes(StandardCharsets.UTF_8)); }
             } catch (Exception ex) { err = ex.getMessage() != null ? ex.getMessage() : ex.toString(); }
             final String fe = err;
             runOnUiThread(() -> {

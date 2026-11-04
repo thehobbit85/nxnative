@@ -2646,6 +2646,16 @@ def build_env_file(work, env_file, motion):
     return str(f)
 
 
+def android_fonts(py, repo, work, env, logs):
+    """Bundle the same shared-font stand-ins as iOS; Android has no macOS fallback."""
+    font = work / 'font'; font.mkdir(parents=True, exist_ok=True)
+    standard = Path(env.get('STD_FONT', '/System/Library/Fonts/Supplemental/Arial Unicode.ttf')).expanduser()
+    if not standard.is_file(): raise BuildError('missing standard font; set STD_FONT to a TTF file')
+    shutil.copyfile(standard, font / 'standard.ttf')
+    run([env.get('FONT_PY', py), repo / 'dm/tools/make_ext_font.py', font / 'nintendo_ext.ttf'], logs / 'make_ext_font.log', env=env)
+    return font
+
+
 def mac_host(py, repo, work, env, logs, g):
     """The stage "Mac host" of a Mac-only build or a Mac app (PLATFORM 'mac', 'mac-app'): the Mac host for the profile (build_mac_host, into <id>_build/tools/dmhost, where the run-time captures
     build it too; DM_GAMES_DIR / DM_GAMES_FIRST in env pick a provisional or derived profile) and the button-icon font the host gives a game for the Nintendo extension shared font
@@ -3202,7 +3212,8 @@ def main(args=None):
         android_patched = work / f'patched_android_{pkg_ver}'
         g = rewrite(py, repo, game / 'ExeFS', android_patched, env, logs, g, provisional, thread_slots='android')
         PROG.stage('Android APK')
-        cmd = [py, repo / 'scripts/build_android.py', g.id, work, out_ipa,
+        android_fonts(py, repo, work, env, logs)
+        cmd = [py, repo / 'scripts/build_android.py', f'{app:016X}', work, out_ipa, '--profile', g.id,
                '--patched', android_patched, '--romfs', rfs.source(game), '--label', app_name, '--language', lang]
         if romfs_mode == 'bundle': cmd += ['--bundle']
         if aoc: cmd += ['--aoc', aoc]
@@ -3215,7 +3226,7 @@ def main(args=None):
         say(f'done: {out_ipa}; install this development APK on an ARM64 Android device or emulator')
         if romfs_mode == 'separate':
             say('game assets are separate; after installing the APK, deploy with an explicit device serial:')
-            PROG.say(shlex.join([str(py), str(repo / 'dm/android/tools/make_apk.py'), g.id, str(work), '--deploy', '--serial', '<adb-serial>', '--patched', str(android_patched), '--romfs', str(rfs.source(game))] + (['--aoc', str(aoc)] if aoc else [])))
+            PROG.say(shlex.join([str(py), str(repo / 'dm/android/tools/make_apk.py'), f'{app:016X}', str(work), '--deploy', '--serial', '<adb-serial>', '--patched', str(android_patched), '--romfs', str(rfs.source(game))] + (['--aoc', str(aoc)] if aoc else [])))
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Android APK', android_patched)
         return
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files

@@ -18,16 +18,18 @@ def main():
     p.add_argument('id'); p.add_argument('build', type=Path); p.add_argument('out', type=Path)
     p.add_argument('--ndk', default=os.environ.get('ANDROID_NDK_HOME'))
     p.add_argument('--build-root', type=Path)
+    p.add_argument('--profile', help='build profile ID when it differs from the application title ID')
     p.add_argument('--jobs', type=int, default=4)
     a, packaging = p.parse_known_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or pass --ndk')
     if a.jobs < 1: p.error('--jobs must be positive')
     build = a.build.resolve(); output = (a.build_root or build / 'android-host').resolve()
+    profile = a.profile or a.id
     try:
-        subprocess.run(['make', '-C', str(ROOT / 'dm/android'), 'GAME=' + a.id,
+        subprocess.run(['make', '-C', str(ROOT / 'dm/android'), 'GAME=' + profile,
                         'NDK=' + str(Path(a.ndk).resolve()), 'BUILD_ROOT=' + str(output), '-j' + str(a.jobs)], check=True)
         subprocess.run([sys.executable, str(ROOT / 'dm/android/tools/make_apk.py'), a.id, str(build), str(a.out.resolve()),
-                        '--library', str(output / a.id / 'libdmhost.so'), *packaging], check=True)
+                        '--library', str(output / profile / 'libdmhost.so'), *packaging], check=True)
     except subprocess.CalledProcessError as e:
         p.exit(e.returncode or 1, '[RED] Android build or packaging failed\n')
 
