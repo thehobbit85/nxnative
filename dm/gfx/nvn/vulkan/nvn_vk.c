@@ -2611,6 +2611,9 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     pthread_mutex_unlock(&g_pool_mu); return hit;
 }
 void mtl_alias_drop_pool(const void *pool) { (void)pool; }
+// This backend has no shared sparse-tile heap to release. Sparse residency and
+// physical-tile aliasing remain open parity items; ordinary images own storage.
+void mtl_sp_phys_gone(const void *mem, uint64_t size) { (void)mem; (void)size; }
 // Vulkan textures already own image storage. The shared recorder still marks GPU-written pools.
 void mtl_pool_gpu_written(const void *pool) { if (pool) atomic_store(&((pool_t *)pool)->gpu_written, 1); }
 

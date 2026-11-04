@@ -28,7 +28,9 @@ void dm_gfx_suspend(int on) {
     if (stall) for (;;) pause();
 }
 
-static void check(int by_signal, int block_graphics) {
+static void handoff(void *arg) { assert(arg == &report); step('P'); }
+
+static void check(int by_signal, int block_graphics, int next_program) {
     int p[2], status;
     assert(!pipe(p));
     uint64_t start = now_ns();
@@ -52,21 +54,25 @@ static void check(int by_signal, int block_graphics) {
 #endif
             for (;;) pause();
         }
-        dm_host_shutdown("activity destroyed");
+        if (next_program) dm_host_shutdown_then("next program", handoff, &report);
+        else dm_host_shutdown("activity destroyed");
         _exit(1);
     }
     close(p[1]);
     assert(waitpid(pid, &status, 0) == pid);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     char steps[10];
-    assert(read(p[0], steps, sizeof steps) == 5 && !memcmp(steps, "HRCAG", 5));
+    int count = next_program ? 6 : 5;
+    assert(read(p[0], steps, sizeof steps) == count && !memcmp(steps, "HRCAGP", count));
     close(p[0]);
     if (block_graphics) assert(now_ns() - start >= 1500000000);
 }
 
 int main(void) {
-    check(1, 0);
-    check(0, 0);
-    check(1, 1);
-    puts("SIGTERM, direct shutdown, ordered hooks and stuck graphics deadline passed");
+    check(1, 0, 0);
+    check(0, 0, 0);
+    check(1, 1, 0);
+    check(0, 0, 1);
+    check(0, 1, 1);
+    puts("SIGTERM, direct shutdown, ordered hooks, deadline and program handoff passed");
 }

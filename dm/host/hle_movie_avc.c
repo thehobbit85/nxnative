@@ -19,7 +19,7 @@ struct mavc {
     uint8_t sps[512], pps[512]; int nsps, npps, dirty;
 #ifdef __ANDROID__
     media_stream stream;
-    int coded_w, coded_h, nq, fed_picture;
+    int coded_w, coded_h, nq, fed_picture, output_standard, output_full;
     int64_t max_pts;
     struct avc_frame *first, *last;
 #else
@@ -31,11 +31,14 @@ struct mavc {
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
 };
 
+#ifndef __ANDROID__
 int mavc_bt709(const mavc *a, int h) {
     CFTypeRef m = a->fd ? CMFormatDescriptionGetExtension(a->fd, kCMFormatDescriptionExtension_YCbCrMatrix) : NULL;
     if (m && CFGetTypeID(m) == CFStringGetTypeID()) return CFEqual(m, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2);
     return h >= 720;
 }
+int mavc_fullrange(const mavc *a) { (void)a; return 0; } // VideoToolbox output is requested in video range.
+#endif
 mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
 #ifndef __ANDROID__
 static void close_session(mavc *a) {

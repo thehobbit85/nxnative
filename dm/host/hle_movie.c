@@ -835,7 +835,7 @@ static void md_format(mdec_t *d, void *md) {
     // (main+0x1529f8) indexes its YUV → RGB matrices with it: 1 BT.601 limited range, 2 BT.601 full, 3 BT.709 limited, 4 BT.709 full, 5 BT.601 limited; anything else, an unset key too, selects an
     // all-zero matrix, which drew its movies black. By the rule md_rgba uses: what the stream declares, undeclared BT.709 from 720 lines up. VideoToolbox's H.264 pictures are always video range (open_session)
     int b709, full = 0;
-    if (d->avc) b709 = mavc_bt709(d->avc, h);
+    if (d->avc) { b709 = mavc_bt709(d->avc, h); full = mavc_fullrange(d->avc); }
     else { b709 = d->vpx_cs == VPX_CS_BT_709 || (d->vpx_cs == VPX_CS_UNKNOWN && h >= 720); full = d->vpx_full; }
     G.set_i32(md, "nv12-colorspace", (b709 ? 3 : 1) + full);
 }
