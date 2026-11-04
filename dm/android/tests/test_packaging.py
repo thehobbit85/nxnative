@@ -4,8 +4,10 @@ import importlib.util
 import struct
 import io
 import hashlib
+import json
 import zipfile
 import tempfile
+import time
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -23,20 +25,34 @@ def elf_library(machine=183, kind=3):
     return struct.pack('<16sHHIQQQIHHHHHH', b'\x7fELF\x02\x01\x01' + bytes(9), kind, machine, 1, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0)
 
 
+def time_tuple():
+    return time.struct_time((2026, 1, 1, 12, 0, 0, 3, 1, -1))
+
+
 class Packaging(unittest.TestCase):
-    def package_with_fake_sdk(self, root, payload, fail=None, options=(), limit=1):
+    def package_with_fake_sdk(self, root, payload, fail=None, options=(), limit=1, trace=None, automatic_version=False, bundle=True):
         build = root / 'build'; build.mkdir(exist_ok=True)
         output = root / 'output with spaces'; output.mkdir(exist_ok=True)
         library = build / 'libdmhost.so'; library.write_bytes(elf_library())
         source = build / 'RomFS.img'; source.write_bytes(payload)
+        sdk = root / 'sdk'; java = root / 'java'
+        for path in [sdk / name for name in ('aapt2', 'd8', 'zipalign', 'apksigner', 'android.jar', 'lib/d8.jar', 'lib/apksigner.jar')] + \
+                    [java / name for name in ('bin/java', 'bin/javac', 'bin/keytool', 'release', 'lib/modules')]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists(): path.write_bytes(b'fixture tool')
+        def configure(_):
+            pack.BT = str(sdk); pack.JAR = str(sdk / 'android.jar'); pack.JAVA = str(java)
         def run(*args, **kwargs):
             tool = Path(args[0]).name
+            if trace is not None: trace.append((tool, *args[1:]))
             if tool == 'aapt2':
                 path = args[args.index('-o') + 1]
                 with zipfile.ZipFile(path, 'w') as archive:
                     if 'link' in args: archive.write(args[args.index('--manifest') + 1], 'AndroidManifest.xml')
             elif tool == 'd8':
                 Path(args[args.index('--output') + 1], 'classes.dex').write_bytes(b'fixture dex')
+            elif tool == 'javac' and fail == 'input-change':
+                source.write_bytes(b'changed while compiling')
             elif tool == 'zipalign' and '-c' not in args:
                 shutil.copyfile(args[-2], args[-1])
             elif tool == 'zipalign' and fail == 'align':
@@ -53,10 +69,105 @@ class Packaging(unittest.TestCase):
             digest = write_data(*args)
             if fail == 'data': raise OSError('fixture archive write failure')
             return digest
-        with patch.object(pack, 'configure_tools'), patch.object(pack, 'run', side_effect=run), patch.object(pack, 'write_data_file', side_effect=write), \
+        with patch.object(pack, 'configure_tools', side_effect=configure), patch.object(pack, 'run', side_effect=run), patch.object(pack, 'write_data_file', side_effect=write), \
              patch.object(pack, 'game_files', return_value=[('romfs/romfs.img', str(source))]), patch.object(pack, 'APK_GAME_LIMIT', limit):
-            pack.main(['0100633007D48000', str(build), str(output / 'Game.apk'), '--bundle', '--library', str(library), '--version-code', '101', *options])
+            version = [] if automatic_version else ['--version-code', '101']
+            bundled = ['--bundle'] if bundle else []
+            pack.main(['0100633007D48000', str(build), str(output / 'Game.apk'), *bundled, '--library', str(library), *version, *options])
         return output / 'Game.apk'
+
+    def test_unchanged_apk_reuses_verified_products(self):
+        for limit, bundle in ((1, True), (1000000, True), (1, False)):
+            with self.subTest(limit=limit, bundle=bundle), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); trace = []
+                apk = self.package_with_fake_sdk(root, b'game', limit=limit, bundle=bundle)
+                before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in apk.parent.iterdir()}
+                self.assertIn('Game.apk.build.json', list(before))
+                self.package_with_fake_sdk(root, b'game', trace=trace, limit=limit, bundle=bundle)
+                self.assertEqual(trace, [])
+                self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in apk.parent.iterdir()}, before)
+
+    def test_changed_input_or_tool_invalidates_reuse(self):
+        for change in ('same-size data', 'version', 'tool', 'runtime', 'save', 'new save'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); trace = []; save = root / 'save'; save.mkdir(); (save / 'slot').write_bytes(b'old')
+                options = ['--save', str(save)]
+                apk = self.package_with_fake_sdk(root, b'old data', options=options)
+                receipt = apk.with_name(apk.name + '.build.json')
+                previous = json.loads(receipt.read_text())['inputs']
+                if change == 'version': options += ['--version-name', '2.0']
+                if change == 'tool': (root / 'sdk/lib/d8.jar').write_bytes(b'changed tool')
+                if change == 'runtime': (root / 'java/lib/modules').write_bytes(b'changed runtime')
+                if change == 'save': (save / 'slot').write_bytes(b'new')
+                if change == 'new save': (save / 'other-slot').write_bytes(b'new')
+                self.package_with_fake_sdk(root, b'new data' if change == 'same-size data' else b'old data', options=options, trace=trace)
+                self.assertIn('javac', [c[0] for c in trace])
+                self.assertNotEqual(json.loads(receipt.read_text())['inputs'], previous)
+
+    def test_damaged_products_and_receipts_rebuild(self):
+        for change in ('apk', 'missing data', 'corrupt data', 'receipt', 'receipt type', 'unsafe name'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); trace = []
+                # Fixed time makes rebuilding produce the same data name, testing
+                # repair of a corrupt content-addressed archive in place.
+                with patch('time.localtime', return_value=time_tuple()):
+                    apk = self.package_with_fake_sdk(root, b'game')
+                    receipt = apk.with_name(apk.name + '.build.json')
+                    saved = json.loads(receipt.read_text())
+                    with zipfile.ZipFile(apk) as archive: name = archive.read('assets/game/datos.txt').decode().split('\t')[0]
+                    if change == 'apk': apk.write_bytes(b'broken')
+                    if change == 'missing data': apk.with_name(name).unlink()
+                    if change == 'corrupt data': apk.with_name(name).write_bytes(b'broken')
+                    if change == 'receipt': receipt.write_text('{')
+                    if change == 'receipt type': receipt.write_text('[]')
+                    if change == 'unsafe name':
+                        saved['data']['name'] = '../outside.zip'; receipt.write_text(json.dumps(saved))
+                    original_digest = pack.file_digest
+                    def digest(path):
+                        self.assertNotEqual(Path(path).name, 'outside.zip')
+                        return original_digest(path)
+                    with patch.object(pack, 'file_digest', side_effect=digest):
+                        self.package_with_fake_sdk(root, b'game', trace=trace)
+                self.assertIn('javac', [c[0] for c in trace])
+                with zipfile.ZipFile(apk.with_name(name)) as archive:
+                    self.assertEqual(archive.read('romfs/romfs.img.nxpart/0000000000000000'), b'game')
+
+    def test_failed_changed_build_preserves_receipt_and_playable_products(self):
+        for failure in ('verify', 'input-change'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); apk = self.package_with_fake_sdk(root, b'old data')
+                before = {p.name: p.read_bytes() for p in apk.parent.iterdir()}
+                with self.assertRaises(SystemExit): self.package_with_fake_sdk(root, b'new data', fail=failure)
+                self.assertEqual({p.name: p.read_bytes() for p in apk.parent.iterdir()}, before)
+
+    def test_automatic_version_is_assigned_only_on_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); trace = []
+            with patch.object(pack.time, 'time', return_value=1700000000):
+                apk = self.package_with_fake_sdk(root, b'old data', automatic_version=True)
+            old = apk.read_bytes()
+            with patch.object(pack.time, 'time', return_value=1700000010):
+                self.package_with_fake_sdk(root, b'old data', automatic_version=True, trace=trace)
+                self.assertEqual(trace, []); self.assertEqual(apk.read_bytes(), old)
+                self.package_with_fake_sdk(root, b'new data', automatic_version=True)
+            with zipfile.ZipFile(apk) as archive: manifest = ET.fromstring(archive.read('AndroidManifest.xml'))
+            self.assertEqual(manifest.get('{http://schemas.android.com/apk/res/android}versionCode'), '1700000010')
+
+    def test_final_rename_failure_cannot_make_old_apk_reusable_for_new_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); apk = self.package_with_fake_sdk(root, b'old data')
+            old_apk = apk.read_bytes()
+            with zipfile.ZipFile(apk) as archive: name = archive.read('assets/game/datos.txt').decode().split('\t')[0]
+            old_data = apk.with_name(name).read_bytes()
+            replace = pack.os.replace
+            def fail(src, dst):
+                if Path(src).name == 'signed.apk': raise OSError('fixture publication failed')
+                replace(src, dst)
+            with patch.object(pack.os, 'replace', side_effect=fail), self.assertRaises(SystemExit):
+                self.package_with_fake_sdk(root, b'new data')
+            self.assertEqual(apk.read_bytes(), old_apk); self.assertEqual(apk.with_name(name).read_bytes(), old_data)
+            trace = []; self.package_with_fake_sdk(root, b'new data', trace=trace)
+            self.assertIn('javac', [c[0] for c in trace])
 
     def test_asset_manifest_identifies_contents_even_for_same_size_updates(self):
         for limit in (1, 1000000):

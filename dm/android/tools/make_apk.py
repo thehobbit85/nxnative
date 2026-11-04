@@ -12,7 +12,7 @@
 # A development signing key is kept in the prepared build folder so updates retain app data.
 import shlex
 from contextlib import ExitStack
-import argparse, glob, hashlib, os, re, shutil, struct, subprocess, sys, tempfile, zipfile, time
+import argparse, glob, hashlib, json, os, re, shutil, struct, subprocess, sys, tempfile, zipfile, time, zlib
 from pathlib import Path
 from xml.sax.saxutils import escape
 HERE = os.path.dirname(os.path.abspath(__file__)); ANDROID = os.path.dirname(HERE)
@@ -75,6 +75,75 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 </manifest>
 '''
 
+def selected_inputs(a, lib, ks):
+    # The Mac packer uses the same selection for its reuse key and copies. Keep
+    # that contract here too, including automatically discovered icons/saves.
+    files = game_files(a.build, a.patched, a.romfs, a.aoc) if a.bundle else []
+    saves = []
+    if a.save:
+        for root, dirs, names in os.walk(a.save):
+            dirs.sort()
+            for name in sorted(names):
+                if not name.startswith('.'):
+                    path = os.path.join(root, name); saves.append((os.path.relpath(path, a.save), path))
+    icon = a.icon or next(iter(sorted(glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')))), None)
+    java = sorted(glob.glob(os.path.join(ANDROID, 'app', 'java', '**', '*.java'), recursive=True))
+    sources = [('host', lib), ('keystore', ks), ('packer', __file__)]
+    sources += [('game/' + rel, src) for rel, src in files] + [('save/' + rel, src) for rel, src in saves]
+    sources += [('java', src) for src in java]
+    sources += [(role, src) for role, src in (('icon', icon), ('env', a.env_file), ('cheats', a.cheats)) if src]
+    bid = None
+    if a.cheats:
+        fixups = Path(a.patched or Path(a.build, 'patched_android')) / 'main.fixups.tsv'
+        match = re.search(r'^# BUILD_ID\t([0-9a-fA-F]{16,64})', fixups.read_text(), re.M)
+        if not match: raise ValueError('main.fixups.tsv has no build_id for the supplied cheats')
+        bid = match.group(1)[:16].upper(); sources.append(('cheat-build', str(fixups)))
+    return files, saves, icon, java, bid, sources
+
+
+def input_key(a, selected):
+    tools = [os.path.join(BT, name) for name in ('aapt2', 'zipalign', 'd8', 'apksigner')]
+    tools += sorted(glob.glob(os.path.join(BT, 'lib', '*.jar'))) + [JAR]
+    tools += [str(path) for path in sorted(Path(BT, 'lib64').rglob('*')) if path.is_file()]
+    tools += [os.path.join(JAVA, name) for name in ('bin/java', 'bin/javac', 'bin/keytool', 'release')]
+    hashes = {}; rows = []
+    for role, source in [*selected[-1], *(('tool', path) for path in tools)]:
+        path = Path(source).resolve()
+        if path not in hashes: hashes[path] = file_digest(path)
+        rows.append((role, str(path), path.stat().st_mode, hashes[path]))
+    # JDK native libraries/modules are a large installed runtime. Like the Mac
+    # packer's SDK inventory, record their identity without hashing them twice.
+    runtime = []
+    for name in ('lib', 'conf'):
+        root = Path(JAVA, name)
+        for path in sorted(root.rglob('*')):
+            st = path.lstat()
+            runtime.append((str(path), st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+                            os.readlink(path) if path.is_symlink() else None))
+    content = {'options': vars(a), 'files': rows, 'runtime': runtime, 'apk_limit': APK_GAME_LIMIT,
+               'python': sys.version, 'zlib': zlib.ZLIB_RUNTIME_VERSION,
+               'java_options': {name: ENV.get(name) for name in ('JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS')}}
+    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+
+
+def reusable(output, receipt, key):
+    try:
+        saved = json.loads(receipt.read_text())
+        if not isinstance(saved, dict) or saved.get('schema') != 1 or saved.get('inputs') != key: return False
+        if not output.is_file() or saved.get('apk') != file_digest(output): return False
+        data = saved.get('data')
+        with zipfile.ZipFile(output) as archive:
+            name = archive.read('assets/game/datos.txt').decode().split('\t')[0] if 'assets/game/datos.txt' in archive.namelist() else None
+        if data is None: return name is None
+        if not isinstance(data, dict) or not isinstance(data.get('name'), str) or data['name'] != name: return False
+        # Only our content-named siblings can be read; a malformed receipt must
+        # not turn a cache check into an arbitrary path lookup.
+        if name is None or not re.fullmatch(re.escape(output.stem) + r'-datos-[0-9a-f]{24}\.zip', name): return False
+        return file_digest(output.with_name(name)) == data.get('sha256')
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return False
+
+
 def build(a):
     lib = a.library or os.path.join(ANDROID, 'gen', a.id, 'libdmhost.so')
     if not os.path.exists(lib): sys.exit(f'[RED] {lib} missing: make -C dm/android GAME={a.id} first')
@@ -85,14 +154,24 @@ def build(a):
         valid = os.path.isdir(path) if name in ('save', 'aoc') else os.path.isfile(path)
         if name == 'romfs': valid = valid or os.path.isdir(path)
         if not path or not valid: raise ValueError('missing or invalid --' + name.replace('_', '-') + ': ' + path)
-    files = game_files(a.build, a.patched, a.romfs, a.aoc) if a.bundle else []
     output = Path(a.out).resolve()
+    receipt = output.with_name(output.name + '.build.json')
     ks = os.path.abspath(a.keystore or os.path.join(a.build, 'android-debug.keystore'))
-    sources = [lib, ks, *(src for _, src in files), *(path for path in (a.icon, a.env_file, a.cheats, a.romfs) if path)]
-    if any(output == Path(source).resolve() for source in sources) or (a.save and output.is_relative_to(Path(a.save).resolve())):
-        raise ValueError('output APK would replace or become part of a package input: ' + str(output))
+    selected = selected_inputs(a, lib, ks)
+    files, saves, icon, java, bid, sources = selected
+    protected_sources = [src for _, src in sources] + ([a.romfs] if a.romfs else [])
+    for target in (output, receipt):
+        if any(target == Path(source).resolve() for source in protected_sources) or (a.save and target.is_relative_to(Path(a.save).resolve())):
+            raise ValueError('output APK or receipt would replace or become part of a package input: ' + str(target))
     configure_tools(a)
     output.parent.mkdir(parents=True, exist_ok=True)
+    if not os.path.exists(ks):
+        run(os.path.join(JAVA, 'bin', 'keytool'), '-genkeypair', '-keystore', ks, '-storepass', 'android', '-keypass', 'android', '-alias', 'nxnative', '-keyalg', 'RSA', '-keysize', '2048',
+            '-validity', '10000', '-dname', 'CN=nxnative development', stdout=subprocess.DEVNULL)
+    key = input_key(a, selected)
+    if reusable(output, receipt, key):
+        print(f'{a.out}: reused (inputs and published products unchanged)')
+        return
     # Stage beside the destination so the final APK replacement is atomic even
     # when WORK and the output are on different filesystems.
     with tempfile.TemporaryDirectory(prefix='apk_', dir=output.parent) as w:
@@ -102,14 +181,13 @@ def build(a):
         if not 1 <= vc <= 2100000000: raise ValueError('version code must be between 1 and 2100000000')
         Path(w, 'AndroidManifest.xml').write_text(MANIFEST.format(pkg=package(a.id, a.test), vc=vc, vn=escape(a.version_name, {'"': '&quot;'}), label=escape(label, {'"': '&quot;'})))
         res = os.path.join(w, 'res', 'mipmap'); os.makedirs(res)
-        icon = a.icon or (glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')) or [None])[0]
         if icon: shutil.copyfile(icon, os.path.join(res, 'icon.jpg'))
         else: Path(res, 'icon.xml').write_text('<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#24344B"/><corners android:radius="24dp"/></shape>')
         run(os.path.join(BT, 'aapt2'), 'compile', '--dir', os.path.join(w, 'res'), '-o', os.path.join(w, 'res.zip'))
         base = os.path.join(w, 'base.apk')
         run(os.path.join(BT, 'aapt2'), 'link', '-o', base, '-I', JAR, '--manifest', os.path.join(w, 'AndroidManifest.xml'), os.path.join(w, 'res.zip'))
         cls = os.path.join(w, 'classes'); os.makedirs(cls)
-        run(os.path.join(JAVA, 'bin', 'javac'), '--release', '11', '-cp', JAR, '-d', cls, *glob.glob(os.path.join(ANDROID, 'app', 'java', '**', '*.java'), recursive=True))
+        run(os.path.join(JAVA, 'bin', 'javac'), '--release', '11', '-cp', JAR, '-d', cls, *java)
         run(os.path.join(BT, 'd8'), '--release', '--min-api', '30', '--lib', JAR, '--output', w, *glob.glob(os.path.join(cls, '**', '*.class'), recursive=True))
         with ExitStack() as archives, zipfile.ZipFile(base, 'a', zipfile.ZIP_DEFLATED) as z:
             z.write(os.path.join(w, 'classes.dex'), 'classes.dex')
@@ -117,18 +195,11 @@ def build(a):
             if a.language: z.writestr('assets/default-language.txt', a.language)
             if a.env_file: z.write(a.env_file, 'assets/default.env')
             if a.cheats:
-                fixups = (Path(a.patched or Path(a.build, 'patched_android')) / 'main.fixups.tsv').read_text()
-                match = re.search(r'^# BUILD_ID\t([0-9a-fA-F]{16,64})', fixups, re.M)
-                if not match:
-                    raise ValueError('main.fixups.tsv has no build_id for the supplied cheats')
-                bid = match.group(1)[:16].upper()
+                assert bid is not None
                 z.write(a.cheats, 'assets/cheats.txt')
                 z.write(a.cheats, 'assets/cheats/' + bid + '.txt')
                 z.writestr('assets/cheats-build.txt', bid)
-            if a.save:
-                for root, _, fs in os.walk(a.save):
-                    for f in sorted(fs):
-                        if not f.startswith('.'): p = os.path.join(root, f); z.write(p, 'assets/save/' + os.path.relpath(p, a.save))
+            for rel, src in saves: z.write(src, 'assets/save/' + rel)
             if a.bundle:
                 listing = []; stored = set(); raw = 0; dz = None; dn = dbytes = 0
                 for rel, src in files:
@@ -158,21 +229,35 @@ def build(a):
         if os.path.getsize(base) >= 0xFFFFFFFF: sys.exit(f'[RED] the APK would be {os.path.getsize(base) / 1e9:.1f} GB: Android installs APKs below 4 GB only')
         aligned = os.path.join(w, 'aligned.apk')
         run(os.path.join(BT, 'zipalign'), '-f', '-P', '16', '4', base, aligned)
-        if not os.path.exists(ks):
-            run(os.path.join(JAVA, 'bin', 'keytool'), '-genkeypair', '-keystore', ks, '-storepass', 'android', '-keypass', 'android', '-alias', 'nxnative', '-keyalg', 'RSA', '-keysize', '2048',
-                '-validity', '10000', '-dname', 'CN=nxnative development', stdout=subprocess.DEVNULL)
         signed = Path(w) / 'signed.apk'
         run(os.path.join(BT, 'apksigner'), 'sign', '--ks', ks, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--ks-key-alias', 'nxnative', '--out', signed, aligned)
         run(os.path.join(BT, 'apksigner'), 'verify', signed)
         run(os.path.join(BT, 'zipalign'), '-c', '-P', '16', '4', signed)
+        # Discover again as well as hashing again: files added during compilation
+        # must not be hidden by the original selection. Reject detected changes.
+        if key != input_key(a, selected_inputs(a, lib, ks)):
+            raise ValueError('package inputs changed while building; retry with stable inputs')
+        data_digest = file_digest(data_path) if data_path is not None else None
+        staged_receipt = Path(w, 'build.json')
+        staged_receipt.write_text(json.dumps({'schema': 1, 'inputs': key, 'apk': file_digest(signed),
+                                            'data': {'name': data_name, 'sha256': data_digest} if data_name else None}, sort_keys=True) + '\n')
         if data_path is not None and data_name is not None:
             destination = output.with_name(data_name)
             if destination.exists():
-                if file_digest(destination) != file_digest(data_path): raise ValueError('existing data archive differs from its content name: ' + str(destination))
+                previous = file_digest(destination)
+                if previous != data_digest:
+                    assert data_digest is not None
+                    if previous[:24] == data_digest[:24]: raise ValueError('data archive hash-prefix collision: ' + str(destination))
+                    # A corrupt archive no longer matches its own content name.
+                    # Restore those expected bytes without touching valid older data.
+                    os.replace(data_path, destination)
             else:
                 os.replace(data_path, destination)
             # Publish immutable data first. If the final rename fails, the old
             # APK/data pair remains intact and this complete archive is reusable.
+        # Receipt first: a failed final rename leaves the old APK playable and a
+        # mismatched receipt forces a rebuild. A crash cannot falsely reuse it.
+        os.replace(staged_receipt, receipt)
         os.replace(signed, output)
         print(f'{a.out}: {package(a.id, a.test)} "{label}", {os.path.getsize(a.out) / 1e6:.1f} MB' + (f', save from {a.save}' if a.save else '') + (f', cheats {os.path.basename(a.cheats)}' if a.cheats else ''))
 
