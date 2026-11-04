@@ -136,6 +136,15 @@ def prepare_spirv(data):
     return struct.pack(f'<{len(words)}I', *words)
 
 
+def export_spirv(data, optimizer):
+    """Remove globals absent from Metal reflection because the shader never reads them."""
+    # Keep live descriptor numbers and shader operations unchanged. The raw
+    # translator can retain unused texture declarations that SPIRV-Cross drops
+    # from Metal's argument buffer (Link's Awakening's uber shaders).
+    return subprocess.run([optimizer, '--eliminate-dead-variables', '-', '-o', '-'],
+                          input=prepare_spirv(data), stdout=subprocess.PIPE, check=True).stdout
+
+
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
 RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'img', 'sbuf', 'tbuf', 'ubo_ptr'}
 
@@ -179,9 +188,9 @@ def export(pkg, keys, out):
         raise ValueError('expected one or more 16-digit lowercase shader keys')
     if out.exists():
         raise ValueError(f'output already exists: {out}')
-    validator = shutil.which('spirv-val')
-    if not validator:
-        raise ValueError('spirv-val from SPIRV-Tools is required')
+    validator, optimizer = shutil.which('spirv-val'), shutil.which('spirv-opt')
+    if not validator or not optimizer:
+        raise ValueError('spirv-val and spirv-opt from SPIRV-Tools are required')
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='vk-build-', dir=out.parent) as tmp:
         work = Path(tmp).resolve()
@@ -206,11 +215,15 @@ def export(pkg, keys, out):
             spv = captured / (key + '.spv')
             refl = json.loads((libraries / (key + '_b.json')).read_text())
             binary = dest / (key + '.spv')
-            data = prepare_spirv(spv.read_bytes())
+            data = export_spirv(spv.read_bytes(), optimizer)
             binary.write_bytes(data)
             subprocess.run([validator, '--target-env', 'vulkan1.1', binary], check=True)
             meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads') if k in refl}
-            meta.update(key=key, tg=refl.get('threadgroup_size'), bindings=vk_reflect(data, refl))
+            try:
+                bindings = vk_reflect(data, refl)
+            except ValueError as exc:
+                raise ValueError(f'{key}: {exc}') from exc
+            meta.update(key=key, tg=refl.get('threadgroup_size'), bindings=bindings)
             stage_counts[meta['stage']] += 1
             (dest / (key + '.vk.txt')).write_text(vk_txt(meta))
         for stage in ('gs', 'hs', 'ds'):
