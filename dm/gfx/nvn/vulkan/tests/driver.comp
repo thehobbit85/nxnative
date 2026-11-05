@@ -8,5 +8,6 @@ void main() {
         result.values[1] = uvec4(gl_NumWorkGroups, 0);
         result.values[2] = c0.rows[0x210 / 16 + 7];
         result.values[3] = c0.rows[0x310 / 16];
+        result.values[4] = uvec4(c0.rows[0].yzw, 0);
     }
 }

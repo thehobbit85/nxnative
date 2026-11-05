@@ -11,6 +11,8 @@
 
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 uint64_t guest_ns(void) { return now_ns(); }
+static int test_nvn2;
+int dm_sdk_ounce(void) { return test_nvn2; }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
@@ -405,8 +407,8 @@ static void vertex_output_defaults(void) {
 }
 
 static void compute_driver_constants(void) {
-    for (int mode = 0; mode < 5; ++mode) {
-        uint32_t output[16] = {0}, uniform[16] = {0}, counts[] = {mode >= 2 ? 0u : 2u, mode == 2 ? 0u : 3u, mode == 2 ? 0u : 4u};
+    for (test_nvn2 = 0; test_nvn2 < 2; test_nvn2++) for (int mode = 0; mode < 5; ++mode) {
+        uint32_t output[20] = {0}, uniform[16] = {0}, counts[] = {mode >= 2 ? 0u : 2u, mode == 2 ? 0u : 3u, mode == 2 ? 0u : 4u};
         list_t list = {0};
         if (mode >= 2) {
             uint32_t sizes[] = {2, 3, 4, 0};
@@ -421,17 +423,19 @@ static void compute_driver_constants(void) {
         RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &driver_program, .stages = 0x20);
         RECORD(OP_BIND_UBO, p_bind_buf, .stage = 5, .index = 7, .addr = (uintptr_t)uniform, .size = sizeof uniform);
         RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)output, .size = sizeof output);
-        RECORD(OP_DISPATCH, p_dispatch, .x = 2, .y = 3, .z = 4, .ind = mode ? (uintptr_t)counts : 0);
+        RECORD(OP_DISPATCH, p_dispatch, .x = mode ? 9 : 2, .y = mode ? 8 : 3, .z = mode ? 7 : 4, .ind = mode ? (uintptr_t)counts : 0);
         put(&list, OP_END, NULL, 0);
         mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
         uint32_t expected[] = {2,3,4,0, 2,3,4,0,
             (uint32_t)(uintptr_t)uniform, (uint32_t)((uint64_t)(uintptr_t)uniform >> 32), sizeof uniform, 0,
-            (uint32_t)(uintptr_t)output, (uint32_t)((uint64_t)(uintptr_t)output >> 32), sizeof output, 0};
-        for (int i = 0; i < 16; ++i) if (output[i] != expected[i]) {
-            fprintf(stderr, "compute driver mode %d word %d: %#x expected %#x\n", mode, i, output[i], expected[i]); abort();
+            (uint32_t)(uintptr_t)output, (uint32_t)((uint64_t)(uintptr_t)output >> 32), sizeof output, 0,
+            test_nvn2 ? 2u : 0u, test_nvn2 ? 3u : 0u, test_nvn2 ? 4u : 0u, 0};
+        for (int i = 0; i < 20; ++i) if (output[i] != expected[i]) {
+            fprintf(stderr, "compute driver NVN2%d mode %d word %d: %#x expected %#x\n", test_nvn2, mode, i, output[i], expected[i]); abort();
         }
     }
-    puts("Compute driver dimensions and buffer tables match direct, CPU and GPU indirect dispatches");
+    test_nvn2 = 0;
+    puts("Compute driver dimensions and buffer tables match direct, CPU and GPU indirect dispatches on both guest ABIs");
 }
 
 // First create and clear the backing, then register image views of its layers and
@@ -761,9 +765,10 @@ static void draw_parameters(void) {
     tex_t output={.serial=0x3900,.d={.width=8,.height=8,.depth=1,.levels=1,
         .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&output.d,&output.L);
-    for (int mode=0;mode<3;++mode) {
+    for (int mode=0;mode<6;++mode) {
         list_t list={0}; uint8_t pixels[8*8*4]={0};
-        int32_t expected[4]={mode==0?7:mode==1?17:0,mode==1?-3:0,0,0};
+        const int32_t bases[]={7,17,0,0x101,0x40110010,0};
+        int32_t expected[4]={bases[mode],mode==1?-3:0,0,0};
         uint16_t indices[3]={mode==1?3:0,mode==1?4:1,mode==1?5:2};
         RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&output,.r={.width=8,.height=8,.depth=1},.mask=15,.c.f={0,0,1,1});
         RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
@@ -784,7 +789,7 @@ static void draw_parameters(void) {
         }
     }
     mtl_tex_release(&output);
-    puts("Base instance, base vertex and draw index survive direct and indexed draw replay");
+    puts("Draw IDs and graphics C0 base instance, point limit and single-sample center survive draw replay");
 }
 static void ordered_buffers(void) {
     for (int split = 0; split <= 1; split++) {
@@ -1278,6 +1283,7 @@ static void typed_graphics(void) {
 #include "split_handle.inc"
 #include "driver_c2.inc"
 int main(void) {
+    if (getenv("DM_VK_TEST_C0")) { compute_driver_constants(); draw_parameters(); return 0; }
     if (getenv("DM_VK_TEST_C2")) { driver_c2(); c2_sample(); return 0; }
     driver_c2(); c2_sample();
     if (getenv("DM_VK_TEST_SPLIT_HANDLES")) { split_handles(); return 0; }
