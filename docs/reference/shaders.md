@@ -2180,6 +2180,7 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Cause:** a shader package can contain geometry or tessellation assets that a particular route never binds; the exporter treated the runtime's narrower stage support as an asset-format restriction.
 - **Fix:** preserve validated SPIR-V and the actual stage (`gs`, `hs`, `ds`) in its sidecar, and report the runtime limitation explicitly. Executing those stages remains open; successful export does not establish that a game using them will render correctly.
 - **Found on:** [Hollow Knight 1.5.12620](../../dm/games/0100633007D48000/README.md), whose 1,812-stage package contains one geometry shader.
+- **Tessellation export qualification:** `test_android_tessellation.py` translates eighteen synthetic hull/domain programs with one/three/32 control points and generic locations 0/30/31. The Apple-target and Vulkan-target raw modules are byte-identical. Vulkan validation and export preserve patch attributes, six tessellation factors, invocation/domain builtins, stage modes and the tessellation capability. With `DMSH_TEST_METAL=1`, the same translation compiles for macOS and iOS except the six expected hull/location31 cases: the unchanged Apple route emits `attribute(31)`, past Metal's 0..30 stage-in limit. Location30 succeeds, and Vulkan retains the valid location31 interface. This is export/interface qualification; [the Apple reference does not draw tessellated patches](#tessellation-stages-are-not-drawn).
 
 ### Portable Vulkan geometry passthrough
 
