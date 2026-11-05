@@ -202,7 +202,7 @@ static void mem_init_once(void) {
     // The alias region is the Switch's 64 GB on the Mac (or the profile's, when larger): games lay their regions out for that much, and what the profile can give an iPhone (one
     // reservation of at most 6 GB) crashed Trails in the Sky 1st Chapter at launch and Just Dance within a minute. It is address space, not memory: the application pool bounds
     // what is mapped. DM_ALIAS_SIZE=<bytes> sets another size, the heap and stacks as they are; the profile's value reproduces an iPhone's address space on the Mac (the NSP script's heap check)
-#if TARGET_OS_IPHONE
+#if !defined(__APPLE__) || TARGET_OS_IPHONE
     size_t alias = DM_GAME_MEM_ALIAS;
 #else
     size_t alias = DM_GAME_MEM_ALIAS > SWITCH_ALIAS ? DM_GAME_MEM_ALIAS : SWITCH_ALIAS;

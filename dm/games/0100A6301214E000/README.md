@@ -57,7 +57,7 @@ No `pad_layout`: the virtual gamepad starts in the 2D layout. `present_interval`
 - **Resolved: an abort in `nn::sm::Initialize` under `nn::pctl::IsFreeCommunicationAvailable`** entering the first battle map: answered "not available".
 - Add-on content: its two DLC packages each hold one empty marker file (`e0`, `h0`); the content is already in update 2.0.0. `DLCManager.RefreshHasList` marks a content owned when its mount succeeded (probe `main+0x29f3c88`).
 - It calls `GetSharedFontAddress` without importing `ScalableFontEngineHelper::Decode` (a Unity player), so it gets the plain TTF.
-- `SignalToAddress` type 2 now subtracts 2 as Horizon does; it did not change Engage's demo crash (the address-space shortage above).
+- `SignalToAddress` type 2's old change to subtract 2 did not change Engage's demo crash (the address-space shortage above). The [address-arbiter source audit](../../../docs/reference/threads.md#signaltoaddress-type-2-with-count--0) corrected that attribution and restored subtraction by 1; validated with shared Mac/Android SVC fixtures, with no new Engage gameplay test.
 - The appearance choice opens the system keyboard (name entry): with no window the host answers cancel and the screen goes back; pass `DM_KBD=<text>` in a scripted run.
 
 ## Files and shaders
