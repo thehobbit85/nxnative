@@ -202,6 +202,8 @@ static int input_cb(int fd, int events, void *data) {
     return 1;
 }
 
+#include "web_android.h"
+
 // ---------- Back to the menu: a flag for the menu, then this process ends ----------
 static char g_files[512];
 static int g_program;
@@ -303,6 +305,7 @@ static void on_destroy(ANativeActivity *a) { (void)a; dm_host_shutdown("activity
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *a, void *saved, size_t saved_n) {
     (void)saved; (void)saved_n;
     g_act = a;
+    web_register(a->env, a->clazz);
     a->callbacks->onNativeWindowCreated = on_window_created; a->callbacks->onNativeWindowDestroyed = on_window_destroyed;
     a->callbacks->onNativeWindowResized = on_window_resized;
     a->callbacks->onInputQueueCreated = on_input_created; a->callbacks->onInputQueueDestroyed = on_input_destroyed;

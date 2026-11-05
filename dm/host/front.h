@@ -72,7 +72,7 @@ void front_gpu_lost(void);
 // thread. front_web_open: dir = the folder the document path is relative to (an HtmlDocument's html-document), path = the document path with its query, callback = the URL prefix whose
 // loading ends the page (exit reason 3, the URL as the last URL), hidden = loaded without being shown until front_web_show. 0 = opened; -1 = no web view (no window): the caller's
 // stand-in answers. front_web_send hands the page a content message (its nx "message" event); front_web_close removes the page. The defaults (hle_web.c, weak) have no web view
-typedef struct { uint32_t repeat_delay, repeat_pulse; } dm_web_opts;   // key repeat in frames (the argument's SetKeyRepeatFrame); 0 = the browser's default
+typedef struct { uint32_t repeat_delay, repeat_pulse; uint64_t session; } dm_web_opts;   // key repeat in frames; 0 = browser default. Session tags asynchronous frontend callbacks.
 int front_web_open(const char *dir, const char *path, const char *callback, int hidden, const dm_web_opts *opts);
 void front_web_show(void);
 void front_web_send(const char *msg, size_t n);
@@ -82,6 +82,9 @@ void front_web_shot(const char *path);
 void dm_web_message(const char *msg, size_t n);
 void dm_web_ended(uint32_t reason, const char *url);
 void dm_web_failed(const char *why);
+void dm_web_message_for(uint64_t session, const char *msg, size_t n);
+void dm_web_ended_for(uint64_t session, uint32_t reason, const char *url);
+void dm_web_failed_for(uint64_t session, const char *why);
 
 // The program an oe::ExecuteProgram recorded starts at the app's next start (the iOS app, DM_EXEC_OUT, hle_oe.c): called on the guest thread after the record is written and before the graceful exit. index = the
 // program, name = its profile's name. The iOS front end names it on screen for about 1.5 s and schedules a local notification that opens the app again, when the player allowed notifications; it returns when the

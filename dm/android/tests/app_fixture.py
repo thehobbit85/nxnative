@@ -13,7 +13,7 @@ from dm.tools.tests.test_nso import make_nso
 from dm.host.tests.gate.fixture import module
 
 
-def build(output, ndk, program=None):
+def build(output, ndk, program=None, web=False):
     output.mkdir(parents=True, exist_ok=True)
     tc = ndk / 'toolchains/llvm/prebuilt' / ('darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64') / 'bin'
     asm = output / 'entry.S'
@@ -36,6 +36,13 @@ def build(output, ndk, program=None):
                        oe_previous='_ZN2nn2oe23GetPreviousProgramIndexEv',
                        oe_parameter='_ZN2nn2oe21TryPopLaunchParameterEPmPvm',
                        fs_rom='_ZN2nn2fs8MountRomEPKcPvm')
+    if web:
+        imports.update(web_start='_ZN2nn3web17OfflineWebSession5StartEPPNS_2os15SystemEventTypeERKNS0_22ShowOfflineHtmlPageArgE',
+                       web_wait='_ZN2nn3web17OfflineWebSession11WaitForExitEPNS0_26OfflineHtmlPageReturnValueE',
+                       web_offline='_ZN2nn3web19ShowOfflineHtmlPageEPNS0_26OfflineHtmlPageReturnValueERKNS0_22ShowOfflineHtmlPageArgE',
+                       web_appear='_ZN2nn3web17OfflineWebSession6AppearEv', web_exit='_ZN2nn3web17OfflineWebSession11RequestExitEv',
+                       web_send='_ZN2nn3web17OfflineWebSession21TrySendContentMessageEPKcm',
+                       web_recv='_ZN2nn3web17OfflineWebSession24TryReceiveContentMessageEPmPcm')
     source = '.section .start,"ax"\n.global _start\n_start: b nnMain\n.word 0\n'
     for name in imports:
         slot = name + '_import'
@@ -47,6 +54,7 @@ def build(output, ndk, program=None):
     subprocess.run([tc / 'aarch64-linux-android30-clang', '-O1', '-fpie', '-fvisibility=hidden', '-ffreestanding', '-fno-builtin', '-fno-stack-protector',
                     '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-nostdlib', '-static', '-Wl,--build-id=none', '-Wl,-T,' + str(script),
                     *(['-DAPP_PROGRAM=' + str(program)] if program is not None else []),
+                    *(['-DAPP_WEB=1'] if web else []),
                     '-I' + str(ROOT / 'dm/gfx/nvn'), '-I' + str(ROOT / 'dm/gfx/nvn/include'), ROOT / 'dm/android/tests/app_guest.c', asm, '-o', elf], check=True)
     symbols = {}
     for line in subprocess.check_output([tc / 'llvm-nm', '-P', '--defined-only', elf], text=True).splitlines():
@@ -93,6 +101,18 @@ def build(output, ndk, program=None):
     for sub in ('extract/synthetic/RomFS', 'shader/vk', 'font'):
         (output / sub).mkdir(parents=True, exist_ok=True)
     (output / 'extract/synthetic/RomFS/fixture.txt').write_text('Synthetic APK integration fixture\n')
+    if web:
+        html = output / 'extract/synthetic/html/html0/html-document/menu'; html.mkdir(parents=True, exist_ok=True)
+        (html / 'resource.txt').write_text('resource')
+        (html / 'index.html').write_text('''<!doctype html><html><head><title>Offline HTML fixture</title>
+<style>html{background:transparent;color:white;font:40px sans-serif}button{font-size:48px}</style>
+<script>nx.addEventListener('message',function(e){if(e.data==='end'){nx.sendMessage('ENDING');nx.endApplet()}else nx.sendMessage('ECHO:'+e.data)});
+fetch('resource.txt').then(r=>r.text()).then(s=>nx.sendMessage('READY:'+innerWidth+':'+s));
+document.addEventListener('keydown',function(e){if(e.keyCode===32)nx.sendMessage('BUTTON_A')});</script>
+</head><body><h1>Offline HTML on Android</h1><button autofocus>Press A, then B</button></body></html>''')
+        (html / 'callback.html').write_text('<!doctype html><script>location.href="http://localhost/finished"</script>')
+        (html / 'end.html').write_text('<!doctype html><script>nx.endApplet()</script>')
+        (html / 'http_error.html').write_text('<!doctype html><script>location.replace("missing.html")</script>')
     if program is not None:
         (output / 'extract/synthetic/RomFS/program.txt').write_bytes(bytes([program]))
     (output / 'aoc/1').mkdir(parents=True, exist_ok=True)
@@ -106,6 +126,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('output', type=Path); p.add_argument('--ndk', type=Path, default=os.environ.get('ANDROID_NDK_HOME'))
     p.add_argument('--program-index', type=int, choices=(0, 1, 2), help='multi-program handoff fixture')
+    p.add_argument('--web', action='store_true', help='offline HTML applet fixture')
     a = p.parse_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or --ndk')
-    build(a.output.resolve(), Path(a.ndk), a.program_index)
+    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web)

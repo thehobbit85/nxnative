@@ -42,8 +42,27 @@ STUBS = {
         protected void onSaveInstanceState(Bundle b){}
         public void saveState(Bundle b){onSaveInstanceState(b);}
         public void onBackPressed(){finish();}
+        public boolean dispatchKeyEvent(android.view.KeyEvent e){return false;}
+        public boolean dispatchGenericMotionEvent(android.view.MotionEvent e){return false;}
     }''',
     'android/app/NativeActivity.java': 'package android.app; public class NativeActivity extends Activity {}',
+    'android/view/InputDevice.java': 'package android.view; public class InputDevice { public static final int SOURCE_JOYSTICK=16; }',
+    'android/view/KeyEvent.java': '''package android.view; public class KeyEvent {
+        public static final int KEYCODE_BACK=4,ACTION_DOWN=0;
+        public int getKeyCode(){return 0;} public int getAction(){return 0;} public int getRepeatCount(){return 0;} public int getDeviceId(){return 0;}
+    }''',
+    'android/view/MotionEvent.java': '''package android.view; public class MotionEvent {
+        public static final int AXIS_X=0,AXIS_Y=1,AXIS_Z=2,AXIS_RZ=3,AXIS_HAT_X=4,AXIS_HAT_Y=5,AXIS_LTRIGGER=6,AXIS_RTRIGGER=7,AXIS_BRAKE=8,AXIS_GAS=9;
+        public int getSource(){return 0;} public int getDeviceId(){return 0;} public float getAxisValue(int a){return 0;}
+    }''',
+    # Browser behavior has a separate actual-WebView emulator fixture. These
+    # handoff cases leave the browser null; the pause/open test checks forwarding
+    # of lifecycle state to a newly created browser, not WebView behavior itself.
+    'com/nxnative/OfflineWeb.java': '''package com.nxnative; final class OfflineWeb {
+        static OfflineWeb last; long id; boolean paused,closed;
+        OfflineWeb(GameActivity a,long i,String d,String p,String c,String f,boolean h,int x,int y,boolean m){id=i;last=this;}
+        void close(){closed=true;} void show(){} void send(String m){} void pause(boolean p){paused=p;} void back(){} boolean active(){return false;}
+    }''',
     'android/view/Gravity.java': 'package android.view; public final class Gravity { public static final int CENTER=17; }',
     'android/widget/TextView.java': '''package android.widget; public class TextView {
         public TextView(Object c){} public void setTextSize(int n){} public void setGravity(int n){} public void setText(String s){}
