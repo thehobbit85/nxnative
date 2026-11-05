@@ -1,2 +1,3 @@
 stage vs
 b 1 ubo 1 cbuf 0 -1 - -1
+b 2 ubo 1 drvcb -1 0 - -1

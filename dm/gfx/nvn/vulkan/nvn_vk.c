@@ -23,6 +23,7 @@
 #include "uniform_address.h"
 #include "split_handle.h"
 #include "driver_c2.h"
+#include "driver_c0.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -1410,6 +1411,7 @@ static struct {
 static int g_depth_zero = 1, g_queue_origin_ll;
 static _Atomic int g_origin_ll;
 static uint32_t g_dispatch_dim[3];
+static uint32_t g_draw_base_instance;
 static VkBuffer g_dispatch_args;
 static VkDeviceSize g_dispatch_offset;
 static struct {   // the current render targets and the open dynamic rendering; clears that come before the pass's first draw become its load actions (a tiler then never reads the old contents)
@@ -2092,24 +2094,16 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                 if (offset == VK_WHOLE_SIZE) return VK_NULL_HANDLE;
                 *d = (VkDescriptorBufferInfo){C->ring, offset, DMSH_PUSH_SIZE};
             } else if (b->kind == K_DRVCB) {   // driver segments: c2 holds the bound texture / sampler handles (as nvn_mtl.m fills them), c0 the storage buffer table
-                uint8_t seg[4096]; memset(seg, 0, sizeof seg);
+                uint8_t seg[4096];
+                int nvn2 = stage == 5 && dm_sdk_ounce();
                 if (b->off == 2) {
                     dm_vk_c2_fill(seg, sizeof seg, S.tex[stage], S.img[stage], S.samp[stage]);
                 } else {
-                    int base = stage == 0 ? 0x110 : stage == 1 ? 0x510 : stage == 5 ? 0x310 : -1;
-                    if (base >= 0) for (int r = 0; r < 16; r++) { uint64_t a = S.ssbo[stage][r].addr; uint32_t n = (uint32_t)S.ssbo[stage][r].size; memcpy(seg + base + 16 * r, &a, 8); memcpy(seg + base + 16 * r + 8, &n, 4); }
-                    if (stage == 5) {
-                        // Shared Switch driver ABI, as filled by Metal: the
-                        // lighting shader indexes its tiles with the X count.
-                        memcpy(seg + DMSH_C0_DISPATCH, g_dispatch_dim, sizeof g_dispatch_dim);
-                        for (int r = 0; r < DMSH_C0_CS_UBO_SLOTS; ++r) {
-                            uint64_t address = S.ubo[5][r].addr;
-                            uint32_t size = (uint32_t)S.ubo[5][r].size;
-                            memcpy(seg + DMSH_C0_CS_UBO + DMSH_C0_ROW * r, &address, 8);
-                            memcpy(seg + DMSH_C0_CS_UBO + DMSH_C0_ROW * r + 8, &size, 4);
-                        }
-                    }
-                    if (stage != 5) { const float mp = 2047.0f; memcpy(seg + 0x610, &mp, 4); }
+                    // Replay currently rasterizes at one sample per pixel.
+                    // Multisample replay must supply its actual sample positions.
+                    const uint8_t center = 0x88;
+                    if (!dm_vk_c0_fill(seg, sizeof seg, stage, S.ssbo[stage], S.ubo[stage],
+                                       g_dispatch_dim, g_draw_base_instance, &center, 1, nvn2)) return VK_NULL_HANDLE;
                 }
                 VkDeviceSize o = ring_put(seg, sizeof seg, 256);
                 if (o != VK_WHOLE_SIZE) {
@@ -2117,8 +2111,9 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                     if (stage == 5 && b->off == 0 && g_dispatch_args) {
                         // Use the same resolved GPU/CPU argument bytes as the
                         // indirect command, without reading unfinished GPU writes.
-                        VkBufferCopy copy = {g_dispatch_offset, o + DMSH_C0_DISPATCH, sizeof g_dispatch_dim};
-                        vkCmdCopyBuffer(C->cb, g_dispatch_args, C->ring, 1, &copy);
+                        VkBufferCopy copies[] = {{g_dispatch_offset, o + DMSH_C0_DISPATCH, sizeof g_dispatch_dim},
+                                                 {g_dispatch_offset, o + DMSH_C0_DISPATCH_NVN2, sizeof g_dispatch_dim}};
+                        vkCmdCopyBuffer(C->cb, g_dispatch_args, C->ring, nvn2 ? 2 : 1, copies);
                         barrier_all(C->cb);
                     }
                 }
@@ -2202,6 +2197,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     VkPipeline pp = pso_get(&k, pl);
     if (!pp) SKIP(5);
     if (fs && P.n) fb_prepare(fs); else g_fb_n = 0;
+    g_draw_base_instance = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     VkDescriptorSet sets[2] = {write_set(vs, 0), fs ? write_set(fs, 1) : VK_NULL_HANDLE};
     g_fb_n = 0;
     if (!sets[0] || (fs && !sets[1])) SKIP(6);

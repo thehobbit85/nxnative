@@ -689,6 +689,14 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Fix:** `dm/android/tools/spv_cache.py` gives each export a private `cas.db` and copies only content-addressed compiled Metal libraries to/from `vk-metallib.db`. Translation and index entries stay private. Valid compiles from an interrupted export remain reusable; existing Apple libraries can still prefill through the shared compiler-identity checks.
 - **Found on:** the Android parity rebase audit. `test_android_spv.py` opens the real shared `Store` at the export boundary and verifies that a retry reuses compiled bytes while repeating translation and capture.
 
+### Vulkan driver constants omit draw and sample values
+
+- **Symptom:** a shader reading graphics C0 sees base instance zero during a nonzero-base draw, or reports a pixel's corner as its single-sample location. NVN2 compute's secondary dispatch-count row stays zero.
+- **Cause:** Vulkan filled the vertex/pixel/compute storage tables, compute uniforms and primary dispatch counts, but omitted the other shared driver fields. An indirect dispatch must obtain both count rows from the resolved GPU argument buffer, not the command's unused direct-count fields.
+- **Fix:** the separate Vulkan `driver_c0.h` fills the shared ABI from the current bindings. Draw replay supplies base instance before either stage's descriptor writes and the current single-sample center (`0x88`); compute supplies both dispatch rows when the loaded SDK is NVN2, including ordered copies of indirect arguments. The helper also retains the current shared geometry/task/mesh table offsets. Current task/mesh offsets (`0x670`/`0x770`) differ from the older parity reference's corrected-away `0x610`/`0x710`; this is not evidence of advanced-stage execution. Multisample replay must supply its actual positions when implemented. Host/export identities include the helper.
+- **Check:** native tests compare all bytes and guards for six stage layouts, two guest ABIs and five sample-table sizes, and reject invalid sizes/counts. Actual Android dynamic/legacy and Lavapipe replay cover six draw base instances, vertex/pixel C0, point limit and single-sample center; ten compute cases distinguish direct counts from CPU/GPU indirect arguments, including partial GPU updates and split submissions. The pre-fix replay fails the base-instance and sample-center checks independently. Public NVN recorder and full replay regressions pass. The larger sample tables are layout tests, not multisample rasterization qualification.
+- **Found on:** synthetic Android parity driver-constant probes; no game-specific rule.
+
 ### Vulkan shaders require unused extended-gather support
 
 - **Symptom:** a shader with ordinary sampling or gather is rejected on a Vulkan device reporting `shaderImageGatherExtended=0`, including the Android SwiftShader emulator.
