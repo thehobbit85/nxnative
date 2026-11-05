@@ -163,6 +163,7 @@ int main(int argc, char **argv) {
                 return 1;
             }
         }
+        if (fwrite(mapped[1], sizeof(uint32_t), OUTPUT_WORDS, stdout) != OUTPUT_WORDS) return 1;
         cases++;
     }
     vkDestroyCommandPool(device, commands, NULL); vkDestroyPipeline(device, pipeline, NULL); vkDestroyShaderModule(device, shader, NULL);
