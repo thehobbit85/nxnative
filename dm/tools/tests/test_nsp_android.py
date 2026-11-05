@@ -19,6 +19,30 @@ spec.loader.exec_module(nsp)
 
 
 class AndroidTarget(unittest.TestCase):
+    def test_geometry_reuse_covers_every_topology_product(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); profile = root / 'profile'; profile.mkdir()
+            key = '0123456789abcdef'
+            (profile / 'shader_map.tsv').write_text(f'gs.bin\t0\tgeometry\t{key}\tsource\n')
+            g = types.SimpleNamespace(table=lambda name: profile / name, dir=profile)
+            calls = []
+            def export(cmd, log, env=None):
+                out = Path(cmd[3]); out.mkdir()
+                for name in [key] + [key + f'.g{t}' for t in range(5)]:
+                    (out / (name + '.spv')).write_bytes(b'shader')
+                    (out / (name + '.vk.txt')).write_text('stage gs\n')
+                (out / 'export-contract.json').write_text('{}')
+                calls.append(cmd)
+            with mock.patch.object(nsp, 'run', export), mock.patch.object(nsp, 'PROG', mock.Mock()):
+                sh = root / 'shader'
+                out = nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
+                nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
+                self.assertEqual(len(calls), 1)
+                (out / (key + '.g3.spv')).write_bytes(b'corrupt')
+                nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(json.loads((out / 'manifest.json').read_text())['files']), 12)
+
     def test_android_tool_failure_precedes_package_scan_conversion_and_survey(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); keys = root / 'keys'; keys.touch()
@@ -232,6 +256,10 @@ class AndroidTarget(unittest.TestCase):
                 self.assertEqual(len(calls), 2)
                 nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source2')
                 self.assertEqual(len(calls), 3)
+                (out / (key + '.g0.spv')).write_bytes(b'unclaimed variant')
+                nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source2')
+                self.assertEqual(len(calls), 4)
+                self.assertFalse((out / (key + '.g0.spv')).exists())
 
 
 if __name__ == '__main__':

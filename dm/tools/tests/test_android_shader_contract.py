@@ -67,11 +67,18 @@ class NativeShaderContract(unittest.TestCase):
                         good + b'cap 10\n', good + b'cap 1\n', good + b'schema 2\n',
                         good + b'ext SPV_EXT_bad\n', good + b'cap -1\n',
                         good + b'required_unknown 1\n', good.replace(b'cap 1', b'cap 1junk'),
-                        good + b'\x00stage ps\n'):
+                        good + b'\x00stage ps\n', good + b'tf 0 4 0 1\n'):
                 with self.subTest(sidecar=bad):
                     self.assertIsNotNone(check(bad, len(bad), data, len(data) // 4))
             for broken in (data[:16], data[:-4], data[:20] + b'\0\0\0\0' + data[24:]):
                 self.assertIsNotNone(check(good, len(good), broken, len(broken) // 4))
+            subprocess.run(['glslc', '-fshader-stage=vertex', '--target-env=vulkan1.1', '-', '-o', spv],
+                           input='#version 450\nvoid main(){gl_Position=vec4(0,0,0,1);}', text=True, check=True)
+            data = spv.read_bytes()
+            good = b'schema 2\ntarget vulkan1.1\nstage vs\ncap 1\ntf 0 20 0 2 1 3\ntf 2 4 1 1\n'
+            self.assertIsNone(check(good, len(good), data, len(data) // 4))
+            for bad in (good + b'tf 0 4 0 1\n', good.replace(b'tf 0 20', b'tf 0 16')):
+                self.assertIsNotNone(check(bad, len(bad), data, len(data) // 4))
 
 
 if __name__ == '__main__': unittest.main()

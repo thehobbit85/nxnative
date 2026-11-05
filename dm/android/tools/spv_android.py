@@ -26,17 +26,25 @@ def capture(args):
     job, directory = map(Path, args)
     jobs = json.loads(job.read_text())
     directory.mkdir(parents=True, exist_ok=True)
+    variants = [dict(item, key=item['key'] + f'.g{topology}', input_topology=topology)
+                for item in jobs if item.get('stage') == 'gs' and 'geometry_topology' not in item
+                for topology in range(5)]
     # The shared chain also translates through SPIR-V for Metal, whose allowed
     # operations differ. Request the existing translator's Vulkan lowering without
     # changing the caller's job or the normal Apple translation target.
     with tempfile.TemporaryDirectory(prefix='vk-job-', dir=directory) as temporary:
         targeted = Path(temporary) / 'jobs.json'
-        targeted.write_text(json.dumps([dict(item, host_target='vulkan') for item in jobs]))
+        targeted.write_text(json.dumps([dict(item, host_target='vulkan') for item in jobs + variants]))
         subprocess.run([XLATE, targeted, directory], check=True)
-    for item in jobs:
+    for item in jobs + variants:
         name = item['key'] + '.spv'
         if (directory / name).is_file():
             shutil.copyfile(directory / name, Path(os.environ['DMSH_SPV_CAPTURE']) / name)
+            # Keep the shared control-section decoder's complete feedback
+            # layout. Metal reflection only records strides and cannot recover
+            # interleaved outputs or an attribute captured into several buffers.
+            control = {key: item[key] for key in ('tf',) if key in item}
+            (Path(os.environ['DMSH_SPV_CAPTURE']) / (item['key'] + '.control.json')).write_text(json.dumps(control))
     return 0
 
 
@@ -186,6 +194,28 @@ def requirements(data):
                 extensions=sorted({string_operand(x[1:]) for x in instructions if opcode(x) == 10}))
 
 
+def feedback_rows(layout, stage):
+    """The shared tf_layout format, including repeated outputs and buffer order."""
+    if stage not in ('vs', 'gs') or not isinstance(layout, list) or len(layout) != 4:
+        raise ValueError('invalid feedback stage or buffer count')
+    rows = []
+    for buffer, entry in enumerate(layout):
+        if entry == []: continue
+        if not isinstance(entry, dict) or type(entry.get('stride')) is not int:
+            raise ValueError('invalid feedback stride')
+        outputs = entry.get('outputs')
+        if not isinstance(outputs, list) or not 1 <= len(outputs) <= 128:
+            raise ValueError('invalid feedback output count')
+        for pair in outputs:
+            if (not isinstance(pair, list) or len(pair) != 2 or
+                    any(type(n) is not int for n in pair) or not 0 <= pair[0] < 32 or not 1 <= pair[1] <= 4):
+                raise ValueError('invalid feedback location or component count')
+        if entry['stride'] != 4 * sum(pair[1] for pair in outputs):
+            raise ValueError('feedback stride differs from output layout')
+        rows.append('tf ' + ' '.join(map(str, [buffer, entry['stride'], *(n for pair in outputs for n in pair)])))
+    return rows
+
+
 def vk_txt(meta):
     """Encode the stage, vertex inputs and guest source of each descriptor for the Vulkan executor."""
     # Shader packages include unused geometry/tessellation programs. Preserve
@@ -207,6 +237,8 @@ def vk_txt(meta):
         lines.append('tg ' + ' '.join(map(str, meta['tg'])))
     if meta.get('c1'):
         lines.append(f"c1 {meta['c1']}")
+    if 'tf' in meta:
+        lines += feedback_rows(meta['tf'], meta['stage'])
     for vertex in meta.get('vertex_inputs', []):
         location, ty = vertex['location'], vertex['msl_type'].rstrip('1234')
         if ty not in VERTEX_TYPES or not 0 <= location < 32:
@@ -249,7 +281,7 @@ def read_prepared(directory, producer):
         if (record['schema'] != 1 or record['target'] != 'vulkan1.1' or
                 record['producer'] != hashlib.sha256(producer).hexdigest() or
                 not isinstance(keys, list) or not keys or
-                any(not isinstance(k, str) or not re.fullmatch('[0-9a-f]{16}', k) for k in keys) or
+                any(not isinstance(k, str) or not re.fullmatch(r'[0-9a-f]{16}(?:\.g[0-4])?', k) for k in keys) or
                 keys != sorted(set(keys))):
             raise ValueError('incompatible producer, target or shader keys')
         expected = {k + suffix for k in keys for suffix in ('.spv', '.reflection.json')}
@@ -263,7 +295,16 @@ def read_prepared(directory, producer):
             if hashlib.sha256(data).hexdigest() != record['files'][name]: raise ValueError('capture content changed: ' + name)
             snapshots[name] = data
         for key in keys:
-            validate_stage(snapshots[key + '.spv'], json.loads(snapshots[key + '.reflection.json']))
+            reflection = json.loads(snapshots[key + '.reflection.json'])
+            validate_stage(snapshots[key + '.spv'], reflection)
+            validate_topology(key, snapshots[key + '.spv'])
+            if reflection['stage'] == 'gs':
+                base = key[:16]
+                if (not {base, *(base + f'.g{t}' for t in range(5))} <= set(keys) or
+                        json.loads(snapshots[base + '.reflection.json'])['stage'] != 'gs'):
+                    raise ValueError('incomplete geometry topology variants')
+            elif len(key) != 16:
+                raise ValueError('topology variant is not a geometry stage')
         return keys, snapshots
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ValueError('invalid prepared shader capture: ' + str(error)) from error
@@ -277,20 +318,32 @@ def validate_stage(data, reflection):
     entries = [x for x in instructions if opcode(x) == 15]
     if len(entries) != 1 or len(entries[0]) < 4 or stages.get(entries[0][1]) != reflection.get('stage'):
         raise ValueError('shader stage metadata does not match SPIR-V')
+    if 'tf' in reflection:
+        feedback_rows(reflection['tf'], reflection['stage'])
+
+
+def validate_topology(key, data):
+    if re.fullmatch(r'[0-9a-f]{16}\.g[0-4]', key):
+        _, instructions = decode(data)
+        modes = [i[2] for i in instructions if opcode(i) == 16 and len(i) > 2 and 19 <= i[2] <= 23]
+        if modes != [19 + int(key[-1])]:
+            raise ValueError('geometry topology does not match product name')
 
 
 def write_stage(key, raw, refl, destination, validator, optimizer):
     binary = destination / (key + '.spv')
     data = export_spirv(raw, optimizer)
     validate_stage(data, refl)
+    validate_topology(key, data)
     binary.write_bytes(data)
     subprocess.run([validator, '--target-env', 'vulkan1.1', binary], check=True)
-    meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads') if k in refl}
+    meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads', 'tf') if k in refl}
     try:
         bindings = vk_reflect(data, refl)
     except ValueError as exc:
         raise ValueError(f'{key}: {exc}') from exc
-    meta.update(key=key, tg=refl.get('threadgroup_size'), bindings=bindings, **requirements(data))
+    meta.update(key=key, tg=refl.get('threadgroup_size') if refl['stage'] == 'cs' else None,
+                bindings=bindings, **requirements(data))
     (destination / (key + '.vk.txt')).write_text(vk_txt(meta))
     return meta['stage']
 
@@ -301,6 +354,8 @@ def export_prepared(directory, out, keys=None):
     captured, snapshots = read_prepared(directory, producer)
     selected = sorted(set(keys)) if keys else captured
     if not set(selected) <= set(captured): raise ValueError('requested shader is absent from prepared capture')
+    # Selecting a program also selects its complete native topology family.
+    selected = sorted({k for base in selected for k in captured if k == base or k.startswith(base + '.g')})
     validator, optimizer = shutil.which('spirv-val'), shutil.which('spirv-opt')
     if not validator or not optimizer: raise ValueError('spirv-val and spirv-opt from SPIRV-Tools are required')
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -355,20 +410,26 @@ def export(pkg, keys, out, *, prepare_only=False):
             subprocess.run([sys.executable, TOOLS / 'own_compilers.py', pkg, cache, *keys[i:i + 512]], env=env, check=True)
         libraries, = cache.glob('b-*')
         stage_counts = collections.Counter()
+        products = []
         for key in keys:
-            spv = captured / (key + '.spv')
             refl = json.loads((libraries / (key + '_b.json')).read_text())
-            if prepare_only:
-                shutil.copyfile(spv, dest / (key + '.spv'))
-                (dest / (key + '.reflection.json')).write_text(json.dumps(refl, sort_keys=True) + '\n')
-            else:
-                stage_counts[write_stage(key, spv.read_bytes(), refl, dest, validator, optimizer)] += 1
+            refl.update(json.loads((captured / (key + '.control.json')).read_text()))
+            family = [key] + ([key + f'.g{t}' for t in range(5)] if refl['stage'] == 'gs' else [])
+            for product in family:
+                spv = captured / (product + '.spv')
+                if prepare_only:
+                    validate_stage(spv.read_bytes(), refl)
+                    shutil.copyfile(spv, dest / (product + '.spv'))
+                    (dest / (product + '.reflection.json')).write_text(json.dumps(refl, sort_keys=True) + '\n')
+                else:
+                    stage_counts[write_stage(product, spv.read_bytes(), refl, dest, validator, optimizer)] += 1
+                products.append(product)
         for stage in ('gs', 'hs', 'ds'):
             if stage_counts[stage]:
                 print(f'[RED] Vulkan runtime does not execute {stage}: preserved {stage_counts[stage]} shader assets; games using them still require that feature', flush=True)
         if prepare_only:
             if shader_contract() != producer: raise ValueError('shader inputs changed while preparing capture')
-            capture_manifest(dest, keys, producer)
+            capture_manifest(dest, sorted(products), producer)
         else:
             stamp_export(dest, producer=producer)
         dest.rename(out)
