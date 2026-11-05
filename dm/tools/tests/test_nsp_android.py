@@ -139,6 +139,75 @@ class AndroidTarget(unittest.TestCase):
             self.assertEqual(apk[2], '0100000000000002')
             self.assertIn('0100000000000001/libdmhost.so', apk[apk.index('--library') + 1])
 
+    def test_shader_reuse_hashes_lowering_tools_helpers_and_effective_options(self):
+        # A cached export is observable output: a changed compiler input must
+        # replace it, even when a DLL keeps the same size and mtime.
+        cases = ('optimizer', 'validator', 'dll_same_stat', 'helper', 'source', 'debug', 'precision', 'target_env')
+        for change in cases:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); repo = root / 'repo'; shader = root / 'shader'; shader.mkdir()
+                profile = root / 'profile'; profile.mkdir(); key = '0123456789abcdef'
+                (profile / 'shader_map.tsv').write_text(f'p.bin\t0\tvertex\t{key}\tsource\n')
+                g = types.SimpleNamespace(table=lambda name, profile=profile: profile / name, dir=profile)
+                inputs = {
+                    'dm/gfx/tools/dmsh_build.py': 'import dmsh_fetch\n',
+                    'dm/gfx/tools/dmsh_fetch.py': 'value = 1\n',
+                    'dm/gfx/tools/dmsh_chain.lock': 'locked translator\n',
+                    'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll': 'binary0',
+                    'dm/gfx/tools/dmsh_xlate/Program.cs': '// translator0',
+                    'dm/android/tools/spv_android.py': 'import spv_metadata\n',
+                    'dm/android/tools/spv_metadata.py': 'value = 1\n',
+                    'dm/android/tools/target_contract.py': 'schema = 2\n',
+                }
+                for name, content in inputs.items():
+                    path = repo / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content)
+                tool_dir = root / 'tools'; tool_dir.mkdir()
+                for name in ('spirv-opt', 'spirv-val'):
+                    path = tool_dir / name; path.write_text('tool0'); path.chmod(0o700)
+                env = dict(PATH=str(tool_dir)); state = {'revision': b'first output'}
+                def exporter(cmd, log, env=None, key=key, state=state):
+                    out = Path(cmd[3]); out.mkdir()
+                    (out / (key + '.spv')).write_bytes(state['revision'])
+                    (out / (key + '.vk.txt')).write_text('stage vs\n')
+                    (out / 'export-contract.json').write_text('{}')
+                with mock.patch.object(nsp, 'run', exporter), mock.patch.object(nsp, 'PROG', mock.Mock()):
+                    result = nsp.android_shaders(sys.executable, repo, shader, env, shader, g, 'package bytes')
+                    self.assertEqual((result / (key + '.spv')).read_bytes(), b'first output')
+                    state['revision'] = b'rebuilt output'
+                    if change in ('optimizer', 'validator'):
+                        (tool_dir / ('spirv-opt' if change == 'optimizer' else 'spirv-val')).write_text('tool1')
+                    elif change == 'dll_same_stat':
+                        path = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll'; before = path.stat()
+                        path.write_text('binary1'); os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    elif change == 'helper': (repo / 'dm/android/tools/spv_metadata.py').write_text('value = 2\n')
+                    elif change == 'source': (repo / 'dm/gfx/tools/dmsh_xlate/Program.cs').write_text('// translator1')
+                    elif change == 'debug': env['XLATE_DEBUG'] = '0'
+                    elif change == 'precision': env['XLATE_REDUCED'] = '0'
+                    elif change == 'target_env': env['SPIRV_CROSS'] = str(tool_dir / 'alternate-cross')
+                    result = nsp.android_shaders(sys.executable, repo, shader, env, shader, g, 'package bytes')
+                    self.assertEqual((result / (key + '.spv')).read_bytes(), b'rebuilt output')
+
+    def test_changed_export_inputs_preserve_previous_products(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); shader = root / 'shader'; shader.mkdir()
+            profile = root / 'profile'; profile.mkdir(); key = '0123456789abcdef'
+            (profile / 'shader_map.tsv').write_text(f'p.bin\t0\tvertex\t{key}\tsource\n')
+            inputs = profile / 'shader_facts.tsv'; inputs.write_text('first facts')
+            g = types.SimpleNamespace(table=lambda name: profile / name, dir=profile)
+            mutate = False
+            def exporter(cmd, log, env=None):
+                out = Path(cmd[3]); out.mkdir()
+                (out / (key + '.spv')).write_bytes(b'unstable' if mutate else b'original')
+                (out / (key + '.vk.txt')).write_text('stage vs\n')
+                (out / 'export-contract.json').write_text('{}')
+                if mutate: inputs.write_text('changed during translation')
+            with mock.patch.object(nsp, 'run', exporter), mock.patch.object(nsp, 'PROG', mock.Mock()):
+                result = nsp.android_shaders(sys.executable, REPO, shader, {}, shader, g, 'first package')
+                mutate = True
+                with self.assertRaisesRegex(nsp.BuildError, 'inputs changed'):
+                    nsp.android_shaders(sys.executable, REPO, shader, {}, shader, g, 'new package')
+                self.assertEqual((result / (key + '.spv')).read_bytes(), b'original')
+
     def test_export_reuses_only_complete_unchanged_products(self):
         with tempfile.TemporaryDirectory() as tmp:
             sh = Path(tmp) / 'shader'; sh.mkdir()

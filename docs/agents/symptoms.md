@@ -804,6 +804,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- an Android build reused shader output after changing SPIRV-Tools, a target helper, translator source, translation options, or DLL bytes whose size and timestamp were preserved. → [Android shader cache misses changed lowering inputs](../reference/shaders.md#android-shader-cache-misses-changed-lowering-inputs)
 - exporting Android SPIR-V required Xcode even after translation and guest-resource reflection had already been captured. → [Portable export from prepared shaders](../reference/shaders.md#portable-export-from-prepared-shaders)
 - an older Android runtime could read newer shader sidecars, silently ignore unknown fields, and attempt a pipeline with incomplete metadata. → [Versioned Vulkan shader products](../reference/shaders.md#versioned-vulkan-shader-products)
 - an exported shader with separate texture/sampler descriptors loses its image shape or fails with an unsupported sampler kind, and the executor rejects the draw's descriptor array. → [Separate Vulkan texture and sampler descriptors](../reference/shaders.md#separate-vulkan-texture-and-sampler-descriptors)

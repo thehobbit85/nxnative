@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Vulkan resource reflection
 
+### Android shader cache misses changed lowering inputs
+
+- **Symptom:** an Android build reused shader output after changing SPIRV-Tools, a target helper, translator source, translation options, or DLL bytes whose size and timestamp were preserved.
+- **Cause:** the reuse key covered shared Python dependencies but omitted Android helper dependencies and effective translation options; translator binaries were identified by file statistics and the optimizer/validator were absent.
+- **Fix:** Android shader reuse hashes the content of target helpers, shared lowering tools and ABI headers, translator sources and all bundled binary dependencies, the selected SPIRV-Tools and SPIRV-Cross executables, and normalized debug/precision/target options. It rechecks the identity before publishing. Native/capture producer contracts cover target helper contents and the sidecar ABI, so helper changes also reject older captures and host/export combinations. Publication preserves the previous products when inputs change during export.
+- **Check:** eight independent mutation cases and an in-flight input mutation failed before the fix and pass afterwards. Existing product-corruption, package-change and Apple/Vulkan target-isolation checks remain in the suite.
+- **Found on:** the Android shader cache audit (synthetic inputs).
+
 ### Portable export from prepared shaders
 
 - **Symptom:** exporting Android SPIR-V required Xcode even after translation and guest-resource reflection had already been captured.

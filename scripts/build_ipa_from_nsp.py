@@ -2475,15 +2475,43 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     return out
 
 
+def android_shader_tool_inputs(repo, env):
+    """Content identities, including target-specific helpers and executable tools."""
+    files = set(chain_files(repo))
+    files.update((repo / 'dm/android/tools').rglob('*.py'))
+    files.update((repo / 'dm/gfx/tools/dmsh_xlate').glob('*.cs'))
+    files.update((repo / 'dm/gfx/tools/dmsh_xlate').glob('*.csproj'))
+    files.update((repo / 'dm/gfx/tools').glob('*.metal'))
+    files.update(repo / p for p in ('dm/gfx/nvn/dmsh_chain.h', 'dm/gfx/nvn/dmsh_abi.h',
+                                   'dm/gfx/nvn/vulkan/shader_contract.h'))
+    # All bundled runtime dependencies matter, including Spv.Generator.dll.
+    binaries = repo / 'dm/gfx/tools/dmsh_xlate_bin'
+    files.update(p for p in binaries.rglob('*') if p.is_file())
+    for name in ('spirv-opt', 'spirv-val'):
+        tool = shutil.which(name, path=env.get('PATH', os.defpath))
+        files.add(Path(tool) if tool else repo / ('missing-' + name))
+    cross = env.get('SPIRV_CROSS') or str(repo / 'dm/gfx/tools/spirv_cross_bin/spirv-cross')
+    resolved = shutil.which(cross, path=env.get('PATH', os.defpath))
+    files.add(Path(resolved or cross))
+    options = {'target': 'vulkan1.1', 'schema': 2,
+               'debug': env.get('XLATE_DEBUG', '1') != '0',
+               'reduced': env.get('XLATE_REDUCED', '1') == '1'}
+    files = sorted(files)
+    names = [str(p.relative_to(repo)) if p.is_relative_to(repo) else p.name for p in files]
+    return names, ('files', files), options
+
+
 def android_shaders(py, repo, sh, env, logs, g, pkg_key):
     """Reuse only an exact, complete Vulkan export; publish replacements atomically."""
     PROG.stage('Android Vulkan shaders')
     keys = sorted(shader_keys(g))
     exporter = repo / 'dm/android/tools/spv_android.py'
     contract_tool = repo / 'dm/android/tools/target_contract.py'
-    patches = [g.table('patches.py')] if g.table('patches.py').is_file() else []
-    key = fingerprint(pkg_key, keys, ('files', chain_files(repo) + [exporter, contract_tool] + profile_files(g) + patches),
-                      ('stat', repo / 'dm/gfx/tools/dmsh_xlate_bin'), env=env)
+    def identity():
+        patches = [g.table('patches.py')] if g.table('patches.py').is_file() else []
+        return fingerprint(pkg_key, keys, *android_shader_tool_inputs(repo, env),
+                           ('files', [exporter, contract_tool] + profile_files(g) + patches), env=env)
+    key = identity()
     out = sh / 'vk'; manifest = out / 'manifest.json'
     try:
         saved = json.loads(manifest.read_text())
@@ -2500,6 +2528,8 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
     run([py, exporter, sh / 'pkg', tmp, '--keys-file', wanted], logs / 'android_shaders.log', env=env)
     files = {k + suffix: hashlib.sha256((tmp / (k + suffix)).read_bytes()).hexdigest()
              for k in keys for suffix in ('.spv', '.vk.txt')}
+    if identity() != key:
+        raise BuildError('Android shader inputs changed during export; previous products preserved')
     (tmp / 'manifest.json').write_text(json.dumps({'inputs': key, 'files': files, 'provenance': hashlib.sha256((tmp / 'export-contract.json').read_bytes()).hexdigest()}, indent=2) + '\n')
     swap_in(tmp, out)
     PROG.end(f'{len(keys)} validated shader stages')
