@@ -25,6 +25,9 @@ static void sleep_frame(void) {
     __asm__ volatile("svc #0x0b" : "+r"(x0) : : "memory");
 }
 static void require(int ok) { if (!ok) { NOTE("APP_FIXTURE_FAILED\n"); for (;;) sleep_frame(); } }
+#ifdef APP_WEB
+#include "app_web.h"
+#endif
 static void check_save(void) {
     require(fs_mount("save", 0) == 0);
     uint64_t file; uint32_t value[2] = {0x4e585350, 0}; size_t got = 0;
@@ -135,6 +138,9 @@ void nnMain(void) {
         API(nvnQueuePresentTexture)(&queue, &window, index);
         API(nvnQueueFinish)(&queue);
         if (frame % 60 == 0) NOTE("APP_FIXTURE_FRAME\n");
+#ifdef APP_WEB
+        if (frame == 60) check_web();
+#endif
 #ifdef APP_PROGRAM
         if (frame == 90) next_program();
 #endif

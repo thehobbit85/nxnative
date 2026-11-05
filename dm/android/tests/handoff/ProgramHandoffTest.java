@@ -52,6 +52,11 @@ public final class ProgramHandoffTest {
         check(!fail.finished && fail.started.isEmpty(),"failed delivery is not a completed transition");
         p=new ProgramActivity();p.intent=new Intent(null,ProgramActivity.class);p.onCreate(null);p.onResume();
         check(p.finished && p.started.isEmpty(),"missing lifetime cannot launch");p.onDestroy();
+        GameActivity browser=new GameActivity();browser.onPause();
+        browser.webCommand(7,0,null,null,null,null,0,0,0,0);
+        check(OfflineWeb.last.paused,"browser opened after onPause must start paused");
+        browser.onResume();check(!OfflineWeb.last.paused,"new browser must resume with Activity");
+        browser.onDestroy();check(OfflineWeb.last.closed,"browser must close with Activity");
         System.out.println("PASS: handoff lifetime, cancellation, background/resume and delivery failures");
     }
 }

@@ -1,5 +1,5 @@
 // nn::web offline HTML pages: the pages a game ships in its HtmlDocument NCA (nx_extract --html), shown by the web applet over the game. On the host a web view of the front end
-// (web_apple.m: WKWebView on the Mac and the iPhone) shows them over the game picture, with the Switch browser's JavaScript extension (window.nx: content messages both ways, the
+// (web_apple.m: WKWebView on Apple; OfflineWeb.java: Android WebView) shows them over the game picture, with the Switch browser's JavaScript extension (window.nx: content messages both ways, the
 // footer's buttons) and the controller as the page reads it (navigator.getGamepads and key events). The page ends when it goes to its callback URL (http://localhost/ by default:
 // exit reason 3 with that URL as the last URL), when the default B goes back from its first page (reason 1), when it calls nx.endApplet (reason 0) or when the game asks (reason 2).
 // While a page is shown it holds the input (dm_input_hold): the game reads nothing, as an application out of focus.
@@ -69,6 +69,7 @@ static _Alignas(16) uint8_t g_ev_web[0x100];
 static pthread_mutex_t g_web_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_web_cv = PTHREAD_COND_INITIALIZER;
 static int g_web_state, g_web_real, g_web_held;   // g_web_real: a web view shows the page (0: the stand-in); g_web_held: the page holds the input
+static uint64_t g_web_session;
 static uint32_t g_web_reason; static char g_web_url[URL_SIZE];
 static char *g_web_msg[MSG_MAX]; static size_t g_web_msg_n[MSG_MAX]; static int g_web_msg_h, g_web_msg_c;   // messages from the page, oldest at g_web_msg_h
 
@@ -88,20 +89,23 @@ static void web_end_locked(uint32_t reason, const char *url) {   // the page end
 }
 
 // Front end reports (main thread)
-void dm_web_message(const char *msg, size_t n) {
+void dm_web_message_for(uint64_t session, const char *msg, size_t n) {
     pthread_mutex_lock(&g_web_mu);
+    if (session && session != g_web_session) { pthread_mutex_unlock(&g_web_mu); return; }
     static int logged; if (logged++ < 16) LOG("web: content message from the page: \"%.*s\"", (int)(n > 80 ? 80 : n), msg);
     if (g_web_state == 1 || g_web_state == 2) msg_push(msg, n);
     pthread_mutex_unlock(&g_web_mu);
 }
-void dm_web_ended(uint32_t reason, const char *url) {
+void dm_web_ended_for(uint64_t session, uint32_t reason, const char *url) {
     pthread_mutex_lock(&g_web_mu);
+    if (session && session != g_web_session) { pthread_mutex_unlock(&g_web_mu); return; }
     if (g_web_state == 1 || g_web_state == 2) LOG("web: the page ended: exit reason %u, last URL %s", reason, url && *url ? url : "(none)");
     web_end_locked(reason, url);
     pthread_mutex_unlock(&g_web_mu);
 }
-void dm_web_failed(const char *why) {   // the page did not load: the stand-in takes over (its empty ready message, closed when it appears)
+void dm_web_failed_for(uint64_t session, const char *why) {   // failed load: the stand-in takes over
     pthread_mutex_lock(&g_web_mu);
+    if (session && session != g_web_session) { pthread_mutex_unlock(&g_web_mu); return; }
     if (g_web_real && (g_web_state == 1 || g_web_state == 2)) {
         LOG("[RED] web: the page could not be shown (%s); the stand-in answers", why ?: "?");
         g_web_real = 0;
@@ -109,6 +113,9 @@ void dm_web_failed(const char *why) {   // the page did not load: the stand-in t
     }
     pthread_mutex_unlock(&g_web_mu);
 }
+void dm_web_message(const char *msg, size_t n) { dm_web_message_for(0, msg, n); }
+void dm_web_ended(uint32_t reason, const char *url) { dm_web_ended_for(0, reason, url); }
+void dm_web_failed(const char *why) { dm_web_failed_for(0, why); }
 
 // Start: the page is looked up and opened; hidden until Appear when the argument boots it initially hidden (forced off for the synchronous form)
 static void web_start(const uint8_t *arg, int sync) {
@@ -116,9 +123,10 @@ static void web_start(const uint8_t *arg, int sync) {
     web_tlv_str(arg, TLV_DOCUMENT_PATH, path, sizeof path); web_tlv_str(arg, TLV_CALLBACK_URL, cb, sizeof cb);
     if (!*cb) snprintf(cb, sizeof cb, "http://localhost/");
     int hidden = !sync && web_tlv_u32(arg, TLV_BOOT_MODE, BOOT_ALL_FOREGROUND) == BOOT_INITIALLY_HIDDEN;
-    dm_web_opts o = {web_tlv_u32(arg, TLV_KEY_REPEAT_DELAY, 0), web_tlv_u32(arg, TLV_KEY_REPEAT_PULSE, 0)};
+    dm_web_opts o = {web_tlv_u32(arg, TLV_KEY_REPEAT_DELAY, 0), web_tlv_u32(arg, TLV_KEY_REPEAT_PULSE, 0), 0};
     pthread_mutex_lock(&g_web_mu);
     if (g_web_state) { front_web_close(); if (g_web_held) dm_input_hold(0); }
+    o.session = ++g_web_session;
     msg_clear(); g_web_held = 0; g_web_reason = 0; g_web_url[0] = 0; g_web_state = 1;
     g_web_real = web_find(path, dir, sizeof dir) && front_web_open(dir, path, cb, hidden, &o) == 0;
     static int n; if (n++ < 8) {

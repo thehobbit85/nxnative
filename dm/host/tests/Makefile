@@ -110,6 +110,21 @@ $(B)/t_symbols_android: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h ../and
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $< ../../android/compat/sha256.c
 .PHONY: account-mii android-account-mii-build
 .PHONY: network android-network-build
+.PHONY: web android-web-build
+run: web
+web: $(B)/t_web $(B)/t_web_old
+	$(B)/t_web $(QUIET)
+	! $(B)/t_web_old $(QUIET)
+WEB_HEADERS = ../hle_web.c ../front.h ../hle.h ../dm.h $(GAME_H)
+$(B)/t_web: t_web.c $(WEB_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ $<
+$(B)/t_web_old: t_web.c $(WEB_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_WEB_OLD_CALLBACK -I.. $(GINC) -o $@ $<
+android-web-build: $(B)/t_web_android $(B)/t_web_old_android
+$(B)/t_web_android: t_web.c $(WEB_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $<
+$(B)/t_web_old_android: t_web.c $(WEB_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -DDM_TEST_WEB_OLD_CALLBACK -I.. -I../../android/compat $(GINC) -o $@ $<
 run: network
 network: $(B)/t_network
 	$(B)/t_network $(QUIET)
