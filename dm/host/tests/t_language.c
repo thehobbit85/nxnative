@@ -28,6 +28,23 @@ static int checks, fails;
 static const char *const codes[] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
 
 int main(void) {
+    char version[18]; memset(version, 0xa5, sizeof version); h_oe_DispVer(version + 1);
+    CHECK((uint8_t)version[0] == 0xa5 && (uint8_t)version[17] == 0xa5 && !strcmp(version + 1, "1.0.0"), "unknown application version uses bounded fallback");
+    for (unsigned i = 6; i < 17; i++) CHECK(!version[i], "display version zero-fills its 16-byte output");
+    const struct { const char *build, *version; } versions[] = {DM_GAME_DISPLAY_VERSIONS};
+    module_t main_module = {.name = "main"}; g_mod = &main_module; g_nmod = 1;
+    for (unsigned i = 0; i < sizeof versions / sizeof *versions; i++) if (versions[i].build) {
+        strlcpy(main_module.build_id, versions[i].build, sizeof main_module.build_id); memset(version, 0xa5, sizeof version);
+        h_oe_DispVer(version + 1); char expected[16]; strlcpy(expected, versions[i].version, sizeof expected);
+        CHECK(!strcmp(version + 1, expected) && (uint8_t)version[0] == 0xa5 && (uint8_t)version[17] == 0xa5, "profile build selects bounded display version");
+    }
+    g_mod = NULL; g_nmod = 0;
+    int64_t leap = 1709251198; uint64_t calendar = h_time_ToCalUtc(&leap); const uint8_t expected_calendar[8] = {0xe8,7,2,29,23,59,58,0};
+    CHECK(!memcmp(&calendar, expected_calendar, 8), "SDK16 UTC calendar uses eight-byte return ABI");
+    setenv("TZ", "UTC0", 1); char zone[0x26]; memset(zone, 0xa5, sizeof zone);
+    CHECK(!h_time_LocName(zone + 1) && !strcmp(zone + 1, "UTC") && (uint8_t)zone[0] == 0xa5 && (uint8_t)zone[0x25] == 0xa5, "device timezone writes bounded location name");
+    for (unsigned i = 4; i < 0x25; i++) CHECK(!zone[i], "timezone output is zero-padded");
+    CHECK(!h_time_Finalize(), "time finalization has no service session");
     // Check the full matrix: both Chinese spellings match their own script;
     // different scripts, region variants and every unrelated language stay distinct.
     for (int32_t lang = 0; lang < 18; lang++) for (int i = 0; i < 18; i++) {

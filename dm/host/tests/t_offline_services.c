@@ -4,6 +4,7 @@
 #include "../hle_sdk16.c"
 #include "../hle_offline.c"
 #include <assert.h>
+#include <sys/wait.h>
 
 int svc_thread(int, uint64_t *);
 uint32_t svc_thread_main_init(void);
@@ -238,12 +239,57 @@ static void nfc(void) {
         for (unsigned i = 0; i < 3; i++) { check_event(events + i, 0); close_event(events + i); }
     }
 }
+static void album(void) {
+    uint8_t out[128]; memset(out, 0xa5, sizeof out); RUN(h_album_Init);
+    assert(RUN(h_album_Save, out, sizeof out, 1, 0, 1) == 0x2a2 && RUN(h_album_Save7, out, sizeof out, 1, 0) == 0x2a2);
+    assert(RUN(h_album_Share, out, sizeof out, 1, 0, 1, out, "caption") == 0x2a2);
+    assert(RUN(h_album_ShareId, out, out, sizeof out, 1, 0, out, "caption") == 0x2a2); unchanged(out, sizeof out);
+    const size_t sizes[] = {0,1,17};
+    for (unsigned i = 0; i < 3; i++) {
+        memset(out, 0xa5, sizeof out); assert(RUN(h_album_ShareUrl, (char *)out + 1, sizes[i], out + 64) == 0x2a2);
+        assert(out[0] == 0xa5 && out[1] == (sizes[i] ? 0 : 0xa5)); unchanged(out + 2, sizeof out - 2);
+    }
+    assert(RUN(h_album_ShareUrl, NULL, 17, out) == 0x2a2 && RUN(h_album_Show) == 0x2a2 && RUN(h_album_SaveCur, 0) == 0x2a2);
+    RUN(h_album_Fini);
+}
+static void aoc_case(int mode) {
+    char dir[1024], path[1100]; const char *tmp = getenv("TMPDIR"); if (!tmp || !*tmp) tmp = "/tmp";
+    snprintf(dir, sizeof dir, "%s/dm-aoc-XXXXXX", tmp); assert(mkdtemp(dir));
+    const char *names[] = {"20", "3.img", "3", "2000.img", "2001", "0", "-1", "junk", "4.tmp"};
+    for (unsigned i = 0; i < sizeof names / sizeof *names; i++) { snprintf(path, sizeof path, "%s/%s", dir, names[i]); assert(!mkdir(path, 0700)); }
+    setenv("DM_AOC_DIR", dir, 1); unsetenv("DM_AOC_OWNED");
+    if (mode == 1) setenv("DM_AOC_OWNED", "0", 1); else if (mode == 2) unsetenv("DM_AOC_DIR");
+    int (*count)(void) = hle_force_h_aoc_Count.fn;
+    int (*list)(int *, int, int) = hle_force_h_aoc_List.fn;
+    assert(count() == (mode ? 0 : 3)); const int values[] = {3,20,2000};
+    for (int off = -1; off <= 4; off++) for (int cap = -1; cap <= 4; cap++) {
+        int out[7]; memset(out, 0xa5, sizeof out); int start = off < 0 ? 0 : off;
+        int n = mode || cap <= 0 || start >= 3 ? 0 : cap < 3 - start ? cap : 3 - start;
+        assert(list(out + 1, off, cap) == n);
+        unchanged(out, sizeof *out); unchanged(out + 1 + n, sizeof out - (1 + n) * sizeof *out);
+        for (int i = 0; i < n; i++) assert(out[i + 1] == values[start + i]);
+    }
+    // Ownership is a process-start snapshot, even if files disappear later.
+    for (unsigned i = 0; i < sizeof names / sizeof *names; i++) { snprintf(path, sizeof path, "%s/%s", dir, names[i]); assert(!rmdir(path)); }
+    assert(!rmdir(dir) && count() == (mode ? 0 : 3));
+}
+static void aoc(void) {
+    for (int mode = 0; mode < 3; mode++) {
+        fflush(NULL); pid_t pid = fork(); assert(pid >= 0);
+        if (!pid) { aoc_case(mode); _exit(0); }
+        int status; assert(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+    int (*count)(void) = hle_force_h_aoc_Count.fn;
+    int (*list)(int *, int, int) = hle_force_h_aoc_List.fn;
+    unsetenv("DM_AOC_DIR"); unsetenv("DM_AOC_OWNED"); assert(!RUN(count) && !RUN(list, NULL, 0, 0));
+    for (unsigned i = 0; i < 32; i++) { sdk_event event = {0}; RUN(h_aoc_GetEv, &event); check_event(&event, 0); close_event(&event); }
+}
 int main(void) {
     alarm(20); svc_thread_main_init(); int h0, l0, o0; thr_counts(&h0, &l0, &o0);
-    shop(); profanity(); streamplay(); infrared(); network_clock(); other_contracts(); nfc();
+    shop(); profanity(); streamplay(); infrared(); network_clock(); other_contracts(); nfc(); album(); aoc();
     const char *prefixes[] = {"_ZN2nn3ngc", "_ZN2nn10streamplay", "_ZN2nn8irsensor", "_ZN2nn3nsd",
         "_ZN2nn2ec19ShopServiceAccessor", "_ZNK2nn2ec19ShopServiceAccessor", "_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask",
-        "_ZN2nn7friends", "_ZN2nn4pctl", "_ZN2nn3err", "_ZN2nn3pdm", "_ZN2nn3nfc", "_ZN2nn3nfp"};
+        "_ZN2nn7friends", "_ZN2nn4pctl", "_ZN2nn3err", "_ZN2nn3pdm", "_ZN2nn3nfc", "_ZN2nn3nfp", "_ZN2nn5album", "_ZN2nn3aoc"};
     unsigned long bytes; const hle_force_ent *entries = DM_SECTION_DATA(swforce, &bytes); unsigned checked = 0;
     for (size_t i = 0; i < bytes / sizeof *entries; i++) {
         int wanted = 0; for (unsigned p = 0; p < sizeof prefixes / sizeof *prefixes; p++) wanted |= !strncmp(entries[i].name, prefixes[p], strlen(prefixes[p]));

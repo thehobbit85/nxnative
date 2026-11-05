@@ -60,6 +60,17 @@ static int child_burst(int kind) {
     return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 int main(void) {
+    const char *languages[] = {"", "ja", "en-US", "fr-CA", "es-419", "pt-BR", "en-GB", "fr", "de", "ko", "zh-Hans", "zh-Hant"};
+    const int regions[] = {1,0,1,1,1,1,2,2,2,4,4,4};
+    for (unsigned i = 0; i < sizeof languages / sizeof *languages; i++) {
+        setenv("DM_LANG", languages[i], 1); uint64_t code = h_oe_GetLang(); char expected[8] = {0};
+        strlcpy(expected, *languages[i] ? languages[i] : "en-US", sizeof expected);
+        CHECK(!memcmp(&code, expected, sizeof code) && h_oe_GetRegion() == regions[i], "language return ABI and region mapping");
+        CHECK(!h_oe_LangLimited(), "language selection is unrestricted");
+    }
+    unsetenv("DM_LANG"); uint64_t default_lang = h_oe_GetLang(); CHECK(!memcmp(&default_lang, "en-US\0\0\0", 8), "absent language uses English US");
+    uint8_t device[18], repeat[16]; memset(device, 0xa5, sizeof device); h_oe_GetDevId(device + 1); h_oe_GetDevId(repeat);
+    CHECK(device[0] == 0xa5 && device[17] == 0xa5 && !memcmp(device + 1, repeat, 16) && !memcmp(device + 1, "xbl\0SWNATIVE1001", 16), "pseudo device ID is stable and bounded");
     unsetenv("DM_OE_SCRIPT"); reset();
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "inactivity extension starts disabled");
     h_oe_InactivityExtSafe(1);
