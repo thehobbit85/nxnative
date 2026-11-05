@@ -105,6 +105,45 @@ static Result (*list_hook(void))(const char *const *, int) {
         if (!strcmp(e[i].name, "_ZN2nn2fs6CommitEPKPKci")) return e[i].fn;
     return NULL;
 }
+static int has_account_save;
+static int imports_account_save(const char *prefix) {
+    CHECK(!strcmp(prefix, "_ZN2nn2fs13MountSaveData"), "device-save selector queries account-save imports");
+    return has_account_save;
+}
+static void device_save(const char *root) {
+    extern int (*t_game_imports)(const char *); t_game_imports = imports_account_save;
+    for (has_account_save = 0; has_account_save < 2; has_account_save++) {
+        char save[1100], device[1120], account_file[1200], device_file[1200], env[1130], got[64];
+        snprintf(save, sizeof save, "%s/device-case-%d", root, has_account_save);
+        snprintf(device, sizeof device, "%s_device", save); CHECK(!mkdir(save, 0700) && !mkdir(device, 0700), "create independent save inputs");
+        snprintf(account_file, sizeof account_file, "%s/a", save); snprintf(device_file, sizeof device_file, "%s/a", device);
+        put(account_file, "account-before"); put(device_file, "device-before");
+        snprintf(env, sizeof env, "%s///", save); setenv("DM_SAVE", env, 1); g_nmnt = 0;
+        CHECK(!h_fs_MountDeviceSave("dev"), "mount device save with trailing-slash root");
+        CHECK(read_save("dev:/a", got, sizeof got) && !strcmp(got, has_account_save ? "device-before" : "account-before"), "imports select separate versus single-player save");
+        CHECK(!write_save("dev:/a", "device-after") && !h_fs_Commit("dev"), "commit actual device bytes");
+        CHECK(same(has_account_save ? device_file : account_file, "device-after"), "device commit chooses correct physical root");
+        CHECK(same(has_account_save ? account_file : device_file, has_account_save ? "account-before" : "device-before"), "other physical root stays unchanged");
+        if (has_account_save) {
+            CHECK(!h_fs_MountSave("usr", NULL), "mount independent account save");
+            CHECK(!write_save("usr:/a", "account-after") && !h_fs_Commit("usr"), "account commit beside device save");
+            CHECK(same(account_file, "account-after") && same(device_file, "device-after"), "account/device generations stay independent");
+        }
+        g_nmnt = 0; CHECK(!h_fs_MountDeviceSave("dev"), "remount device save after simulated restart");
+        CHECK(read_save("dev:/a", got, sizeof got) && !strcmp(got, "device-after"), "device commit survives remount");
+    }
+    t_game_imports = NULL;
+    uint64_t handle[3] = {123,99,456}; uint8_t info[64]; memset(info, 0xa5, sizeof info);
+    CHECK(!h_fs_OpenCacheList(handle + 1) && handle[0] == 123 && handle[1] == 99 && handle[2] == 456, "empty cache list leaves handle untouched");
+    int count[3] = {123,99,456}; CHECK(!h_fs_ReadCacheList(count + 1, info, handle[1], 4) && !count[1] && count[0] == 123 && count[2] == 456, "cache enumeration writes only zero count");
+    for (unsigned i = 0; i < sizeof info; i++) CHECK(info[i] == 0xa5, "empty cache enumeration does not invent info");
+    h_fs_CloseCacheList(handle[1]);
+    int64_t sizes[4] = {123,99,99,456};
+    CHECK(!h_fs_DeviceSaveSize(sizes + 1, sizes + 2) && sizes[1] == (256 << 20) && sizes[2] == (256 << 20) && sizes[0] == 123 && sizes[3] == 456, "device save size ABI guards");
+    sizes[1] = sizes[2] = 99;
+    CHECK(!h_fs_SaveSizeMax(sizes + 1, sizes + 2) && sizes[1] == (256 << 20) && sizes[2] == (256 << 20) && sizes[0] == 123 && sizes[3] == 456, "maximum save size ABI guards");
+    uint8_t flag[3] = {123,99,45}; CHECK(!h_fs_RestoreFlag(flag + 1, "dev") && !flag[1] && flag[0] == 123 && flag[2] == 45, "restore flag writes one byte");
+}
 int main(void) {
     unsetenv("DM_TEST_FS_FAIL"); unsetenv("DM_TEST_FS_FAILAT");
     Result (*commit)(const char *const *, int) = list_hook();
@@ -284,6 +323,7 @@ int main(void) {
         CHECK(io.result == RES_FAIL && committing.result == RES_FAIL && same(path, "restored-A"), "A refuses the overlapping failed I/O and preserves its committed bytes");
         CHECK(dm_fs_commit_count() == n + 1 && g_nfail == nf + 1, "only B publishes and only A reports a failure");
     }
+    device_save(root);
     rm_tree(root);
     printf("list Commit: %d checks, %d failed\n", checks, fails);
     return fails != 0;

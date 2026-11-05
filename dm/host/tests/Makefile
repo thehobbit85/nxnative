@@ -402,6 +402,10 @@ nfc: $(B)/t_nfc
 LANGUAGE_SAN ?= -fsanitize=address,undefined
 $(B)/t_language: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address $(LANGUAGE_SAN) -I.. $(GINC) -o $@ t_language.c
+.PHONY: android-language-build
+android-language-build: $(B)/t_language_android
+$(B)/t_language_android: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -Wno-frame-address -I.. -I../../android/compat $(GINC) -o $@ $<
 $(B)/t_motion: t_motion.c ../motion_fusion.h | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -o $@ t_motion.c -lm
 run: $(B)/t_motion_apple

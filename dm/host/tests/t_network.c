@@ -125,6 +125,12 @@ static void sockets(void) {
     assert(size == 64); unchanged(out, sizeof out);
     void *ai = out; assert(h_sk_GetAddrInfo("example.invalid", "443", NULL, &ai) == 4 && !ai);
     ai = out; assert(h_sk_Gai2("example.invalid", "443", NULL, &ai) == 4 && !ai);
+    void *answers[3] = {out, out, out};
+    assert(h_c_sk_Gai("example.invalid", "443", NULL, answers + 1) == 4 && !answers[1] && answers[0] == out && answers[2] == out);
+    assert(h_c_sk_Gai("example.invalid", NULL, NULL, NULL) == 4);
+    uint32_t ip[4] = {123,99,99,456};
+    assert(h_ldn_Ip(ip + 1, ip + 2) == RES_FAIL && !ip[1] && !ip[2] && ip[0] == 123 && ip[3] == 456);
+    assert(h_ldn_Ip(NULL, NULL) == RES_FAIL);
     h_sk_FreeAddrInfo(NULL); h_sk_FreeAi2(NULL); assert(*h_sk_GaiStr(4));
     assert(!h_sk_GetHostEnt("example.invalid", NULL, 0) && !h_nsk_GetHost("example.invalid", NULL, 0));
     assert(h_sk_GetLastError() == 50);
