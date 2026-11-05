@@ -19,6 +19,15 @@ GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_directory $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_save_sync $(B)/t_save_sync_metadata: ../save_fs.h
 GAME_H = ../gen/$(GAME)/game_profile.h
+.PHONY: probe-poll android-probe-poll-build
+run: probe-poll
+probe-poll: $(B)/t_probe_poll
+	$(B)/t_probe_poll
+$(B)/t_probe_poll: t_probe_poll.c ../probe.c ../host_memory.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ $<
+android-probe-poll-build: $(B)/t_probe_poll_android
+$(B)/t_probe_poll_android: t_probe_poll.c ../probe.c ../host_memory.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $<
 .PHONY: jit android-jit-build
 run: jit
 jit: $(B)/t_jit

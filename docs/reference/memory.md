@@ -12,6 +12,15 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Addresses past 2^39:** a Switch's addresses stay below 2^39, and on macOS 27 this block cannot. The system reserves `0x1000000000`–`0x7000000000`, which leaves exactly 64 GB below 2^39, with two reservations of about 12 GB at random addresses inside it (the largest free block is 21–26 GB), and the block is larger than 64 GB. So the block crosses 2^39, at a place that changes per launch: over 600 launches of a bare process a 68 GB block started 0–33 GB below 2^39, with a median of 13.5 GB, and 15% of launches left under 5 GB. The block is laid out heap, stacks, alias region, so the crossing usually falls in the alias region; when the heap and stacks reach past it the host logs `[mem] the heap and stacks reach past 2^39`. The block's end stays below 2^40, which NVN GPU addresses (host pointers) need. No game is known to keep a tag at bit 39: a crash on a cut-off pointer in a log with that line would be the first, and `DM_ALIAS_SIZE=<profile's mem_alias>` is the check.
 - **Found on:** Trails in the Sky 1st Chapter ([#877](https://github.com/seedds/nxnative/issues/877)), Just Dance ([#1049](https://github.com/seedds/nxnative/issues/1049)) and Trails in the Sky 2nd Chapter ([PR #1276](https://github.com/seedds/nxnative/pull/1276)), reported on their bring-ups, none of them in the games table yet; [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) (the Blood Moon, unconfirmed).
 
+### Memory-change polling on Android
+
+- **Symptom:** `DM_PROBE_POLL` logs that it requires the Apple host instead of reporting changes to a guest word.
+- **Cause:** the portable poll/parser logic shared a compile guard with Mach write-watch aliases and task-wide register snapshots.
+- **Fix:** share the parser and change loop across Mac and Android, reading through `dm_host_read` so unmapped or partially readable words do not produce a false change. Absolute addresses, delayed `heap+` resolution, lengths up to eight bytes and value filters retain the Mac behavior. Matching changes trigger the existing service-state dump twice.
+- **Found on:** the synthetic `dm/host/tests/t_probe_poll.c` Android fixture, not a commercial-game failure.
+- **Check:** `probe-poll` and NDK `android-probe-poll-build`, then run the target binary. The fixture observes 320 acknowledged changes across 1/2/4/8-byte lengths, absolute/heap addresses and filtered/unfiltered dumps; it also checks inaccessible and partially readable words.
+- **Open:** Android still lacks the Mac poller's immediate task-wide register/backtrace snapshot and `DM_PROBE_WATCH` write interception. Enabling polling reports that limitation explicitly. This change does not complete host diagnostic parity.
+
 ### Partitioning the guest block between alias region, stacks and heap
 
 - **Symptom:** large resources silently skipped, later a null deref where the resource is used; also visible as `SetHeapSize` asking for much less than the pool.
