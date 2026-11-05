@@ -137,6 +137,17 @@ def prepare_spirv(data):
     drop = set() if f64 else {10}  # Float64
     if not interlock:
         drop.update((5363, 5372, 5378))
+    # The shared generator declares ImageGatherExtended unconditionally. The
+    # SPIR-V grammar requires it for ImageOperands Offset/ConstOffsets, not for
+    # ordinary gather or ConstOffset. Maxwell offsets often become coordinate
+    # arithmetic instead, so keeping this declaration rejects capable devices.
+    # Values are the word index of ImageOperands (including the opcode word).
+    masks = {op: 5 for op in (87, 88, 91, 92, 95, 98, 305, 306, 309, 310, 313, 320)}
+    masks.update({op: 6 for op in (89, 90, 93, 94, 96, 97, 307, 308, 311, 312, 314, 315)})
+    masks.update({99: 4, 4545: 7, 5283: 7})  # write, QCOM gather, NV footprint
+    if not any(len(x) > masks[opcode(x)] and x[masks[opcode(x)]] & 0x30
+               for x in ins if opcode(x) in masks):
+        drop.add(25)
     # The translator can emit OpImageWrite to an Unknown-format storage image
     # without declaring StorageImageWriteWithoutFormat (Legends Z-A). Only
     # require the feature for a shader that actually writes such a loaded image.
