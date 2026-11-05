@@ -69,8 +69,8 @@ void *guest_sym(const char *name) {
     for (unsigned i = 0; i < sizeof ngc_names / sizeof *ngc_names; i++) if (!strcmp(name, ngc_names[i])) return (void *)(uintptr_t)(0x100000 + 0x100 * i);
     fprintf(stderr, "Unexpected SDK lookup: %s\n", name); abort();
 }
-static void *seen[160]; static unsigned nseen;
-static void mark(void *fn) { for (unsigned i = 0; i < nseen; i++) if (seen[i] == fn) return; assert(nseen < 160); seen[nseen++] = fn; }
+static void *seen[192]; static unsigned nseen;
+static void mark(void *fn) { for (unsigned i = 0; i < nseen; i++) if (seen[i] == fn) return; assert(nseen < 192); seen[nseen++] = fn; }
 #define RUN(fn, ...) (mark((void *)fn), fn(__VA_ARGS__))
 static void unchanged(const void *p, size_t n) { const uint8_t *b = p; for (size_t i = 0; i < n; i++) assert(b[i] == 0xa5); }
 static void shop(void) {
@@ -201,12 +201,49 @@ static void other_contracts(void) {
     assert(stats[1] == 0x100 && !stats[2] && !stats[3] && stats[4] == 0x200 && !stats[5] && !stats[6]);
     memset(stats, 0xa5, sizeof stats); assert(!RUN(h_pdm_QueryStats, stats, out, ids, -1)); unchanged(stats, sizeof stats);
 }
+static void nfc(void) {
+    assert(!RUN(h_nfc_State) && !RUN(h_nfp_LibState) && !RUN(h_nfc_Enabled));
+    for (unsigned cycle = 0; cycle < 32; cycle++) {
+        RUN(h_nfp_Init); RUN(h_nfc_Init); assert(RUN(h_nfc_State) == 1 && RUN(h_nfp_LibState) == 1 && !RUN(h_nfc_Enabled));
+        struct { uint64_t pre; NfpDeviceHandle device; uint64_t post; } g;
+        memset(&g, 0xa5, sizeof g); int count[3] = {123,99,456};
+        assert(!RUN(h_nfp_List, &g.device, count + 1, 0) && !count[1]); unchanged(&g, sizeof g);
+        assert(!RUN(h_nfp_List, &g.device, count + 1, -1) && !count[1]); unchanged(&g, sizeof g);
+        assert(!RUN(h_nfp_List, &g.device, count + 1, 1) && count[1] == 1 && count[0] == 123 && count[2] == 456);
+        assert(g.pre == 0xa5a5a5a5a5a5a5a5ull && g.post == g.pre && g.device.id == 0x4e465030);
+        for (unsigned i = 0; i < sizeof g.device.reserved; i++) assert(!g.device.reserved[i]);
+        uint32_t pad[3] = {123,99,456}; assert(!RUN(h_nfp_NpadId, pad + 1, &g.device) && !pad[1] && pad[0] == 123 && pad[2] == 456);
+        sdk_event events[3] = {0}; RUN(h_nfp_AttachAvail, events);
+        assert(!RUN(h_nfp_AttachAct, events + 1, &g.device) && !RUN(h_nfp_AttachDeact, events + 2, &g.device));
+        for (unsigned i = 0; i < 3; i++) check_event(events + i, 0);
+        assert(!RUN(h_nfp_Start, &g.device) && RUN(h_nfp_State, &g.device) == 1);
+        uint8_t out[128]; memset(out, 0xa5, sizeof out);
+        const Result no_tag = 115u | (97u << 9);
+        assert(RUN(h_nfp_TagInfo, out, &g.device) == no_tag && RUN(h_nfp_ModelInfo, out, &g.device) == no_tag);
+        assert(RUN(h_nfp_Mount, &g.device, 0, 3) == no_tag && RUN(h_nfp_Mount2, &g.device, 0) == no_tag);
+        assert(RUN(h_nfp_Unmount, &g.device) == no_tag && RUN(h_nfp_CommonInfo, out, &g.device) == no_tag);
+        assert(RUN(h_nfp_RegInfo, out, &g.device) == no_tag && RUN(h_nfp_Flush, &g.device) == no_tag);
+        assert(RUN(h_nfp_OpenArea, &g.device, 0x12345678) == no_tag);
+        uint64_t size[3] = {123,99,456}; assert(RUN(h_nfp_GetArea, out, size + 1, &g.device, sizeof out) == no_tag);
+        assert(!size[1] && size[0] == 123 && size[2] == 456 && RUN(h_nfp_GetArea, out, NULL, &g.device, 0) == no_tag);
+        assert(RUN(h_nfp_SetArea, &g.device, out, sizeof out) == no_tag && RUN(h_nfp_CreateArea, &g.device, out) == no_tag);
+        assert(RUN(h_nfp_RecreateArea, &g.device, out) == no_tag && RUN(h_nfp_Restorer, &g.device, out, out) == no_tag);
+        assert(RUN(h_nfp_Eraser, &g.device, out, out) == no_tag);
+        uint8_t changed[3] = {123,99,45}; assert(RUN(h_nfp_Nick, &g.device, changed + 1, out, out, out) == no_tag && !changed[1]);
+        changed[1] = 99; assert(RUN(h_nfp_Nick2, &g.device, changed + 1, out, out, out, out) == no_tag && !changed[1]);
+        assert(changed[0] == 123 && changed[2] == 45); unchanged(out, sizeof out);
+        RUN(h_nfc_Fini); assert(!RUN(h_nfc_State) && RUN(h_nfp_State, &g.device) == 1);
+        assert(!RUN(h_nfp_Stop, &g.device) && !RUN(h_nfp_State, &g.device));
+        RUN(h_nfp_Fini); assert(!RUN(h_nfp_LibState));
+        for (unsigned i = 0; i < 3; i++) { check_event(events + i, 0); close_event(events + i); }
+    }
+}
 int main(void) {
     alarm(20); svc_thread_main_init(); int h0, l0, o0; thr_counts(&h0, &l0, &o0);
-    shop(); profanity(); streamplay(); infrared(); network_clock(); other_contracts();
+    shop(); profanity(); streamplay(); infrared(); network_clock(); other_contracts(); nfc();
     const char *prefixes[] = {"_ZN2nn3ngc", "_ZN2nn10streamplay", "_ZN2nn8irsensor", "_ZN2nn3nsd",
         "_ZN2nn2ec19ShopServiceAccessor", "_ZNK2nn2ec19ShopServiceAccessor", "_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask",
-        "_ZN2nn7friends", "_ZN2nn4pctl", "_ZN2nn3err", "_ZN2nn3pdm"};
+        "_ZN2nn7friends", "_ZN2nn4pctl", "_ZN2nn3err", "_ZN2nn3pdm", "_ZN2nn3nfc", "_ZN2nn3nfp"};
     unsigned long bytes; const hle_force_ent *entries = DM_SECTION_DATA(swforce, &bytes); unsigned checked = 0;
     for (size_t i = 0; i < bytes / sizeof *entries; i++) {
         int wanted = 0; for (unsigned p = 0; p < sizeof prefixes / sizeof *prefixes; p++) wanted |= !strncmp(entries[i].name, prefixes[p], strlen(prefixes[p]));
