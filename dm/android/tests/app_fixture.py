@@ -13,7 +13,7 @@ from dm.tools.tests.test_nso import make_nso
 from dm.host.tests.gate.fixture import module
 
 
-def build(output, ndk, program=None, web=False):
+def build(output, ndk, program=None, web=False, display=False):
     output.mkdir(parents=True, exist_ok=True)
     tc = ndk / 'toolchains/llvm/prebuilt' / ('darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64') / 'bin'
     asm = output / 'entry.S'
@@ -43,6 +43,8 @@ def build(output, ndk, program=None, web=False):
                        web_appear='_ZN2nn3web17OfflineWebSession6AppearEv', web_exit='_ZN2nn3web17OfflineWebSession11RequestExitEv',
                        web_send='_ZN2nn3web17OfflineWebSession21TrySendContentMessageEPKcm',
                        web_recv='_ZN2nn3web17OfflineWebSession24TryReceiveContentMessageEPmPcm')
+    if display:
+        imports['vi_resolution'] = '_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE'
     source = '.section .start,"ax"\n.global _start\n_start: b nnMain\n.word 0\n'
     for name in imports:
         slot = name + '_import'
@@ -55,6 +57,7 @@ def build(output, ndk, program=None, web=False):
                     '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-nostdlib', '-static', '-Wl,--build-id=none', '-Wl,-T,' + str(script),
                     *(['-DAPP_PROGRAM=' + str(program)] if program is not None else []),
                     *(['-DAPP_WEB=1'] if web else []),
+                    *(['-DAPP_DISPLAY=1'] if display else []),
                     '-I' + str(ROOT / 'dm/gfx/nvn'), '-I' + str(ROOT / 'dm/gfx/nvn/include'), ROOT / 'dm/android/tests/app_guest.c', asm, '-o', elf], check=True)
     symbols = {}
     for line in subprocess.check_output([tc / 'llvm-nm', '-P', '--defined-only', elf], text=True).splitlines():
@@ -127,6 +130,7 @@ if __name__ == '__main__':
     p.add_argument('output', type=Path); p.add_argument('--ndk', type=Path, default=os.environ.get('ANDROID_NDK_HOME'))
     p.add_argument('--program-index', type=int, choices=(0, 1, 2), help='multi-program handoff fixture')
     p.add_argument('--web', action='store_true', help='offline HTML applet fixture')
+    p.add_argument('--display', action='store_true', help='display resolution service fixture')
     a = p.parse_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or --ndk')
-    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web)
+    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display)

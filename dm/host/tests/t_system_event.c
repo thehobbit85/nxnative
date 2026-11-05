@@ -141,6 +141,18 @@ static void copied_read_end(void) {
     uint64_t r[32] = {copy}; assert(svc_thread(0x16, r) && !r[0]);
     pthread_mutex_lock(&G); assert(!h_peek(copy, O_EVENT_R)); pthread_mutex_unlock(&G);
 }
+static void indirect_image(void) {
+    // ABI outputs are two size_t values, independently guarded. The display
+    // service reports linear RGBA8 storage rounded up to a 4 KiB boundary.
+    const int dimensions[][2] = {{1, 1}, {1280, 720}, {1920, 1080}, {0, 720}, {-1, 720}, {1280, -1}};
+    const size_t expected[] = {4096, 3686400, 8294400, 0, 0, 0};
+    for (unsigned i = 0; i < sizeof expected / sizeof *expected; i++) {
+        size_t size[3] = {123, 0, 456}, align[3] = {789, 0, 321};
+        assert(!h_vi_IndirectReq(size + 1, align + 1, dimensions[i][0], dimensions[i][1]));
+        assert(size[1] == expected[i] && align[1] == 4096);
+        assert(size[0] == 123 && size[2] == 456 && align[0] == 789 && align[2] == 321);
+    }
+}
 // Resolve exactly the SDK imports the service watcher calls, through the host's normal force-hook table.
 static void *purchase_hook(const char *name) {
     unsigned long bytes = 0;
@@ -183,8 +195,8 @@ static void purchased_event(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     struct rlimit lim = {0, 0}; setrlimit(RLIMIT_CORE, &lim);
-    void (*tests[])(void) = {duplicate, capacity, reuse, rebind, host_signal, copied_read_end, purchased_event};
-    const char *names[] = {"duplicate vi registration", "rapid vi event replacement", "storage and handle reuse by another service", "vi rebind at reused storage", "host skip and guest lazy binding", "copied read end of a bound event", "offline purchased-item watcher"};
+    void (*tests[])(void) = {duplicate, capacity, reuse, rebind, host_signal, copied_read_end, purchased_event, indirect_image};
+    const char *names[] = {"duplicate vi registration", "rapid vi event replacement", "storage and handle reuse by another service", "vi rebind at reused storage", "host skip and guest lazy binding", "copied read end of a bound event", "offline purchased-item watcher", "indirect layer image storage and output bounds"};
     int failed = 0;
     for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
         pid_t pid = fork(); assert(pid >= 0);

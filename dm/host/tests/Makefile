@@ -111,6 +111,17 @@ $(B)/t_symbols_android: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h ../and
 .PHONY: account-mii android-account-mii-build
 .PHONY: network android-network-build
 .PHONY: web android-web-build
+DISPLAY_SRC = t_display.c t_display_front.c
+DISPLAY_HEADERS = ../../gfx/hle_nv.c ../../gfx/hle_vi.c ../hle_nvdrv.c ../hle.h ../dm.h $(GAME_H)
+.PHONY: display android-display-build
+run: display
+display: $(B)/t_display
+	$(B)/t_display $(QUIET)
+$(B)/t_display: $(DISPLAY_SRC) $(DISPLAY_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ $(DISPLAY_SRC)
+android-display-build: $(B)/t_display_android
+$(B)/t_display_android: $(DISPLAY_SRC) $(DISPLAY_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $(DISPLAY_SRC)
 run: web
 web: $(B)/t_web $(B)/t_web_old
 	$(B)/t_web $(QUIET)
