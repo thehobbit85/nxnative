@@ -31,19 +31,61 @@ static uintptr_t watch_heap(size_t size) {
     __asm__ volatile("svc #0x01" : "+r"(x0), "+r"(x1) :: "memory");
     require(!x0); return x1;
 }
+static uintptr_t watch_region(unsigned id) {
+    register uint64_t x0 __asm__("x0") = 0, x1 __asm__("x1") = id;
+    register uint64_t x2 __asm__("x2") = 0, x3 __asm__("x3") = 0;
+    __asm__ volatile("svc #0x29" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) :: "memory");
+    require(!x0); return x1;
+}
+static void watch_physical(int commit, uintptr_t at) {
+    register uint64_t x0 __asm__("x0") = at, x1 __asm__("x1") = 0x4000;
+    if (commit) __asm__ volatile("svc #0x2c" : "+r"(x0), "+r"(x1) :: "memory");
+    else __asm__ volatile("svc #0x2d" : "+r"(x0), "+r"(x1) :: "memory");
+    require(!x0);
+}
+static void watch_stack_map(int commit, uintptr_t dst, uintptr_t src) {
+    register uint64_t x0 __asm__("x0") = dst, x1 __asm__("x1") = src, x2 __asm__("x2") = 0x4000;
+    if (commit) __asm__ volatile("svc #0x04" : "+r"(x0), "+r"(x1), "+r"(x2) :: "memory");
+    else __asm__ volatile("svc #0x05" : "+r"(x0), "+r"(x1), "+r"(x2) :: "memory");
+    require(!x0);
+}
+static uintptr_t watch_open(void) {
+    if (APP_WATCH == 1) return watch_heap(0x200000);
+    uintptr_t at = watch_region(2); watch_physical(1, at); return at;
+}
+static void watch_close(uintptr_t at) {
+    if (APP_WATCH == 1) watch_heap(0); else watch_physical(0, at);
+}
 static void check_watch(void) {
+    if (APP_WATCH == 3) {
+        uintptr_t heap = watch_heap(0x200000), stack = watch_region(14), at = stack + 0x80;
+        for (unsigned i = 0; i < 32; i++) {
+            *(volatile uint64_t *)(heap + 0x80) = 0x100 + i;
+            watch_stack_map(1, stack, heap); require(*(volatile uint64_t *)at == 0x100 + i);
+            uint64_t value = 0xabc000 + i;
+            __asm__ volatile("str %1, [%0]" :: "r"(at), "r"(value) : "memory");
+            watch_stack_map(0, stack, heap); require(*(volatile uint64_t *)(heap + 0x80) == value);
+            sleep_frame(); // exercise guest scheduling while the bounded diagnostic queue drains
+        }
+        watch_stack_map(1, stack, heap); uint64_t value = 0x7777;
+        __asm__ volatile("stlr %1, [%0]" :: "r"(at), "r"(value) : "memory");
+        require(*(volatile uint64_t *)at == value); value = 0xbeef;
+        __asm__ volatile("str %1, [%0]" :: "r"(at), "r"(value) : "memory");
+        watch_stack_map(0, stack, heap); require(*(volatile uint64_t *)(heap + 0x80) == value);
+        watch_heap(0); NOTE("WATCH_FIXTURE_DONE\n"); return;
+    }
     for (unsigned i = 0; i < 32; i++) {
-        uintptr_t at = watch_heap(0x200000) + 0x80; uint64_t value = 0xabc000 + i;
+        uintptr_t base = watch_open(), at = base + 0x80; uint64_t value = 0xabc000 + i;
         if (i & 1) require(*(volatile uint64_t *)at == 0);
         __asm__ volatile("str %1, [%0]" :: "r"(at), "r"(value) : "memory");
-        require(*(volatile uint64_t *)at == value); watch_heap(0);
+        require(*(volatile uint64_t *)at == value); watch_close(base);
     }
-    uintptr_t at = watch_heap(0x200000) + 0x80; uint64_t value = 0x7777;
+    uintptr_t base = watch_open(), at = base + 0x80; uint64_t value = 0x7777;
     __asm__ volatile("stlr %1, [%0]" :: "r"(at), "r"(value) : "memory");
-    require(*(volatile uint64_t *)at == value); watch_heap(0);
-    at = watch_heap(0x200000) + 0x80; value = 0xbeef;
+    require(*(volatile uint64_t *)at == value); watch_close(base);
+    base = watch_open(); at = base + 0x80; value = 0xbeef;
     __asm__ volatile("str %1, [%0]" :: "r"(at), "r"(value) : "memory");
-    require(*(volatile uint64_t *)at == value); watch_heap(0);
+    require(*(volatile uint64_t *)at == value); watch_close(base);
     NOTE("WATCH_FIXTURE_DONE\n");
 }
 #endif

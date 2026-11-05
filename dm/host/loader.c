@@ -555,7 +555,15 @@ static void nro_reset_data(module_t *m) {
         memcpy(m->pristine, m->base + m->data_off, m->pristine_len);
     }
     if (m->loads) {
+#ifdef __ANDROID__
+        if (dm_android_watch_copy) dm_android_watch_copy(m->base + m->data_off, m->pristine, m->pristine_len);
+        else
+#endif
         memcpy(m->base + m->data_off, m->pristine, m->pristine_len);
+#ifdef __ANDROID__
+        if (dm_android_watch_zero) dm_android_watch_zero(m->base + m->data_off + m->pristine_len, m->key_page_off - m->data_off - m->pristine_len);
+        else
+#endif
         memset(m->base + m->data_off + m->pristine_len, 0, m->key_page_off - m->data_off - m->pristine_len);
     }
 }

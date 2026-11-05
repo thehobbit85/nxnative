@@ -97,6 +97,20 @@ static int memory_mprotect(void *addr, size_t size, int prot) {
 }
 static void *memory_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset) {
     if (fail_mmap) { errno = ENOMEM; return MAP_FAILED; }
+#ifdef TEST_PAGE_16K
+    // A 4 KiB Android kernel may choose a merely 4 KiB-aligned reservation.
+    // Align fresh anonymous test reservations for logical 16 KiB owner tests.
+    if (!addr && (flags & MAP_ANON) && getpagesize() < 0x4000) {
+        size_t pg = 0x4000;
+        uint8_t *raw = mmap(NULL, size + pg, prot, flags, fd, offset);
+        if (raw == MAP_FAILED) return raw;
+        uintptr_t aligned = ((uintptr_t)raw + pg - 1) & ~(pg - 1);
+        size_t before = aligned - (uintptr_t)raw, after = pg - before;
+        if (before) assert(!munmap(raw, before));
+        if (after) assert(!munmap((void *)(aligned + size), after));
+        return (void *)aligned;
+    }
+#endif
     return mmap(addr, size, prot, flags, fd, offset);
 }
 static _Noreturn void memory_abort(void) {

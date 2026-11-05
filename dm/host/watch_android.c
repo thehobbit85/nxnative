@@ -16,7 +16,10 @@ static pthread_mutex_t g_watch_owner = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t g_watch_once = PTHREAD_ONCE_INIT;
 static uintptr_t g_watch_at, g_watch_offset;
 static size_t g_watch_len, g_watch_pg;
-static int g_watch_requested, g_watch_relative, g_watch_kind, g_watch_installed, g_watch_foreign;
+static int g_watch_requested, g_watch_kind, g_watch_installed, g_watch_foreign, g_watch_exposed;
+static unsigned g_watch_selector; // 0 = absolute, otherwise a DM_WATCH_* selector
+static char g_watch_module_name[16];
+static __thread unsigned g_watch_cpu_copy;
 static uint64_t g_watch_dczid;
 // 0 = armed, 1 = opening for an unsupported write, 2 = disabled, 3 = failure.
 static _Atomic int g_watch_disarmed;
@@ -32,7 +35,14 @@ static int g_watch_wake = -1;
 
 static void watch_configure(void) {
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
-    g_watch_relative = !strncmp(e, "heap+", 5); if (g_watch_relative) e += 5;
+    if (!strncmp(e, "heap+", 5)) { g_watch_selector = DM_WATCH_HEAP; e += 5; }
+    else if (!strncmp(e, "alias+", 6)) { g_watch_selector = DM_WATCH_ALIAS; e += 6; }
+    else if (!strncmp(e, "stack+", 6)) { g_watch_selector = DM_WATCH_STACK; e += 6; }
+    else if (strchr(e, ':')) {
+        const char *colon = strchr(e, ':'); size_t n = (size_t)(colon - e);
+        if (!n || n >= sizeof g_watch_module_name) die("DM_PROBE_WATCH: invalid module name");
+        memcpy(g_watch_module_name, e, n); g_watch_selector = DM_WATCH_MODULE; e = colon + 1;
+    }
     char *end; errno = 0; uint64_t at = strtoull(e, &end, 16);
     if (errno || end == e || *e == '-') die("DM_PROBE_WATCH: invalid address");
     uint64_t n = 8;
@@ -41,11 +51,11 @@ static void watch_configure(void) {
         if (errno || end == e || *e == '-') die("DM_PROBE_WATCH: invalid length");
     }
     g_watch_pg = (size_t)getpagesize();
-    if (*end || (!at && !g_watch_relative) || !n || n > g_watch_pg ||
+    if (*end || (!at && !g_watch_selector) || !n || n > g_watch_pg ||
         (at & (g_watch_pg - 1)) > g_watch_pg - n || at > UINTPTR_MAX - n)
-        die("DM_PROBE_WATCH format: [heap+]<address>[+<length>] (hex, within one host page)");
+        die("DM_PROBE_WATCH format: [heap+|alias+|stack+|module:]<address>[+<length>] (hex, within one host page)");
     g_watch_offset = at; g_watch_len = (size_t)n;
-    if (!g_watch_relative) g_watch_at = at;
+    if (!g_watch_selector) g_watch_at = at;
     __asm__ volatile("mrs %0, dczid_el0" : "=r"(g_watch_dczid));
     g_watch_requested = 1;
 }
@@ -165,15 +175,40 @@ static int watch_fault(void *address, int is_write, void *context) {
     dm_watch_page_release(&g_watch_page); errno = saved_errno; return handled;
 }
 static void watch_host_write(void *address, size_t size) {
+    if (g_watch_cpu_copy) return;
     if (!dm_watch_page_acquire(&g_watch_page)) return;
     if (watch_overlap((uintptr_t)address, size, (uintptr_t)g_watch_page.guest, g_watch_page.size) &&
         !watch_disarm(WATCH_HOST_WRITE, 0, NULL)) die("WATCH cannot prepare host write: errno=%d", errno);
     dm_watch_page_release(&g_watch_page);
 }
+void dm_android_watch_cpu_prepare(void *address, size_t size) {
+    g_watch_cpu_copy++;
+    dm_guest_write_prepare(address, size);
+    g_watch_cpu_copy--;
+}
+static size_t watch_copy_span(uintptr_t address, size_t size) {
+    uintptr_t page = g_watch_at & ~(g_watch_pg - 1);
+    if (address < page && page - address < size) return page - address;
+    if (address >= page && address - page < g_watch_pg && g_watch_pg - (address - page) < size)
+        return g_watch_pg - (address - page);
+    return size;
+}
+void dm_android_watch_copy(void *dst, const void *src, size_t size) {
+    if (!g_watch_requested || !g_watch_at) { memcpy(dst, src, size); return; }
+    // Metadata is resolved before guest execution; the caller owns allocation
+    // lifetime. Always write the guest view, keeping faults/dirty tracking live.
+    uint8_t *d = dst; const uint8_t *s = src;
+    while (size) { size_t n = watch_copy_span((uintptr_t)d, size); memcpy(d, s, n); d += n; s += n; size -= n; }
+}
+void dm_android_watch_zero(void *dst, size_t size) {
+    if (!g_watch_requested || !g_watch_at) { memset(dst, 0, size); return; }
+    uint8_t *d = dst;
+    while (size) { size_t n = watch_copy_span((uintptr_t)d, size); memset(d, 0, n); d += n; size -= n; }
+}
 static void watch_prepare(uintptr_t base) {
     int rc = dm_watch_page_prepare(&g_watch_page, (void *)base, g_watch_pg);
     if (rc) die("WATCH fresh backing failed (%d, errno=%d)", rc, errno);
-    atomic_store(&g_watch_disarmed, 0);
+    atomic_store(&g_watch_disarmed, 0); g_watch_exposed = 0;
 }
 static void watch_arm(void) {
     if (g_watch_installed && !g_watch_foreign) {
@@ -181,15 +216,21 @@ static void watch_arm(void) {
         LOG("WATCH %#llx armed generation=%llu (managed Android page)", (unsigned long long)g_watch_at, (unsigned long long)g_watch_page.generation);
     } else if (mprotect(g_watch_page.guest, g_watch_page.size, PROT_READ | PROT_WRITE)) die("WATCH open failed: errno=%d", errno);
 }
-void dm_android_watch_heap_reserved(void *heap, size_t size) {
+void dm_android_watch_region(unsigned kind, void *region, size_t size) {
     pthread_once(&g_watch_once, watch_configure); if (!g_watch_requested) return;
+    if (g_watch_selector && g_watch_selector != kind) return;
     pthread_mutex_lock(&g_watch_owner);
-    uintptr_t base = (uintptr_t)heap;
-    if (g_watch_relative) {
-        if (g_watch_offset > size || g_watch_len > size - g_watch_offset) die("DM_PROBE_WATCH: offset exceeds guest heap");
+    uintptr_t base = (uintptr_t)region;
+    if (g_watch_selector) {
+        if (g_watch_offset > size || g_watch_len > size - g_watch_offset) die("DM_PROBE_WATCH: offset exceeds selected guest region");
         g_watch_at = base + g_watch_offset;
     }
-    if (g_watch_at >= base && g_watch_at - base < size) g_watch_kind = 1;
+    if (g_watch_at >= base && g_watch_at - base < size) {
+        g_watch_kind = (int)kind;
+        // mem_init owns the entire fresh, inaccessible reservation here.
+        // Preparation must not expose it before its first successful commit.
+        watch_prepare(g_watch_at & ~(g_watch_pg - 1));
+    }
     pthread_mutex_unlock(&g_watch_owner);
 }
 int dm_android_watch_open(void *address, size_t size) {
@@ -198,28 +239,38 @@ int dm_android_watch_open(void *address, size_t size) {
     pthread_mutex_lock(&g_watch_owner);
     uintptr_t lo = (uintptr_t)address, target = g_watch_at & ~(g_watch_pg - 1);
     int rc = 0;
-    if (g_watch_kind != 1 || target < lo || size < g_watch_pg || target - lo > size - g_watch_pg)
+    if (!g_watch_kind || g_watch_kind == DM_WATCH_MODULE || target < lo || size < g_watch_pg || target - lo > size - g_watch_pg)
         rc = mprotect(address, size, PROT_READ | PROT_WRITE);
     else {
         if (!g_watch_page.alias) watch_prepare(target);
         if (target > lo) rc = mprotect(address, target - lo, PROT_READ | PROT_WRITE);
         uintptr_t end = lo + size, after = target + g_watch_pg;
         if (!rc && end > after) rc = mprotect((void *)after, end - after, PROT_READ | PROT_WRITE);
-        if (!rc) watch_arm();
+        if (!rc && !g_watch_exposed) { watch_arm(); g_watch_exposed = 1; }
     }
     pthread_mutex_unlock(&g_watch_owner); return rc;
 }
 void dm_android_watch_release(uintptr_t lo, uintptr_t hi) {
     if (!g_watch_requested) return;
     pthread_mutex_lock(&g_watch_owner);
-    if (g_watch_page.alias && (uintptr_t)g_watch_page.guest >= lo &&
-        (uintptr_t)g_watch_page.guest < hi && dm_watch_page_retire(&g_watch_page))
-        die("WATCH retire failed: errno=%d", errno);
+    if (g_watch_page.alias && hi >= lo && g_watch_page.size <= hi - lo &&
+        (uintptr_t)g_watch_page.guest >= lo && (uintptr_t)g_watch_page.guest - lo <= hi - lo - g_watch_page.size) {
+        if (dm_watch_page_retire(&g_watch_page)) die("WATCH retire failed: errno=%d", errno);
+        g_watch_exposed = 0;
+    }
     pthread_mutex_unlock(&g_watch_owner);
 }
 void dm_android_watch_module(module_t *m) {
-    pthread_once(&g_watch_once, watch_configure); if (!g_watch_requested || g_watch_relative) return;
-    uintptr_t base = (uintptr_t)m->base, target = g_watch_at & ~(g_watch_pg - 1);
+    pthread_once(&g_watch_once, watch_configure);
+    if (!g_watch_requested || (g_watch_selector && g_watch_selector != DM_WATCH_MODULE)) return;
+    uintptr_t base = (uintptr_t)m->base;
+    if (g_watch_selector == DM_WATCH_MODULE) {
+        if (strcmp(g_watch_module_name, m->name)) return;
+        if (g_watch_offset > m->size || g_watch_len > m->size - g_watch_offset || base > UINTPTR_MAX - g_watch_offset)
+            die("DM_PROBE_WATCH: offset exceeds module %s", m->name);
+        g_watch_at = base + g_watch_offset;
+    }
+    uintptr_t target = g_watch_at & ~(g_watch_pg - 1);
     if (g_watch_at < base || g_watch_at - base >= m->size) return;
     uint64_t lo = dm_text_seal_end(m, g_watch_pg), hi = m->size;
     if (m->patch_off > 0 && ((uint64_t)m->patch_off & ~UINT64_C(0x3fff)) < hi) hi = (uint64_t)m->patch_off & ~UINT64_C(0x3fff);
@@ -227,11 +278,12 @@ void dm_android_watch_module(module_t *m) {
     if (m->key_page_size && m->key_page_off < hi) hi = m->key_page_off;
     if (g_watch_at - base < m->data_off || target < base + lo || hi < g_watch_pg || target - base > hi - g_watch_pg)
         die("DM_PROBE_WATCH: target must be writable module data, outside text/patch/key pages");
-    pthread_mutex_lock(&g_watch_owner); g_watch_kind = 2;
+    pthread_mutex_lock(&g_watch_owner); g_watch_kind = DM_WATCH_MODULE;
     // The loader has not copied or published this fresh allocation yet.
     if (mprotect((void *)target, g_watch_pg, PROT_NONE)) die("WATCH fresh module reservation failed");
     watch_prepare(target);
     if (mprotect((void *)target, g_watch_pg, PROT_READ | PROT_WRITE)) die("WATCH module initialization failed");
+    g_watch_exposed = 1;
     pthread_mutex_unlock(&g_watch_owner);
 }
 void dm_android_watch_dirty_range(const void *address, size_t size,
@@ -247,7 +299,7 @@ void dm_android_watch_dirty_range(const void *address, size_t size,
         // can retain its descriptor/backing beyond a guest allocation's life.
         if (atomic_load(&g_watch_page.gate) & DM_WATCH_PAGE_OPEN) acknowledge(owner, target);
         dm_watch_page_quiesce(&g_watch_page);
-        if (g_watch_page.alias && !atomic_load(&g_watch_disarmed) &&
+        if (g_watch_page.alias && g_watch_exposed && !atomic_load(&g_watch_disarmed) &&
             mprotect(g_watch_page.guest, g_watch_page.size, PROT_READ | PROT_WRITE)) die("WATCH yield failed");
         LOG("WATCH disabled: renderer dirty tracker owns this page (restart to watch another page)");
     }
@@ -257,6 +309,8 @@ void dm_android_watch_install(void) {
     pthread_once(&g_watch_once, watch_configure); if (!g_watch_requested) return;
     pthread_mutex_lock(&g_watch_owner);
     if (g_watch_installed) { pthread_mutex_unlock(&g_watch_owner); return; }
+    if (g_watch_selector == DM_WATCH_MODULE && g_watch_kind != DM_WATCH_MODULE)
+        die("DM_PROBE_WATCH: module %s was not loaded", g_watch_module_name);
     g_watch_wake = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (g_watch_wake < 0) die("WATCH eventfd failed");
     pthread_t thread; int rc = pthread_create(&thread, NULL, watch_logger, NULL);
@@ -264,7 +318,7 @@ void dm_android_watch_install(void) {
     pthread_detach(thread);
     dm_fault_hook_register(watch_fault); dm_guest_write_prep_register(watch_host_write);
     g_watch_installed = 1;
-    if (g_watch_page.alias) watch_arm();
-    else LOG("WATCH waiting for managed guest heap/module data; arbitrary host allocations are unsupported");
+    if (g_watch_page.alias && g_watch_exposed) watch_arm();
+    else LOG("WATCH waiting for a managed guest allocation/commit; arbitrary host allocations are unsupported");
     pthread_mutex_unlock(&g_watch_owner);
 }
