@@ -322,6 +322,15 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// Leave explicit-LOD/gradient sample offsets for an exact downstream
+        /// lowering instead of approximating them by normalized coordinates.
+        /// </summary>
+        bool QueryHostPreservesExplicitTextureSampleOffsets()
+        {
+            return false;
+        }
+
+        /// <summary>
         /// Queries host support scaled vertex formats, where a integer value is converted to floating-point.
         /// </summary>
         /// <returns>True if the host support scaled vertex formats, false otherwise</returns>

@@ -57,7 +57,7 @@ For a prepared folder, the standalone wrapper below remains available. It contai
 
 Before SDK compilation, the packer checks the native library's ELF64/AArch64 shared-library header, the Android `main` module and rewrite metadata, shader/descriptor file pairs, and explicitly supplied asset paths. It rejects an output path that would overwrite an input or signing key. These are packaging checks; they do not qualify every shader stage or dynamic-loader behavior.
 
-Export retries retain compiled Metal libraries in `shader/vk-metallib`, keyed by their contents and compiler settings. They still translate and validate fresh Vulkan SPIR-V: the complete translation cache stays isolated from Apple jobs, whose texture operations can differ.
+Export retries retain compiled Metal libraries in `shader/vk-metallib.db`, keyed by their contents and compiler settings. Each capture uses a private SQLite translation cache, so retries still translate and validate fresh Vulkan SPIR-V independently of Apple jobs, whose texture operations can differ.
 
 ```sh
 python3 scripts/build_android.py <title-ID> <prepared-folder> <output.apk> --bundle

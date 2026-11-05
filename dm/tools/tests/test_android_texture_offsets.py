@@ -47,15 +47,19 @@ class TextureOffsets(unittest.TestCase):
                     samples = [i for i in vk.decode(raw)[1] if vk.opcode(i) in (87, 88)]
                     self.assertTrue(samples)
                     has_offset = any(len(i) > 5 and i[5] & 0x10 for i in samples)
-                    self.assertEqual(has_offset, target is None)
+                    # Preserve the sample offset until the exact Android
+                    # lowering; coordinate displacement loses mip semantics.
+                    self.assertTrue(has_offset)
                     prepared = work / 'prepared.spv'
                     prepared.write_bytes(vk.export_spirv(raw, shutil.which('spirv-opt')))
                     check = subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', prepared], capture_output=True, text=True)
-                    if target:
-                        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
-                    else:
-                        self.assertNotEqual(check.returncode, 0)
-                        self.assertIn('Offset', check.stderr)
+                    self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+                    # The preserved source remains illegal for direct Vulkan
+                    # use, distinguishing preservation from dropping offsets.
+                    prepared.write_bytes(vk.prepare_spirv(raw))
+                    original = subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', prepared], capture_output=True, text=True)
+                    self.assertNotEqual(original.returncode, 0)
+                    self.assertIn('Offset', original.stderr)
 
 
 if __name__ == '__main__':
