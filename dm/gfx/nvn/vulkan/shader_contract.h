@@ -7,6 +7,7 @@
 #include <string.h>
 #include "geometry_contract.h"
 #include "meshstage_contract.h"
+#include "resource_contract.h"
 
 // Raster-discard vertex capture: the geometry ABI plus two helper bindings.
 typedef struct { uint32_t output_binding, control_binding; } dm_vk_capture;
@@ -113,6 +114,7 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
     dm_vk_feedback feedback = {0};
     dm_vk_geometry geometry = {0};
     dm_vk_meshstage mesh = {0};
+    unsigned bindings = 0;
     for (size_t at = 0; at < length;) {
         const char *line = text + at, *end = memchr(line, '\n', length - at);
         size_t n = end ? (size_t)(end - line) : length - at;
@@ -162,8 +164,13 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
         } else if (n >= 6 && (!memcmp(line, "meshv ", 6) || !memcmp(line, "meshp ", 6))) {
             const char *error = dm_vk_meshstage_map(line, n, line[4] == 'v', &mesh);
             if (error) return error;
+        } else if (n >= 2 && !memcmp(line, "b ", 2)) {
+            if (++bindings > DM_VK_MAX_BINDINGS) return "too many resource bindings";
+            dm_vk_resource_shape shape;
+            const char *error = dm_vk_resource_line(line, n, &shape);
+            if (error) return error;
         } else if (!((n >= 3 && !memcmp(line, "tg ", 3)) || (n >= 3 && !memcmp(line, "c1 ", 3)) ||
-                     (n >= 4 && !memcmp(line, "vin ", 4)) || (n >= 2 && !memcmp(line, "b ", 2)))) {
+                     (n >= 4 && !memcmp(line, "vin ", 4)))) {
             return "unknown shader sidecar record";
         }
     }

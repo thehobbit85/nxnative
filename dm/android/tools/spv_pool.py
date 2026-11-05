@@ -2,38 +2,22 @@
 import struct
 
 from dm.android.tools.spv_capture import Module, instruction
-from dm.android.tools.spv_module import opcode, string_operand
+from dm.android.tools.spv_module import opcode, string_operand, pointer_operands
+from dm.android.tools.spv_resources import MAX_BINDINGS
 
 COUNTS = {'tex_pool': 1 << 20, 'samp_pool': 1 << 12}
-
-
-def pointer_operands(x):
-    # Operand positions that can carry a whole descriptor-array pointer.
-    # Do not scan literals: e.g. a composite index or a line number may happen
-    # to equal the variable's ID without referring to that variable at all.
-    op = opcode(x)
-    if op in (61, 83, 124): return x[3:4]
-    if op in (62, 63, 64, 401, 402, 403): return x[1:3] if op < 400 else x[3:5]
-    if op in (65, 66, 67, 70): return x[3:4]
-    if op == 57: return x[4:]
-    if op == 59: return x[4:5]
-    if op == 169: return x[4:6]
-    if op == 245: return x[3::2]
-    if op == 254: return x[1:2]
-    if op == 12: return x[5:]
-    return ()
 
 
 def fields(binding):
     kind = binding['kind']
     if kind == 'pool_bounds':
         count = binding.get('reg')
-        if binding['type'] != 'ubo' or binding['count'] != 1 or type(count) is not int or not 1 <= count <= 63:
+        if binding['type'] != 'ubo' or binding['count'] != 1 or type(count) is not int or not 1 <= count < MAX_BINDINGS:
             raise ValueError('invalid descriptor pool bounds block')
     if kind not in COUNTS: return ()
     slot = binding.get('pool_slot')
     if (binding['count'] != COUNTS[kind] or binding.get('runtime') is not True or
-            type(slot) is not int or not 0 <= slot < 63 or
+            type(slot) is not int or not 0 <= slot < MAX_BINDINGS - 1 or
             binding['type'] != ('tex' if kind == 'tex_pool' else 'samp')):
         raise ValueError('invalid runtime descriptor pool')
     return ('runtime=1', f'pool_slot={slot}')
@@ -58,7 +42,7 @@ def lower(data, reflection):
         slot = len(pools); runtime = m.ty(29, array[2]); pointer = m.ty(32, 0, runtime)
         pools[x[2]] = dict(slot=slot, name=name)
         m.declarations.append(instruction(59, pointer, x[2], 0))
-    if len(pools) != len(resources) or not pools or len(descriptors) >= 64:
+    if len(pools) != len(resources) or not pools or len(descriptors) >= MAX_BINDINGS:
         raise ValueError('incomplete or oversized descriptor pool interface')
     # SPIRV-Cross numbers a binding after a whole million-element array. The
     # sidecar follows these compact bindings; guest sources remain unchanged.

@@ -19,9 +19,9 @@ class ResourcePoolMetadata(unittest.TestCase):
     def test_metadata_requires_runtime_range_and_valid_bounds_slot(self):
         good = dict(kind='tex_pool', type='tex', count=1048576, runtime=True, pool_slot=0)
         self.assertEqual(spv_pool.fields(good), ('runtime=1', 'pool_slot=0'))
-        for changes in ({'runtime': False}, {'count': 32}, {'type': 'cis'}, {'pool_slot': -1}, {'pool_slot': 63}, {'pool_slot': True}):
+        for changes in ({'runtime': False}, {'count': 32}, {'type': 'cis'}, {'pool_slot': -1}, {'pool_slot': 127}, {'pool_slot': True}):
             with self.subTest(changes=changes), self.assertRaises(ValueError): spv_pool.fields(dict(good, **changes))
-        for count in (None, False, 0, 64):
+        for count in (None, False, 0, 128):
             with self.subTest(count=count), self.assertRaises(ValueError):
                 spv_pool.fields(dict(kind='pool_bounds', type='ubo', count=1, reg=count))
 
