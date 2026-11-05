@@ -1248,12 +1248,14 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         int nw = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;
         int64_t r = 0;
         if (type != 0) {
-            int32_t nv = val + 1;
+            // Horizon modifies a 32-bit word. Unsigned arithmetic preserves
+            // its wraparound without signed-overflow undefined behaviour.
+            uint32_t nv = (uint32_t)val + 1u;
             if (type == 2) {
-                // Waking all (count <= 0) with waiters subtracts 2, not 1 (mesosphere KAddressArbiter::SignalAndModifyByWaitingCountIfEqual; Ryujinx and yuzu agree).
-                // It used to subtract 1: Unity's (Engage) job fences decide from this value whether jobs are done, waiters were let through early, and the particle geometry job disagreed with the main thread's counts and wrote out of bounds (indices into texture objects, writes to a null pointer).
-                if (cnt <= 0) nv = nw > 0 ? val - 2 : val + 1;
-                else nv = nw == 0 ? val + 1 : nw <= cnt ? val - 1 : val;
+                // Waking every waiter decrements once, just as a positive
+                // count that covers the queue does (Mesosphere KAddressArbiter).
+                if (cnt <= 0) nv = nw > 0 ? (uint32_t)val - 1u : (uint32_t)val + 1u;
+                else nv = nw == 0 ? (uint32_t)val + 1u : nw <= cnt ? (uint32_t)val - 1u : (uint32_t)val;
             }
             uint32_t e = (uint32_t)val;
             if (!cas32(addr, &e, (uint32_t)nv)) r = R_BAD_STATE;

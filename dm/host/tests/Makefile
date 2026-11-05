@@ -404,6 +404,17 @@ $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) |
 $(B)/t_condvar_old: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -DDM_TEST_HOOKS -DDM_TEST_CV_OLD_ORDER -I.. $(GINC) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
 .PHONY: android-sync-build
+run: svc-contracts
+.PHONY: svc-contracts android-svc-contracts-build
+SVC_CONTRACT_SRC = t_svc_contracts.c t_condvar_stub.c
+SVC_CONTRACT_HEADERS = ../hle_thread.c ../thread_snapshot.h ../dm_uc.h ../host_memory.h ../dm.h $(GAME_H)
+svc-contracts: $(B)/t_svc_contracts
+	$(B)/t_svc_contracts $(QUIET)
+$(B)/t_svc_contracts: $(SVC_CONTRACT_SRC) $(SVC_CONTRACT_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_THREAD_ENTER -I.. $(GINC) -o $@ $(SVC_CONTRACT_SRC)
+android-svc-contracts-build: $(B)/t_svc_contracts_android
+$(B)/t_svc_contracts_android: $(SVC_CONTRACT_SRC) $(SVC_CONTRACT_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -DDM_TEST_THREAD_ENTER -I.. -I../../android/compat $(GINC) -o $@ $(SVC_CONTRACT_SRC)
 ANDROID_SYNC_TESTS = t_condvar t_condvar_old t_pollwait t_system_event
 ANDROID_SYNC_FLAGS = -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC)
 ANDROID_SYNC_HEADERS = ../hle_thread.c ../hle.h ../dm.h ../host_memory.h $(GAME_H)

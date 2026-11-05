@@ -131,8 +131,8 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 ### `SignalToAddress` type 2 with count ≤ 0
 
 - **Symptom:** none seen; found while investigating [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md)'s demo crash, which it did not change (that was the address-space shortage, [Size-aligned regions exhaust the alias address space](memory.md#size-aligned-regions-exhaust-the-alias-address-space)).
-- **Cause:** for `SignalToAddress` type 2 (`SignalAndModifyByWaitingCountIfEqual`) with count ≤ 0 and waiters present, the new value is `value − 2`, not `value − 1` (mesosphere `KAddressArbiter`; Ryujinx and yuzu agree). The host had −1.
-- **Fix:** the host writes `value − 2`, the specified behaviour.
+- **Cause (corrected November 2026):** the earlier change to `value − 2` relied on an incorrect source attribution. [Mesosphere 1.7.1's address arbiter](https://github.com/Atmosphere-NX/Atmosphere/blob/1.7.1/libraries/libmesosphere/source/kern_k_address_arbiter.cpp#L106) decrements once when count ≤ 0 and waiters exist, as it does when a positive count covers the queue; 1.6.2 and current source agree. The old comment's claimed connection to Engage's crash was also incorrect.
+- **Fix:** restore `value − 1`. The shared Mac/Android `t_svc_contracts.c` independently checks all three signal types against empty, one-waiter and three-waiter queues, six counts, failed value comparisons and priority/FIFO selection. It also exposed signed integer overflow at the word boundaries: arithmetic now uses unsigned 32-bit values before the atomic update, preserving wraparound. Both failures were reproduced with synthetic SVC tests; no new Engage gameplay result is claimed.
 
 ### `WaitForAddress` type 3: 64-bit wait if equal
 

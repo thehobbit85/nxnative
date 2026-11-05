@@ -37,11 +37,12 @@ struct dm_flags g_flag;
 void hlecount_svc(int num) { (void)num; }
 int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
-void guest_clock_read_wait(void) {}
+static unsigned clock_waits, entropy_calls, used_threads;
+void guest_clock_read_wait(void) { clock_waits++; }
 uint64_t guest_ns(void) { return 0; }
-uint64_t guest_ticks(void) { return 0; }
-uint64_t dm_entropy64(void) { return 0; }
-int thr_limit_used(void) { return 0; }
+uint64_t guest_ticks(void) { return UINT64_C(0x123456789abc); }
+uint64_t dm_entropy64(void) { return UINT64_C(0xabcd123400000000) + ++entropy_calls; }
+int thr_limit_used(void) { return (int)used_threads; }
 int dm_ue_heap_owns(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } // No Unreal allocator is installed in this fixture.
 // This fixture calls the SVC dispatcher directly, without rewritten guest gates.
 void gate_obs_set(int id, void (*fn)(uint64_t *, int)) { (void)id; (void)fn; }
@@ -117,6 +118,41 @@ static uint64_t map(uintptr_t d, uintptr_t s, size_t n) { return call(4, d, s, n
 static uint64_t unmap(uintptr_t d, uintptr_t s, size_t n) { return call(5, d, s, n); }
 static uint64_t info(unsigned id) {
     uint64_t r[31] = {0, id}; svc_dispatch(0x29, r, 0); assert(!r[0]); return r[1];
+}
+static void info_contracts(void) {
+    const struct { unsigned id; uint64_t expected; } cases[] = {
+        {0, 7}, {1, 0}, {2, alias}, {3, g_alias_cap}, {4, heap}, {5, g_heap_cap},
+        {6, DM_GAME_APP_POOL}, {7, DM_GAME_MEM_USED}, {8, 0}, {9, 0}, {10, 0},
+        {12, (uintptr_t)g_as}, {13, g_reserve}, {14, stack}, {15, DM_GAME_MEM_STACK},
+        {16, DM_GAME_SYS_RESOURCE}, {17, DM_GAME_SYS_RESOURCE ? 0x400000 : 0}, {18, DM_GAME_PROGRAM_ID},
+        {19, 0}, {21, DM_GAME_APP_POOL}, {22, DM_GAME_MEM_USED}, {23, 1}, {24, 96},
+        {25, 0}, {26, 0}, {27, 0}, {28, 0}, {29, 0}, {30, 0}, {31, 0}, {32, 0}, {33, 0x1000},
+        {63, 0}, {UINT32_MAX, 0},
+    };
+    // Check program-ID environment selection before the parent's cached first read.
+    pid_t child = fork(); assert(child >= 0);
+    if (!child) {
+        assert(!setenv("DM_PROGRAM_ID", "123456789abcdef", 1));
+        assert(info(18) == UINT64_C(0x123456789abcdef));
+        assert(!setenv("DM_PROGRAM_ID", "2", 1)); assert(info(18) == UINT64_C(0x123456789abcdef)); _exit(0);
+    }
+    int status; assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+    unsetenv("DM_PROGRAM_ID");
+    for (unsigned k = 0; k < sizeof cases / sizeof *cases; k++) assert(info(cases[k].id) == cases[k].expected);
+    assert(info(11) == UINT64_C(0xabcd123400000001) && info(11) == UINT64_C(0xabcd123400000002));
+    uintptr_t exception = info(20); assert(exception && !(exception & 0xfff) && info(20) == exception);
+    *(uint64_t *)(exception + 0x1c0) = 0x9876; assert(*(uint64_t *)(info(20) + 0x1c0) == 0x9876);
+    used_threads = 94; assert(info(24) == 2); used_threads = 96; assert(!info(24)); used_threads = 200; assert(!info(24)); used_threads = 0;
+    uint64_t r[31], before[31];
+    for (unsigned i = 0; i < 31; i++) r[i] = before[i] = 0xabc000 + i;
+    svc_dispatch(0x1e, r, 0); assert(!r[0] && r[1] == UINT64_C(0x123456789abc) && clock_waits == 1);
+    assert(!memcmp(r + 2, before + 2, sizeof r - 2 * sizeof *r));
+    const unsigned unknown[] = {0x7e, 0xff};
+    for (unsigned k = 0; k < 2; k++) {
+        memcpy(r, before, sizeof r); svc_dispatch(unknown[k], r, 0);
+        assert(!r[0] && !memcmp(r + 1, before + 1, sizeof r - sizeof *r));
+    }
+    puts("GetInfo IDs 0-33, unknown IDs, tick/entropy forwarding and SVC fallback register contracts passed");
 }
 typedef struct { uint64_t base, size; uint32_t state, attr, perm, ipc, device, reserved; } memory_info;
 static memory_info query(uintptr_t a) {
@@ -593,10 +629,13 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
-#if !TARGET_OS_IPHONE
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
+#else
+    if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == DM_GAME_MEM_ALIAS);
 #endif
     layout_order();
+    info_contracts();
 #ifdef __ANDROID__
     worker_stacks();
 #endif
