@@ -1,8 +1,68 @@
 """Vulkan lowering for the shared geometry-as-compute helpers."""
+import json
+from pathlib import Path
+import shutil
 import struct
 
 from dm.android.tools.spv_capture import Module, instruction
 from dm.android.tools.spv_module import decode, opcode, string_operand
+from dm.gfx.tools import dmsh_geometry
+
+
+def product_family(key):
+    return [key] + [key + f'.{kind}{t}' for kind in ('g', 'gc', 'gr') for t in range(5)]
+
+
+def compute_jobs(jobs):
+    return [dict(job, key=job['key'] + f'.gc{t}', geometry_topology=t)
+            for job in jobs if job.get('stage') == 'gs' and 'geometry_topology' not in job for t in range(5)]
+
+
+def geometry_line(geometry, stage):
+    """Bound the pinned translator's output map and SPH allocation dimensions."""
+    if not isinstance(geometry, dict): raise ValueError('invalid geometry helper metadata')
+    role = geometry.get('role')
+    if role not in ('compute', 'reader') or stage != ('cs' if role == 'compute' else 'vs'):
+        raise ValueError('invalid geometry helper stage or fields')
+    fields: list[int] = []
+    for key in ('topology', 'stride', 'vertices', 'invocations', 'output', 'index_stride'):
+        value = geometry.get(key)
+        if type(value) is not int: raise ValueError('invalid geometry helper field')
+        fields.append(value)
+    t, stride, vertices, invocations, output, indices = fields
+    if (not 0 <= t < 5 or not 5 <= stride <= 144 or not 1 <= vertices <= 4095 or
+            not 1 <= invocations <= 255 or output not in (1, 6, 7) or indices != vertices * 2):
+        raise ValueError('invalid geometry helper output layout')
+    return 'geometry ' + role + ' ' + ' '.join(map(str, fields))
+
+
+def capture_helpers(jobs, directory, captured):
+    """Keep separate compute/reader products even when Apple's route folds a GS."""
+    for job in jobs:
+        key, t = job['key'], job['geometry_topology']
+        res = json.loads((directory / (key + '.res.json')).read_text())
+        geometry = dict(dmsh_geometry.output_layout(Path(job['code']).read_bytes(), t),
+                        topology=t, stride=res['geometry_stride'])
+        for source, product, role in ((key, key, 'compute'), (key + '.reader', key.replace('.gc', '.gr'), 'reader')):
+            control = {k: job[k] for k in ('tf',) if k in job}
+            control['geometry'] = dict(geometry, role=role)
+            geometry_line(control['geometry'], 'cs' if role == 'compute' else 'vs')
+            raw = directory / (source + '.spv')
+            dmsh_geometry.flatten_sets(raw)
+            shutil.copyfile(raw, captured / (product + '.spv'))
+            (captured / (product + '.control.json')).write_text(json.dumps(control))
+
+
+def helper_reflection(base, control):
+    reflection = {k: v for k, v in base.items() if k not in ('geometry', 'geometry_reader')}
+    reflection.update(control)
+    if 'geometry' in control:
+        role = control['geometry']['role']
+        reflection.update(stage='cs' if role == 'compute' else 'vs', vertex_inputs=[],
+                          threadgroup_size=[32, 1, 1] if role == 'compute' else None)
+        reflection['bindings'] = base['bindings'] + [dict(msl_name=name, kind='geometry', reg=reg)
+                                                    for name, reg in dmsh_geometry.HELPERS.items()]
+    return reflection
 
 
 def topology_buffer(data):

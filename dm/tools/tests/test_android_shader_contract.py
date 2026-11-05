@@ -13,6 +13,24 @@ import spv_android as vk
 
 
 class ShaderContract(unittest.TestCase):
+    def test_geometry_helper_metadata_distinguishes_execution_and_logical_stages(self):
+        geometry = dict(role='compute', topology=3, stride=134, vertices=3, invocations=1, output=7, index_stride=6)
+        self.assertIn('geometry compute 3 134 3 1 7 6\n', vk.vk_txt(dict(stage='cs', bindings=[], geometry=geometry)))
+        self.assertIn('geometry reader 3 134 3 1 7 6\n', vk.vk_txt(dict(stage='vs', bindings=[], geometry=dict(geometry, role='reader'))))
+        for field, value in [('role', 'unknown'), ('topology', 5), ('stride', 145), ('stride', 4),
+                             ('vertices', 0), ('vertices', 4096), ('invocations', 256), ('output', 5),
+                             ('index_stride', 5), ('topology', True)]:
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'geometry'):
+                vk.vk_txt(dict(stage='cs', bindings=[], geometry=dict(geometry, **{field: value})))
+        with self.assertRaisesRegex(ValueError, 'geometry'):
+            vk.vk_txt(dict(stage='vs', bindings=[], geometry=geometry))
+        for malformed in (None, [], 'compute'):
+            with self.subTest(geometry=malformed), self.assertRaisesRegex(ValueError, 'geometry'):
+                vk.vk_txt(dict(stage='cs', bindings=[], geometry=malformed))
+        with self.assertRaisesRegex(ValueError, 'geometry'):
+            vk.vk_txt(dict(stage='vs', bindings=[], geometry=dict(geometry, role='reader'),
+                           capture=dict(words=144, control_words=6, output_binding=1, control_binding=2)))
+
     def test_capture_interface_is_bounded_and_vertex_only(self):
         valid = dict(words=144, control_words=6, output_binding=7, control_binding=8)
         self.assertIn('capture 144 6 7 8\n', vk.vk_txt(dict(stage='vs', bindings=[], capture=valid)))
@@ -70,6 +88,15 @@ class NativeShaderContract(unittest.TestCase):
             # Hand-checked requirements: one compute entry point and Shader capability.
             good = b'schema 2\ntarget vulkan1.1\nstage cs\ncap 1\ntg 1 1 1\n'
             self.assertIsNone(check(good, len(good), data, len(data) // 4))
+            geometry = good + b'geometry compute 3 134 3 1 7 6\n'
+            self.assertIsNone(check(geometry, len(geometry), data, len(data) // 4))
+            feedback_geometry = geometry + b'tf 0 4 0 1\n'
+            self.assertIsNone(check(feedback_geometry, len(feedback_geometry), data, len(data) // 4))
+            for bad in (geometry + b'geometry compute 3 134 3 1 7 6\n', geometry.replace(b'compute 3', b'reader 3'),
+                        geometry.replace(b'3 134', b'5 134'), geometry.replace(b'134', b'145'),
+                        geometry.replace(b'3 1 7 6', b'3 1 7 5'), geometry.replace(b'3 1 7 6', b'3 0 7 6'),
+                        geometry.replace(b'3 1 7 6', b'4096 1 7 8192'), geometry.replace(b'3 1 7 6', b'3 256 7 6')):
+                self.assertIsNotNone(check(bad, len(bad), data, len(data) // 4))
             exported = vk.vk_txt(dict(stage='cs', bindings=[], **vk.requirements(data))).encode()
             self.assertIsNone(check(exported, len(exported), data, len(data) // 4))
             for bad in (good.replace(b'2', b'9', 1), good.replace(b'vulkan1.1', b'vulkan9.9'),
@@ -89,6 +116,10 @@ class NativeShaderContract(unittest.TestCase):
             self.assertIsNone(check(good, len(good), data, len(data) // 4))
             for bad in (good + b'tf 0 4 0 1\n', good.replace(b'tf 0 20', b'tf 0 16')):
                 self.assertIsNotNone(check(bad, len(bad), data, len(data) // 4))
+            reader = good + b'geometry reader 3 134 3 1 7 6\n'
+            self.assertIsNone(check(reader, len(reader), data, len(data) // 4))
+            mixed = reader + b'capture 144 6 0 1\n'
+            self.assertIsNotNone(check(mixed, len(mixed), data, len(data) // 4))
             capture = good + b'capture 144 6 0 1\n'
             self.assertIsNone(check(capture, len(capture), data, len(data) // 4))
             for bad in (capture + b'capture 144 6 0 1\n', capture.replace(b'144 6', b'143 6'),

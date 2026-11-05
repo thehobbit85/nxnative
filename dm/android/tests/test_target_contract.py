@@ -117,6 +117,10 @@ class TargetContract(unittest.TestCase):
                 before = contract.host_contract(a.profile)
                 helper.write_text('schema = 2\n')
                 self.assertNotEqual(before, contract.host_contract(a.profile))
+                before = contract.host_contract(a.profile)
+                native = repo / 'dm/gfx/nvn/vulkan/geometry_contract.h'; native.parent.mkdir()
+                native.write_text('// changed geometry consumer\n')
+                self.assertNotEqual(before, contract.host_contract(a.profile))
 
     def test_exporter_uses_the_selected_environment_profile(self):
         with tempfile.TemporaryDirectory() as tmp:

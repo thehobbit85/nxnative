@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from dm.android.tools.target_contract import shader_contract, stamp_export
 from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
+from dm.android.tools import spv_geometry
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
 
@@ -31,12 +32,13 @@ def capture(args):
     variants = [dict(item, key=item['key'] + f'.g{topology}', input_topology=topology)
                 for item in jobs if item.get('stage') == 'gs' and 'geometry_topology' not in item
                 for topology in range(5)]
+    helpers = spv_geometry.compute_jobs(jobs)
     # The shared chain also translates through SPIR-V for Metal, whose allowed
     # operations differ. Request the existing translator's Vulkan lowering without
     # changing the caller's job or the normal Apple translation target.
     with tempfile.TemporaryDirectory(prefix='vk-job-', dir=directory) as temporary:
         targeted = Path(temporary) / 'jobs.json'
-        targeted.write_text(json.dumps([dict(item, host_target='vulkan') for item in jobs + variants]))
+        targeted.write_text(json.dumps([dict(item, host_target='vulkan') for item in jobs + variants + helpers]))
         subprocess.run([XLATE, targeted, directory], check=True)
     for item in jobs + variants:
         name = item['key'] + '.spv'
@@ -47,6 +49,7 @@ def capture(args):
             # interleaved outputs or an attribute captured into several buffers.
             control = {key: item[key] for key in ('tf',) if key in item}
             (Path(os.environ['DMSH_SPV_CAPTURE']) / (item['key'] + '.control.json')).write_text(json.dumps(control))
+    spv_geometry.capture_helpers(helpers, directory, Path(os.environ['DMSH_SPV_CAPTURE']))
     return 0
 
 
@@ -212,8 +215,11 @@ def vk_txt(meta):
         lines.append('tg ' + ' '.join(map(str, meta['tg'])))
     if meta.get('c1'):
         lines.append(f"c1 {meta['c1']}")
+    if 'geometry' in meta:
+        if 'capture' in meta: raise ValueError('geometry helper cannot also be vertex capture')
+        lines.append(spv_geometry.geometry_line(meta['geometry'], meta['stage']))
     if 'tf' in meta:
-        lines += feedback_rows(meta['tf'], meta['stage'])
+        lines += feedback_rows(meta['tf'], 'gs' if 'geometry' in meta else meta['stage'])
     if 'capture' in meta:
         capture = meta['capture']
         values = [capture.get(k) for k in ('words', 'control_words', 'output_binding', 'control_binding')]
@@ -263,7 +269,7 @@ def read_prepared(directory, producer):
         if (record['schema'] != 1 or record['target'] != 'vulkan1.1' or
                 record['producer'] != hashlib.sha256(producer).hexdigest() or
                 not isinstance(keys, list) or not keys or
-                any(not isinstance(k, str) or not re.fullmatch(r'[0-9a-f]{16}(?:\.g[0-4])?', k) for k in keys) or
+                any(not isinstance(k, str) or not re.fullmatch(r'[0-9a-f]{16}(?:\.(?:g|gc|gr)[0-4])?', k) for k in keys) or
                 keys != sorted(set(keys))):
             raise ValueError('incompatible producer, target or shader keys')
         expected = {k + suffix for k in keys for suffix in ('.spv', '.reflection.json')}
@@ -279,13 +285,13 @@ def read_prepared(directory, producer):
         for key in keys:
             reflection = json.loads(snapshots[key + '.reflection.json'])
             validate_stage(snapshots[key + '.spv'], reflection)
-            validate_topology(key, snapshots[key + '.spv'])
-            if reflection['stage'] == 'gs':
+            validate_topology(key, snapshots[key + '.spv'], reflection)
+            if reflection['stage'] == 'gs' or 'geometry' in reflection:
                 base = key[:16]
-                if (not {base, *(base + f'.g{t}' for t in range(5))} <= set(keys) or
+                if (not set(spv_geometry.product_family(base)) <= set(keys) or
                         json.loads(snapshots[base + '.reflection.json'])['stage'] != 'gs'):
                     raise ValueError('incomplete geometry topology variants')
-            elif len(key) != 16:
+            elif len(key) != 16 and 'geometry' not in reflection:
                 raise ValueError('topology variant is not a geometry stage')
         return keys, snapshots
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -301,10 +307,24 @@ def validate_stage(data, reflection):
     if len(entries) != 1 or len(entries[0]) < 4 or stages.get(entries[0][1]) != reflection.get('stage'):
         raise ValueError('shader stage metadata does not match SPIR-V')
     if 'tf' in reflection:
-        feedback_rows(reflection['tf'], reflection['stage'])
+        feedback_rows(reflection['tf'], 'gs' if 'geometry' in reflection else reflection['stage'])
+    if 'geometry' in reflection:
+        spv_geometry.geometry_line(reflection['geometry'], reflection['stage'])
+        if reflection['geometry']['role'] == 'compute':
+            sizes = [list(i[3:]) for i in instructions if opcode(i) == 16 and i[2] == 17]
+            if sizes != [reflection.get('threadgroup_size')]:
+                raise ValueError('geometry compute group size differs from module')
 
 
-def validate_topology(key, data):
+def validate_topology(key, data, reflection):
+    helper = re.fullmatch(r'[0-9a-f]{16}\.(gc|gr)([0-4])', key)
+    if helper:
+        geometry = reflection.get('geometry', {})
+        if (geometry.get('role') != ('compute' if helper[1] == 'gc' else 'reader') or
+                geometry.get('topology') != int(helper[2])):
+            raise ValueError('geometry helper topology or role differs from product name')
+    elif 'geometry' in reflection:
+        raise ValueError('geometry helper metadata on ordinary product')
     if re.fullmatch(r'[0-9a-f]{16}\.g[0-4]', key):
         _, instructions = decode(data)
         modes = [i[2] for i in instructions if opcode(i) == 16 and len(i) > 2 and 19 <= i[2] <= 23]
@@ -314,12 +334,15 @@ def validate_topology(key, data):
 
 def write_stage(key, raw, refl, destination, validator, optimizer):
     binary = destination / (key + '.spv')
+    if 'geometry' in refl:
+        role = refl['geometry']['role']
+        raw = spv_geometry.topology_buffer(raw) if role == 'compute' else spv_geometry.viewport_mask_reader(raw)
     data = export_spirv(raw, optimizer)
     validate_stage(data, refl)
-    validate_topology(key, data)
+    validate_topology(key, data, refl)
     binary.write_bytes(data)
     subprocess.run([validator, '--target-env', 'vulkan1.1', binary], check=True)
-    meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads', 'tf') if k in refl}
+    meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads', 'tf', 'geometry') if k in refl}
     try:
         bindings = vk_reflect(data, refl)
     except ValueError as exc:
@@ -327,7 +350,7 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
     meta.update(key=key, tg=refl.get('threadgroup_size') if refl['stage'] == 'cs' else None,
                 bindings=bindings, **requirements(data))
     (destination / (key + '.vk.txt')).write_text(vk_txt(meta))
-    if refl['stage'] == 'vs':
+    if refl['stage'] == 'vs' and 'geometry' not in refl:
         try:
             captured, control = geometry_capture(data)
         except ValueError as exc:
@@ -407,10 +430,11 @@ def export(pkg, keys, out, *, prepare_only=False):
         stage_counts = collections.Counter()
         products = []
         for key in keys:
-            refl = json.loads((libraries / (key + '_b.json')).read_text())
-            refl.update(json.loads((captured / (key + '.control.json')).read_text()))
-            family = [key] + ([key + f'.g{t}' for t in range(5)] if refl['stage'] == 'gs' else [])
+            base = json.loads((libraries / (key + '_b.json')).read_text())
+            family = spv_geometry.product_family(key) if base['stage'] == 'gs' else [key]
             for product in family:
+                control = json.loads((captured / (product + '.control.json')).read_text())
+                refl = spv_geometry.helper_reflection(base, control)
                 spv = captured / (product + '.spv')
                 if prepare_only:
                     validate_stage(spv.read_bytes(), refl)
