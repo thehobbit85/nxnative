@@ -124,17 +124,22 @@ static struct { void *self, *game, *host; } font_work[FONT_ENGINES];
 HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj", "a work buffer the stand-in font fits in; the engine itself stays in the SDK", void, h_font_Initialize, void *self, void *buf, unsigned size) {
     static void (*init)(void *, void *, unsigned);
     if (!init) init = guest_sym("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj");
+    pthread_mutex_lock(&font_mu);
+    int i = 0;
+    while (i < FONT_ENGINES && font_work[i].self && font_work[i].self != self) i++;
     if (size < FONT_WORK_MIN) {
-        pthread_mutex_lock(&font_mu);
-        int i = 0;
-        while (i < FONT_ENGINES && font_work[i].self && font_work[i].self != self) i++;
         if (i < FONT_ENGINES) {
             if (!font_work[i].host && !(font_work[i].host = malloc(FONT_WORK_MIN))) die("font engine work memory");
             font_work[i].self = self; font_work[i].game = buf;
             buf = font_work[i].host; size = FONT_WORK_MIN;
         } else LOG("[RED] more than %d font engines with a small work buffer: this one keeps the game's", FONT_ENGINES);
-        pthread_mutex_unlock(&font_mu);
+    } else if (i < FONT_ENGINES && font_work[i].self == self) {
+        // Reinitialization may use a different, adequate game allocation. The old
+        // small buffer is no longer owned by this engine; ask the SDK for its
+        // current buffer below. Retain our bounded host block for later reuse.
+        font_work[i].game = NULL;
     }
+    pthread_mutex_unlock(&font_mu);
     init(self, buf, size);
 }
 HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv", "the game's own buffer, also when the engine runs on host memory", void *, h_font_WorkBuffer, void *self) {
