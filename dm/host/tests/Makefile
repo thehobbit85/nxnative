@@ -23,6 +23,10 @@ GAME_H = ../gen/$(GAME)/game_profile.h
 run: watch-decode
 .PHONY: watch-decode android-watch-decode-build
 .PHONY: android-watch-page-build
+.PHONY: android-watch-store-build
+android-watch-store-build: $(B)/t_watch_store_android
+$(B)/t_watch_store_android: t_watch_store.c ../watch_store.h ../watch_page.h ../watch_decode.h ../dm_uc.h | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -pthread -o $@ $<
 android-watch-page-build: $(B)/t_watch_page_android
 $(B)/t_watch_page_android: t_watch_page.c ../watch_page.h | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -pthread -o $@ $<
