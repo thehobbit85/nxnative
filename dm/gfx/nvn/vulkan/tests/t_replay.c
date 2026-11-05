@@ -13,6 +13,8 @@ uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); r
 uint64_t guest_ns(void) { return now_ns(); }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
+static prog_t driver_c2_program = {.nstage = 1};
+static prog_t c2_sample_program = {.nstage = 2};
 static prog_t alias_program = {.nstage = 1};
 static prog_t texel_program = {.nstage = 1};
 static prog_t texel_graphics_program = {.nstage = 2};
@@ -33,6 +35,8 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &c2_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x51 : 0x35; return 1; }
+    if (p == &driver_c2_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x50; return 1; }
     for (int i = 0; i < 3; i++) if (p == &split_program[i]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x4d+i : 0x35; return 1; }
     if (p == &uniform_storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x4b + stage; return 1; }
     if (p == &texel_graphics_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x49 : 0x4a; return 1; }
@@ -1272,7 +1276,10 @@ static void typed_graphics(void) {
 }
 #include "uniform_storage.inc"
 #include "split_handle.inc"
+#include "driver_c2.inc"
 int main(void) {
+    if (getenv("DM_VK_TEST_C2")) { driver_c2(); c2_sample(); return 0; }
+    driver_c2(); c2_sample();
     if (getenv("DM_VK_TEST_SPLIT_HANDLES")) { split_handles(); return 0; }
     split_handles();
     if (getenv("DM_VK_TEST_UNIFORM_STORAGE")) { uniform_storage(); return 0; }

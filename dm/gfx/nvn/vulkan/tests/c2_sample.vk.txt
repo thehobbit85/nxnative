@@ -1,0 +1,2 @@
+stage ps
+b 0 cis 1 tex 34 -1 samp_id 980 view=1 num=0
