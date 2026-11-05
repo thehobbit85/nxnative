@@ -2515,7 +2515,7 @@ def android_shader_tool_inputs(repo, env):
     files.update((repo / 'dm/gfx/tools').glob('*.metal'))
     files.update(repo / p for p in ('dm/gfx/nvn/dmsh_chain.h', 'dm/gfx/nvn/dmsh_abi.h',
                                    'dm/gfx/nvn/vulkan/shader_contract.h', 'dm/gfx/nvn/vulkan/geometry_contract.h',
-                                   'dm/gfx/nvn/vulkan/meshstage_contract.h'))
+                                   'dm/gfx/nvn/vulkan/meshstage_contract.h', 'dm/gfx/nvn/vulkan/uniform_address.h'))
     # All bundled runtime dependencies matter, including Spv.Generator.dll.
     binaries = repo / 'dm/gfx/tools/dmsh_xlate_bin'
     files.update(p for p in binaries.rglob('*') if p.is_file())

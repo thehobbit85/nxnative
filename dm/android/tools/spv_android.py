@@ -162,7 +162,7 @@ def export_spirv(data, optimizer):
 
 
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
-RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'img', 'sbuf', 'tbuf', 'ubo_ptr',
+RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'img', 'sbuf', 'sbuf_ubo', 'tbuf', 'ubo_ptr',
                   'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh'}
 
 

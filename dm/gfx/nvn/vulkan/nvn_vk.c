@@ -20,6 +20,7 @@
 #include "spv_draw_parameters.h"
 #include "spv_buffer_bias.h"
 #include "shader_contract.h"
+#include "uniform_address.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -997,7 +998,7 @@ static VkSampler samp_get(int sid) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
 static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
@@ -1271,7 +1272,7 @@ static shader_t *shader_get(const uint8_t md[8]) {
             e->type = !strcmp(ty, "ubo") ? BT_UBO : !strcmp(ty, "ssbo") ? BT_SSBO : !strcmp(ty, "cis") ? BT_CIS : !strcmp(ty, "tbuf") ? BT_TBUF : !strcmp(ty, "utb") ? BT_UTB :
                       !strcmp(ty, "stb") ? BT_STB : !strcmp(ty, "simg") ? BT_SIMG : !strcmp(ty, "tex") ? BT_TEX : BT_SAMP;
             e->kind = !strcmp(kind, "cbuf") ? K_CBUF : !strcmp(kind, "c1") ? K_C1 : !strcmp(kind, "support") ? K_SUPPORT : !strcmp(kind, "drvcb") ? K_DRVCB : !strcmp(kind, "tex") ? K_TEX :
-                      !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : !strcmp(kind, "tex_ubo") ? K_TEXU : K_UNK;
+                      !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "sbuf_ubo") ? K_SBUFU : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : !strcmp(kind, "tex_ubo") ? K_TEXU : K_UNK;
             e->skind = sampler_source(sk);
             if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
             if (e->kind == K_UNK) LOG("[RED] vk: shader %s binding %d has kind %s, not implemented (reads zero)", key, b, kind);
@@ -1687,11 +1688,20 @@ static void uniform_ready(int stage, int reg, int64_t off, uint32_t count) {
     if (size > u->size - (uint64_t)off) size = u->size - (uint64_t)off;
     cpu_ready(u->addr + off, size);
 }
+static uint64_t uniform_storage_field(int stage, int reg, int64_t off) {
+    if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return 0;
+    const p_bind_buf *u = &S.ubo[stage][reg];
+    return dm_vk_uniform_address_field(u->addr, u->size, off);
+}
 static void shader_cpu_ready(const shader_t *s, int stage) {
     if (!s) return;
     for (int i = 0; i < s->nb; i++) {
         const sbind *b = &s->b[i];
         if (b->kind == K_TEXU) uniform_ready(stage, b->reg, b->off, b->count);
+        if (b->kind == K_SBUFU) {
+            uint64_t field = uniform_storage_field(stage, b->reg, b->off);
+            if (field) cpu_ready(field, 8);
+        }
         if (b->skind == S_SAMPU) uniform_ready(stage, b->sreg, b->soff, b->count);
     }
 }
@@ -1845,6 +1855,10 @@ static p_bind_buf storage_binding(const sbind *b, int stage) {
     if (b->type != BT_SSBO || b->count != 1 || b->reg < 0 || b->reg >= 16) return u;
     if (b->kind == K_SBUF) u = S.ssbo[stage][b->reg];
     else if (b->kind == K_UBOP) u = S.ubo[stage][b->reg];
+    else if (b->kind == K_SBUFU) {
+        uint64_t field = uniform_storage_field(stage, b->reg, b->off);
+        if (field && mtl_addr(field, 8, NULL, NULL)) memcpy(&u.addr, (const void *)(uintptr_t)field, 8);
+    }
     // Like Metal's sbw_len: size zero means the rest of the registered pool,
     // not an empty descriptor. Resolve it afresh after pool replacement.
     if (u.addr && !u.size) u.size = pool_remaining(u.addr);
@@ -2041,7 +2055,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                 else if (u->addr && n) { VkDeviceSize o = copy_in(u->addr, n, 256); if (o != VK_WHOLE_SIZE) *d = (VkDescriptorBufferInfo){C->ring, o, n}; }
             } else if (b->kind == K_C1 && s->c1_len) { VkDeviceSize o = ring_put(s->c1, s->c1_len, 256); if (o != VK_WHOLE_SIZE) *d = (VkDescriptorBufferInfo){C->ring, o, s->c1_len}; }
             else if (b->kind == K_SUPPORT) *d = (VkDescriptorBufferInfo){g_support_buf, 0, 4096};
-            else if ((b->kind == K_SBUF || b->kind == K_UBOP) && b->reg >= 0 && b->reg < 16) {   // preserve prior GPU writes, then publish writable bindings after the command
+            else if ((b->kind == K_SBUF || b->kind == K_UBOP || b->kind == K_SBUFU) && b->reg >= 0 && b->reg < 16) {   // preserve prior GPU writes, then publish writable bindings after the command
                 p_bind_buf range = storage_binding(b, stage);
                 const p_bind_buf *u = &range;
                 VkBuffer gb = VK_NULL_HANDLE; VkDeviceSize go = 0; uint8_t *gp = NULL;
