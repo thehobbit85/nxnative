@@ -123,6 +123,17 @@ $(B)/t_friends_android: $(FRIENDS_SRC) $(FRIENDS_HEADERS) | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -DDM_TEST_GUEST_SYMBOLS -I.. -I../../android/compat $(GINC) -o $@ $(FRIENDS_SRC)
 .PHONY: network android-network-build
 run: offline-services
+run: codec-host
+.PHONY: codec-host android-codec-host-build
+CODEC_HOST_HEADERS = ../hle_codec.c ../hle_os.c ../hle_sdkinit.c ../hle.h ../dm.h $(GAME_H)
+codec-host: $(B)/t_codec_host
+	$(B)/t_codec_host random $(QUIET)
+	$(B)/t_codec_host det $(QUIET)
+$(B)/t_codec_host: t_codec_host.c $(CODEC_HOST_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ $<
+android-codec-host-build: $(B)/t_codec_host_android
+$(B)/t_codec_host_android: t_codec_host.c $(CODEC_HOST_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $<
 .PHONY: offline-services android-offline-services-build
 OFFLINE_SERVICES_SRC = t_offline_services.c ../hle_thread.c ../hle_bigstack.c ../hle_net.c
 OFFLINE_SERVICES_HEADERS = ../hle_misc.c ../hle_offline.c ../hle_sdk16.c ../hle.h ../dm.h ../thread_snapshot.h $(GAME_H)
