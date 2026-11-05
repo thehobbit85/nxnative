@@ -133,6 +133,15 @@ $(B)/t_friends_android: $(FRIENDS_SRC) $(FRIENDS_HEADERS) | $(B)
 .PHONY: network android-network-build
 run: offline-services
 run: codec-host
+run: libc-imports
+.PHONY: libc-imports android-libc-imports-build
+libc-imports: $(B)/t_libc_imports
+	$(B)/t_libc_imports
+$(B)/t_libc_imports: t_libc_imports.c ../hle_table.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. $(GINC) -o $@ $< -lm
+android-libc-imports-build: $(B)/t_libc_imports_android
+$(B)/t_libc_imports_android: t_libc_imports.c ../hle_table.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -I.. -I../../android/compat $(GINC) -o $@ $< -lm
 .PHONY: codec-host android-codec-host-build
 CODEC_HOST_HEADERS = ../hle_codec.c ../hle_os.c ../hle_sdkinit.c ../hle.h ../dm.h $(GAME_H)
 codec-host: $(B)/t_codec_host
