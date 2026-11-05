@@ -23,6 +23,7 @@ GAME_H = ../gen/$(GAME)/game_profile.h
 run: jit
 jit: $(B)/t_jit
 	$(B)/t_jit $(QUIET)
+	$(B)/t_jit "$(abspath $(B))/capture-$$$$" $(QUIET)
 JIT_HEADERS = ../loader.c ../hle_jit.c ../jit_memory.h ../hle.h ../dm.h $(GAME_H)
 $(B)/t_jit: t_jit.c $(JIT_HEADERS) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ $<

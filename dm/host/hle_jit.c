@@ -69,8 +69,7 @@ static int range_ok(const jit_range *r, uint64_t size) { return r->offset <= siz
 int dm_guest_as_contains(uintptr_t a);
 // A host address: in a module, the guest block, or the code / data / transfer memory of the environment (masked in the data words)
 static jit_env *g_jit_env;
-static int host_addr(uint64_t v) {
-    jit_env *e = g_jit_env;
+static int host_addr(const jit_env *e, uint64_t v) {
     if (e && ((v >= e->rx && v - e->rx < e->rx_size) || (v >= e->ro && v - e->ro < e->ro_size) || (v >= e->cfg.tmem.offset && v - e->cfg.tmem.offset < e->cfg.tmem.size))) return 1;
     return module_of((void *)(uintptr_t)v) || dm_guest_as_contains((uintptr_t)v);
 }
@@ -84,12 +83,12 @@ static void in_sha(const void *in, size_t n, uint8_t out[32]) {
     CC_SHA256(in, (CC_LONG)n, out);
 }
 // The data words that differ from run to run, masked: the offset asked for and host addresses. masked[] is what the capture stores
-static void data_mask(uint8_t masked[32], const jit_range *c0_in, const void *in, size_t in_size, const uint8_t d32[32], size_t data_size) {
+static void data_mask(const jit_env *e, uint8_t masked[32], const jit_range *c0_in, const void *in, size_t in_size, const uint8_t d32[32], size_t data_size) {
     uint64_t w[4]; memcpy(w, d32, 32);
     for (int k = 0; k < 4; k++) {
         uintptr_t v = (uintptr_t)w[k];
         if (8 * (size_t)k >= data_size) w[k] = 0;
-        else if (w[k] == c0_in->offset || (in && v >= (uintptr_t)in && v - (uintptr_t)in < in_size) || host_addr(w[k])) w[k] = ~0ull;
+        else if (w[k] == c0_in->offset || (in && v >= (uintptr_t)in && v - (uintptr_t)in < in_size) || host_addr(e, w[k])) w[k] = ~0ull;
     }
     memcpy(masked, w, 32);
 }
@@ -101,10 +100,10 @@ static uint8_t g_keydata[8][32]; static uint8_t g_keydata_set[8];
 // the code to be where it asked (Super Mario 64: entry = its own code pointer + offset, main+0x5256c, and it advances that pointer by the size, main+0x52640), so a request served
 // elsewhere in the image gets its entry offsets moved by the difference and a size of 0: the game then always asks at the same offset, below every such request in the image
 static struct { int set; uint32_t entries, count, size; } g_outcode[8];
-static void jit_key(char hx[33], uint64_t cmd, const jit_range *c0_in, const void *in, size_t in_size, const uint8_t d32[32], size_t data_size, const uint8_t ish[32]) {
+static void jit_key(const jit_env *e, char hx[33], uint64_t cmd, const jit_range *c0_in, const void *in, size_t in_size, const uint8_t d32[32], size_t data_size, const uint8_t ish[32]) {
     uint8_t w[32];
     if (cmd < 8 && g_keydata_set[cmd]) for (int k = 0; k < 32; k++) w[k] = (k < (int)data_size ? d32[k] : 0) & g_keydata[cmd][k];
-    else data_mask(w, c0_in, in, in_size, d32, data_size);
+    else data_mask(e, w, c0_in, in, in_size, d32, data_size);
     CC_SHA256_CTX c; CC_SHA256_Init(&c);
     CC_SHA256_Update(&c, &cmd, 8); uint64_t ds = data_size; CC_SHA256_Update(&c, &ds, 8); CC_SHA256_Update(&c, w, 32); CC_SHA256_Update(&c, ish, 32);
     uint8_t h[32]; CC_SHA256_Final(h, &c);
@@ -180,11 +179,11 @@ static void jit_map_image(uint8_t *at, const char *dir) {
     __builtin___clear_cache((char *)at, (char *)at + g_img_size);
 #endif
 }   // pre: a module's patch area in front of its base (patch_off < 0)
-static void jit_capture(jit_env *e, uint64_t cmd, const void *in, size_t in_size, const jit_range *c0_in, const uint8_t d32[32], size_t data_size, const void *out, size_t out_size,
+static void jit_capture_locked(jit_env *e, uint64_t cmd, const void *in, size_t in_size, const jit_range *c0_in, const uint8_t d32[32], size_t data_size, const void *out, size_t out_size,
                         int ret, const jit_range *o0, const jit_range *o1) {
     uint8_t ish[32]; in_sha(in, in_size, ish);
-    char key[33]; jit_key(key, cmd, c0_in, in, in_size, d32, data_size, ish);
-    uint8_t md[32]; data_mask(md, c0_in, in, in_size, d32, data_size);
+    char key[33]; jit_key(e, key, cmd, c0_in, in, in_size, d32, data_size, ish);
+    uint8_t md[32]; data_mask(e, md, c0_in, in, in_size, d32, data_size);
     char p[1024], t[1100]; snprintf(p, sizeof p, "%s/%s.jit", jit_capture_dir(), key);
     if (access(p, F_OK) == 0) return;
     jit_region r[g_nmod + 3]; uint32_t nr = 0;
@@ -205,6 +204,16 @@ static void jit_capture(jit_env *e, uint64_t cmd, const void *in, size_t in_size
     ok &= fclose(f) == 0;
     if (ok) rename(t, p); else unlink(t);   // whole files only: a capture run may be killed at any time
     static int n; if (n++ < 64) LOG("jit capture: command %llu → %s (%llu bytes of code)", (unsigned long long)cmd, key, (unsigned long long)o0->size);
+}
+static void jit_capture(jit_env *e, uint64_t cmd, const void *in, size_t in_size, const jit_range *c0_in, const uint8_t d32[32], size_t data_size, const void *out, size_t out_size,
+                        int ret, const jit_range *o0, const jit_range *o1) {
+    // Different JIT environments can produce the same key. Their own request
+    // locks protect snapshots, but publication and its PID-named temporary file
+    // need a common lock. Keep the first complete capture within this process.
+    static pthread_mutex_t publication = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&publication);
+    jit_capture_locked(e, cmd, in, in_size, c0_in, d32, data_size, out, out_size, ret, o0, o1);
+    pthread_mutex_unlock(&publication);
 }
 
 HLE_FORCE("_ZN2nn3jit10InitializeEv", "connects to the jit service; the host runs the plugin itself", void, h_jit_Initialize, void) { LOG("init takeover: jit::Initialize (no-op)"); }
@@ -297,7 +306,7 @@ HLE_FORCE("_ZN2nn3jit21GetJitEnvironmentInfoENS0_9JitHandleE", "where the code a
 static int jit_serve(jit_env *e, jit_range *c0_out, jit_range *c1_out, uint64_t cmd, const void *in, size_t in_size, const jit_range *c0_in, const uint8_t d32[32], size_t data_size,
                      void *out, size_t out_size) {
     uint8_t ish[32]; in_sha(in, in_size, ish);
-    char key[33]; jit_key(key, cmd, c0_in, in, in_size, d32, data_size, ish);
+    char key[33]; jit_key(e, key, cmd, c0_in, in, in_size, d32, data_size, ish);
     const jit_req *r = jit_find(key);
     static _Atomic unsigned long nserved, nmiss;
     if (!r) {
@@ -372,6 +381,9 @@ HLE_FORCE("_ZN2nn3jit12GenerateCodeEPNS0_9CodeRangeES2_NS0_9JitHandleEmPKvmRKS1_
     uint64_t dt = now_ns() - t0; unsigned c = cmd < 8 ? (unsigned)cmd : 0;
     uint64_t k = ++e->ncalls[c]; e->nbytes[c] += o0.size; e->ns[c] += dt;
     uint64_t bytes = e->nbytes[c], ns = e->ns[c];
+    // The capture reads the plugin's mutable code/data mappings. Keep it in
+    // the request's critical section, before another request can rewrite them.
+    if (!w && jit_capture_dir()) jit_capture(e, cmd, in, in_size, c0_in, d32, data_size, out, out_size, ret, &o0, &o1);
     pthread_mutex_unlock(&e->mu);
     if (k <= 16 || jit_log_all() || !(k & (k - 1)))
         LOG("jit::GenerateCode #%llu command %llu: in %p + %#zx, code in %#llx + %#llx, data %zu bytes %016llx %016llx, out %#zx → %d, code %#llx + %#llx, data %#llx + %#llx, %.2f ms (command %llu so far: %llu bytes, %.1f ms)",
@@ -381,7 +393,6 @@ HLE_FORCE("_ZN2nn3jit12GenerateCodeEPNS0_9CodeRangeES2_NS0_9JitHandleEmPKvmRKS1_
             (unsigned long long)cmd, (unsigned long long)bytes, ns / 1e6);
     if (w) { LOG("[RED] jit::GenerateCode: the plugin's wrapper failed (command %llu)", (unsigned long long)cmd); die("jit::GenerateCode failed (the SDK aborts)"); }
     if (ret) LOG("[RED] jit::GenerateCode command %llu: the plugin returned %d (the service fails the request)", (unsigned long long)cmd, ret);
-    if (jit_capture_dir()) jit_capture(e, cmd, in, in_size, c0_in, d32, data_size, out, out_size, ret, &o0, &o1);
     if (c0_out) *c0_out = o0;
     if (c1_out) *c1_out = o1;
     return ret;

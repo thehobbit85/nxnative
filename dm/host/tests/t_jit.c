@@ -1,7 +1,11 @@
 // The real nn::jit API, loader and code mappings, with a synthetic NRO plugin.
 // Plugin callbacks are compiled host functions; generated code is actual A64.
 #include "../loader.c"
+#include <dirent.h>
+static int capture_unlock(pthread_mutex_t *mu);
+#define pthread_mutex_unlock capture_unlock
 #include "../hle_jit.c"
+#undef pthread_mutex_unlock
 #include <assert.h>
 #include <stdatomic.h>
 #include <signal.h>
@@ -37,6 +41,17 @@ static uint8_t raw_nro[128];
 static int step, inits, finis;
 static jit_config active_cfg;
 static atomic_int requests;
+static pthread_mutex_t *capture_mutex;
+static _Thread_local int capture_pause;
+static atomic_int capture_entered, capture_release;
+static int capture_unlock(pthread_mutex_t *mu) {
+    int result = pthread_mutex_unlock(mu);
+    if (mu == capture_mutex && capture_pause) {
+        capture_pause = 0; atomic_store(&capture_entered, 1);
+        while (!atomic_load(&capture_release)) sched_yield();
+    }
+    return result;
+}
 
 static void resident(uintptr_t address, int expected) {
 #ifdef __APPLE__
@@ -209,14 +224,99 @@ static void *concurrent_requests(void *arg) {
     }
     return NULL;
 }
-int main(void) {
-    alarm(30); unsetenv("DM_JIT_SERVE"); unsetenv("DM_JIT_CAPTURE");
+static void *capture_writer(void *opaque) {
+    jit_env *env = opaque; capture_pause = 1;
+    jit_range ci = {0x100, 8}, di = {0x100, 4}, co = {0}, dout = {0};
+    uint32_t input = 59999, output = 0;
+    assert(!h_jit_Generate(&co, &dout, env, 1, &input, 4, &ci, &di, "abc", 3, &output, 4));
+    assert(output == input); return NULL;
+}
+static void capture_overwrite(jit_env *env) {
+    capture_mutex = &env->mu; pthread_t thread;
+    assert(!pthread_create(&thread, NULL, capture_writer, env));
+    while (!atomic_load(&capture_entered)) sched_yield();
+    generate(env, 0x100, 60000); // Same memory, a new request before A returns.
+    atomic_store(&capture_release, 1); assert(!pthread_join(thread, NULL));
+    capture_mutex = NULL;
+}
+static void capture_metadata(jit_env *env) {
+    generate(env, 0x100, 60001);
+    jit_env other = {0}; jit_env *saved = g_jit_env; g_jit_env = &other;
+    uint8_t data[32] = {0}; memcpy(data, &env->rx, 8);
+    uint32_t input = 60001; jit_range code = {0x100, 8}, ro = {0x100, 4};
+    // Capture must normalize addresses against its own environment even when
+    // another environment was created most recently.
+    jit_capture(env, 2, &input, 4, &code, data, 8, &input, 4, 0, &code, &ro);
+    g_jit_env = saved;
+}
+static atomic_int capture_workers;
+static void *capture_publish(void *opaque) {
+    jit_env *env = opaque;
+    atomic_fetch_add(&capture_workers, 1);
+    while (atomic_load(&capture_workers) != 2) sched_yield();
+    uint8_t data[32] = {0}; memcpy(data, &env->rx, 8);
+    uint32_t input = 60001; jit_range code = {0x100, 8}, ro = {0x100, 4};
+    for (unsigned command = 10; command < 138; command++) {
+        pthread_mutex_lock(&env->mu);
+        jit_capture(env, command, &input, 4, &code, data, 8, &input, 4, 0, &code, &ro);
+        pthread_mutex_unlock(&env->mu);
+    }
+    return NULL;
+}
+static void capture_environments(jit_env *env) {
+    // Independent environment locks do not serialize publication into the
+    // shared capture directory. Both producers target the same request keys.
+    jit_env peers[2]; pthread_t threads[2];
+    for (unsigned i = 0; i < 2; i++) {
+        peers[i] = *env; memset(&peers[i].mu, 0, sizeof peers[i].mu);
+        assert(!pthread_mutex_init(&peers[i].mu, NULL));
+        assert(!pthread_create(&threads[i], NULL, capture_publish, peers + i));
+    }
+    for (unsigned i = 0; i < 2; i++) { assert(!pthread_join(threads[i], NULL)); assert(!pthread_mutex_destroy(&peers[i].mu)); }
+}
+static void capture_retry(jit_env *env, const char *folder) {
+    char away[1024]; snprintf(away, sizeof away, "%s.away", folder);
+    assert(!rename(folder, away)); generate(env, 0x100, 60002);
+    assert(!rename(away, folder)); generate(env, 0x100, 60002);
+}
+static void check_captures(const char *folder) {
+    DIR *dir = opendir(folder); assert(dir); struct dirent *ent; unsigned checked = 0;
+    while ((ent = readdir(dir))) {
+        if (ent->d_name[0] == '.') continue;
+        assert(strlen(ent->d_name) == 36 && !strcmp(ent->d_name + 32, ".jit"));
+        char path[1024]; snprintf(path, sizeof path, "%s/%s", folder, ent->d_name);
+        FILE *file = fopen(path, "rb"); assert(file);
+        uint8_t header[184]; assert(fread(header, 1, sizeof header, file) == sizeof header && !memcmp(header, "DMJ5", 4));
+        uint32_t regions; memcpy(&regions, header + 180, 4);
+        assert(regions == 4 && !fseek(file, 40 * regions, SEEK_CUR));
+        uint64_t request_data_size; memcpy(&request_data_size, header + 32, 8);
+        if (request_data_size == 8) { uint64_t masked; memcpy(&masked, header + 72, 8); assert(masked == UINT64_MAX); }
+        int32_t result; memcpy(&result, header + 144, 4);
+        if (!result) {
+            uint64_t code_size, data_size, output_size;
+            memcpy(&code_size, header + 156, 8); memcpy(&data_size, header + 172, 8); memcpy(&output_size, header + 136, 8);
+            assert(code_size == 8 && data_size == 4 && output_size == 4);
+            uint32_t words[5]; assert(fread(words, 4, 5, file) == 5 && fgetc(file) == EOF);
+            // Independent DMJ5 payload oracle: emitted MOV W0,#input; RET,
+            // generated data, return buffer and original request all agree.
+            assert(words[0] == (0x52800000u | words[4] << 5) && words[1] == 0xd65f03c0u);
+            assert(words[2] == words[4] && words[3] == words[4]); checked++;
+        }
+        fclose(file); assert(!unlink(path));
+    }
+    closedir(dir); assert(checked >= 130 && !rmdir(folder));
+    printf("JIT capture: %u complete request/code/data snapshots survived concurrent overwrites\n", checked);
+}
+int main(int argc, char **argv) {
+    alarm(30); unsetenv("DM_JIT_SERVE");
+    if (argc == 2) { assert(!mkdir(argv[1], 0700)); setenv("DM_JIT_CAPTURE", argv[1], 1); }
+    else unsetenv("DM_JIT_CAPTURE");
     setup_plugin();
     void *work; assert(!posix_memalign(&work, REGION, WORK_SIZE));
     memset(work, 0x5a, WORK_SIZE);
     uint64_t cfg[] = {REGION, REGION};
     uint64_t plug[] = {0, 0, (uintptr_t)raw_nro, sizeof raw_nro, REGION};
-    for (int cycle = 0; cycle < 8; cycle++) {
+    for (int cycle = 0; cycle < (argc == 2 ? 1 : 8); cycle++) {
         h_jit_Initialize(); void *handle = NULL;
         assert(!h_jit_Create(&handle, cfg, plug, work, WORK_SIZE) && handle);
         jit_env *env = handle; jit_info info = h_jit_Info(env);
@@ -226,6 +326,7 @@ int main(void) {
 #ifdef __ANDROID__
         assert(active_cfg.sys_rx.offset != active_cfg.user_rx.offset);
 #endif
+        if (argc == 2) capture_overwrite(env);
         pthread_t threads[2]; producer producers[] = {{env, 1}, {env, 2}};
         for (int i = 0; i < 2; i++) assert(!pthread_create(&threads[i], NULL, concurrent_requests, &producers[i]));
         for (int i = 0; i < 2; i++) assert(!pthread_join(threads[i], NULL));
@@ -245,6 +346,7 @@ int main(void) {
             assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
         }
         uintptr_t rx = env->rx, rw = (uintptr_t)env->code.rw, ro = env->ro;
+        if (argc == 2) { capture_metadata(env); capture_environments(env); capture_retry(env, argv[1]); }
         // Guest joins users before destroying its handle; concurrent use after
         // Destroy is not a legal API lifetime and is deliberately not promised.
         h_jit_Destroy(env); h_jit_Finalize();
@@ -253,6 +355,7 @@ int main(void) {
         assert(((uint8_t *)work)[0] == 0x5a && ((uint8_t *)work)[WORK_SIZE - 1] == 0x5a);
     }
     h_jit_Destroy(NULL);
+    if (argc == 2) check_captures(argv[1]);
     free(work); free(g_mod->symh); free(g_mod->pristine); free(g_mod); free(g_loaded);
     puts("JIT guest API, cross-thread code replacement, serialized requests and repeated lifetimes: OK");
 }
