@@ -4,6 +4,8 @@ The README covers packing and playing. This page is for working on nxnative itse
 
 The [Android host and builder plan](android-parity.md) and [NVN-to-Vulkan parity matrix](nvn-vulkan-parity.md) track porting work against the Apple runtime.
 
+The standalone Vulkan vertex-capture fixture is built with `make -C dm/gfx/nvn/vulkan GAME=<id> B=<output> vertex-capture-fixture` (`CC` and `GLSLC` select the target compiler and shader tools). Run `t_shader_capture capture.spv [capture.bin]` on the target to check raw output words, range guards and overflow rejection. On a Mac, `vertex-capture-metal-test` uses the existing Apple capture helper and writes `metal-capture.bin`; compare it byte for byte with the optional Vulkan output. Use separate output directories for native and cross-built executables. These fixtures validate the [capture interface](reference/shaders.md#vulkan-vertex-capture-matches-metals-raw-output-words); production Android geometry and feedback replay remain unfinished.
+
 ## How it works
 
 | Part | State |
