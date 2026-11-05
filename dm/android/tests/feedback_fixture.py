@@ -10,6 +10,16 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def feedback_entry(source, layout, ordered):
+    builder = (ROOT / 'dm/gfx/tools/dmsh_build.py').read_text()
+    node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'vs_tf')
+    helper = ast.get_source_segment(builder, node)
+    assert helper is not None
+    namespace: dict[str, Any] = {'re': re, 'sys': sys, 'TF_SLOT': 8}
+    exec(helper, namespace)
+    return namespace['vs_tf'](source, layout, ordered)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
@@ -19,12 +29,6 @@ def main():
     subprocess.run(['glslc', '--target-env=vulkan1.1', ROOT / 'dm/gfx/nvn/vulkan/feedback_gather.comp', '-o', shader], check=True)
     subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', shader], check=True)
     if not args.metal: return
-    builder = (ROOT / 'dm/gfx/tools/dmsh_build.py').read_text()
-    node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'vs_tf')
-    helper = ast.get_source_segment(builder, node)
-    assert helper is not None
-    namespace: dict[str, Any] = {'re': re, 'sys': sys, 'TF_SLOT': 8}
-    exec(helper, namespace)
     fields = ''.join(f'    float4 a{i} [[user(locn{i})]];\n' for i in range(32))
     body = ''.join(f'    out.a{i} = as_type<float4>(uint4(source[vid*144+{16+i*4}], source[vid*144+{17+i*4}], '
                    f'source[vid*144+{18+i*4}], source[vid*144+{19+i*4}]));\n' for i in range(32))
@@ -37,7 +41,7 @@ def main():
     for layout, tf in enumerate(layouts):
         for ordered in (0, 1):
             path = work / f'feedback{layout}_{ordered}.metal'
-            path.write_text(source[:source.index('vertex main0_out')] + namespace['vs_tf'](source, tf, bool(ordered)))
+            path.write_text(source[:source.index('vertex main0_out')] + feedback_entry(source, tf, bool(ordered)))
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-w', '-fmodules-cache-path=' + str(work / 'modules'),
                             path, '-o', path.with_suffix('.air')], check=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', path.with_suffix('.air'), '-o', path.with_suffix('.metallib')], check=True)
