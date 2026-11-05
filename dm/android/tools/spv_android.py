@@ -19,6 +19,7 @@ from dm.android.tools.target_contract import shader_contract, stamp_export
 from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
 from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
+from dm.android.tools.spv_globalmem import global_memory_fields, lower_physical_addresses, drop_unused_int64
 from dm.android.tools import spv_geometry, spv_meshstage
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
@@ -158,13 +159,15 @@ def export_spirv(data, optimizer):
     # Keep live descriptor numbers and shader operations unchanged. The raw
     # translator can retain unused texture declarations that SPIRV-Cross drops
     # from Metal's argument buffer (Link's Awakening's uber shaders).
-    return subprocess.run([optimizer, '--eliminate-dead-variables', '-', '-o', '-'],
-                          input=prepare_spirv(data), stdout=subprocess.PIPE, check=True).stdout
+    data, physical = lower_physical_addresses(prepare_spirv(data))
+    result = subprocess.run([optimizer, '--eliminate-dead-variables', '-', '-o', '-'],
+                            input=data, stdout=subprocess.PIPE, check=True).stdout
+    return drop_unused_int64(result) if physical else result
 
 
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
 RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'tex_c2a', 'samp_c2a', 'img', 'sbuf', 'sbuf_ubo', 'tbuf', 'ubo_ptr',
-                  'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh'}
+                  'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh', 'gmem_map', 'gmem_log'}
 
 
 def requirements(data):
@@ -256,6 +259,7 @@ def vk_txt(meta):
         if sampler.get('kind') in ('samp_ubo', 'samp_c2a'):
             fields += (f"soff={sampler['off']}",)
         fields += driver_array_fields(bind)
+        fields += global_memory_fields(bind)
         for name in ('view', 'num'):
             if name in bind:
                 fields += (f'{name}={bind[name]}',)
