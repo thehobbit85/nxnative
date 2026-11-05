@@ -354,6 +354,22 @@ $(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | 
 run: $(B)/t_vi_history
 $(B)/t_vi_history: t_vi_history.c ../../gfx/hle_vi.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_vi_history.c
+run: font-resources
+.PHONY: font-resources android-font-resources-build
+font-resources: $(B)/t_font_resources
+	TMPDIR="$(abspath $(B))" $(B)/t_font_resources header $(QUIET)
+	TMPDIR="$(abspath $(B))" $(B)/t_font_resources old $(QUIET)
+	TMPDIR="$(abspath $(B))" $(B)/t_font_resources ttf $(QUIET)
+	TMPDIR="$(abspath $(B))" $(B)/t_font_resources fallback $(QUIET)
+$(B)/t_font_resources: t_font_resources.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ $<
+android-font-resources-build: $(B)/t_font_resources_android $(B)/t_shared_font_android $(B)/t_nfc_android
+$(B)/t_font_resources_android: t_font_resources.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -Wno-frame-address -I.. -I../../android/compat $(GINC) -o $@ $<
+$(B)/t_shared_font_android: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -Wno-frame-address -I.. -I../../android/compat $(GINC) -o $@ $<
+$(B)/t_nfc_android: t_nfc.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -Wno-frame-address -I.. -I../../android/compat $(GINC) -o $@ $<
 run: $(B)/t_nv
 $(B)/t_nv: t_nv.c ../../gfx/hle_nv.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_nv.c

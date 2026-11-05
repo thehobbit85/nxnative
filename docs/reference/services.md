@@ -881,6 +881,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `ScalableFontEngine::Initialize` gives an engine with less than 512 KB that much host memory (`hle_sdk16.c`, `FONT_WORK_MIN`). The game's buffer stays unused, and `GetPointerToWorkBuffer` still returns it, as the game frees that.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md) (SDK 20.5.17).
 
+### A reinitialized font engine returns its old work buffer
+
+- **Symptom:** after initializing an engine with a small game buffer and then with an adequate new buffer, `GetPointerToWorkBuffer` returns the first allocation. A caller freeing that result can free stale memory.
+- **Cause:** the host's small-buffer ownership record survived reinitialization with at least `FONT_WORK_MIN` bytes; only the SDK knew the new buffer.
+- **Fix:** clear the old game-buffer override when that engine switches to adequate storage, so the query forwards to the SDK. Keep the bounded host block for reuse if the engine later needs small-buffer expansion again.
+- **Found on:** synthetic host qualification (`t_font_resources.c`), reproduced on the shared Apple implementation and checked on Android; no commercial-game occurrence claimed. This extends the [font-memory mechanism](#a-shared-font-larger-than-the-games-font-engine-memory) introduced for [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
 ## C library, time and random numbers
 
 ### Time zone rules, calendar conversion and the network clock
