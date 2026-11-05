@@ -2,6 +2,7 @@
 #include "../dm.h"
 #include <assert.h>
 #include <signal.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -36,10 +37,33 @@ __asm__(".text\n.p2align 2\n"
         "sites: .rept 0x26\nstp x29,x30,[sp,#-16]!\n"
         "mrs x30,tpidr_el0\nldr x30,[x30,#16]\nldr x30,[x30,#32]\nblr x30\n"
         "ldp x29,x30,[sp],#16\nret\nnop\n.endr\n"
-        "spin: mov x9,#0x4567\nfmov d31,x9\nmov w10,#2\nstlr w10,[x0]\n"
+        "spin: mov x1,#0x2468\nmov x9,#0x4567\nfmov d31,x9\nmov w10,#2\nstlr w10,[x0]\n"
         "spin_begin: ldar w10,[x0]\ncmp w10,#3\nb.ne spin_begin\nspin_end: ret\n");
 static module_t synthetic;
 static _Atomic unsigned gate_visits[0x26];
+static void check_hitch(void) {
+    extern _Atomic uint64_t dm_present_ns;
+    int pipefd[2]; assert(!pipe(pipefd)); int previous = dup(STDERR_FILENO); assert(previous >= 0);
+    assert(dup2(pipefd[1], STDERR_FILENO) >= 0); close(pipefd[1]);
+    FILE *log = fdopen(pipefd[0], "r"); assert(log);
+    setvbuf(log, NULL, _IONBF, 0);
+    atomic_store(&dm_present_ns, now_ns() - 2000000);
+    char line[2048], evidence[8192] = {0}; size_t used = 0; int metadata = 0, found = 0;
+    struct pollfd ready = {.fd = pipefd[0], .events = POLLIN};
+    while (poll(&ready, 1, 1000) > 0 && fgets(line, sizeof line, log)) {
+        size_t n = strlen(line); if (n < sizeof evidence - used) { memcpy(evidence + used, line, n + 1); used += n; }
+        if (strstr(line, "prio 28 core 1") && strstr(line, "tid=")) metadata = 1;
+        if (strstr(line, "hitch thread snapshot") && strstr(line, "pc=probe-worker+") && strstr(line, "x1=0x2468")) { found = 1; break; }
+    }
+    assert(dup2(previous, STDERR_FILENO) >= 0); close(previous); fclose(log);
+    if (!metadata || !found) fputs(evidence, stderr);
+    assert(metadata && found);
+    // The final line reaches the pipe just before the inspector releases its
+    // ownership. Wait for a subsequent capture before testing another dump.
+    int dm_thread_snapshot_dump(const char *, int);
+    while (dm_thread_snapshot_dump("hitch-check", 1) < 0) sched_yield();
+    puts("Hitch diagnostic: live guest PC, x1 marker and native/Horizon thread correlation: OK");
+}
 static void check_live_dump(int unavailable) {
     void svc_thread_dump(void);
     int pipefd[2]; assert(!pipe(pipefd)); int previous = dup(STDERR_FILENO); assert(previous >= 0);
@@ -213,6 +237,7 @@ int main(void) {
     strcpy(synthetic.name, "probe-worker");
     g_mod = &synthetic; g_nmod = 1;
     guest_thread_init();
+    setenv("DM_HITCH_DUMP", "1", 1);
     main_tls = dm_slot_get(g_keytls); main_tlr = dm_slot_get(g_keytlr);
     main_thread = svc_thread_main_init();
     uint64_t r[32] = {0};
@@ -236,6 +261,7 @@ int main(void) {
     assert(svc_thread(0x33, r) && r[0] == 0xfa01); // The resumed SVC is still waiting; its old pause cannot leak.
     r[0] = write_end; call(0x11, r);
     while (atomic_load(&phases) != 2) sched_yield();
+    check_hitch();
     check_live_dump(0);
     pthread_t blocked; assert(!pthread_create(&blocked, NULL, blocked_sampler, NULL));
     while (!atomic_load(&blocked_sample)) sched_yield();
