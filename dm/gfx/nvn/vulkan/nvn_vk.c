@@ -1264,6 +1264,9 @@ static shader_t *shader_get(const uint8_t md[8]) {
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
         else if (sscanf(ln, "vin %d %d", &l, &t) == 2 && l >= 0 && l < 32) { s->vin[l] = (uint8_t)t; s->vin_mask |= 1u << l; }
         else if (sscanf(ln, "b %d %7s %d %15s %d %d %15s %d %3s", &b, ty, &cnt, kind, &reg, &off, sk, &sreg, access) >= 8 && s->nb < 64) {
+            if (!strcmp(kind, "tex_c2a") || !strcmp(kind, "samp_c2a") || !strcmp(sk, "samp_c2a")) {
+                LOG("[RED] vk: shader %s requires driver-table descriptor array replay", key); free(txt); free(spv); return s;
+            }
             sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = off; e->sreg = (int16_t)sreg;
             e->soff = e->view = -1;
             const char *field;

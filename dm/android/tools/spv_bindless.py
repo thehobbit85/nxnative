@@ -1,6 +1,22 @@
 """The scalar split-handle words already identified by shared reflection."""
 
 
+def driver_array_fields(binding):
+    sampler = binding if binding['type'] == 'samp' else binding.get('samp', {})
+    for source in (binding, sampler):
+        if source.get('kind') not in ('tex_c2a', 'samp_c2a'):
+            continue
+        offset = source.get('off')
+        if type(offset) is not int or not 0 <= offset <= 0x7fffffff:
+            raise ValueError('invalid driver array offset')
+    if sampler.get('kind') != 'samp_c2a' or 'soff' not in sampler:
+        return ()
+    offset = sampler['soff']
+    if type(offset) is not int or not 0 <= offset <= 0x7fffffff:
+        raise ValueError('invalid fixed driver sampler offset')
+    return (f'c2_or={offset}',)
+
+
 def split_handle_fields(binding):
     # The Apple array path reads handles at off+8*k without a second word.
     if binding['count'] != 1:
