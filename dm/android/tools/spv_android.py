@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from dm.android.tools.target_contract import shader_contract, stamp_export
 from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
-from dm.android.tools.spv_bindless import split_handle_fields
+from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
 from dm.android.tools import spv_geometry, spv_meshstage
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
@@ -163,7 +163,7 @@ def export_spirv(data, optimizer):
 
 
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
-RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'img', 'sbuf', 'sbuf_ubo', 'tbuf', 'ubo_ptr',
+RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'tex_c2a', 'samp_c2a', 'img', 'sbuf', 'sbuf_ubo', 'tbuf', 'ubo_ptr',
                   'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh'}
 
 
@@ -253,8 +253,9 @@ def vk_txt(meta):
                   offset, sampler.get('kind', '-'), -1 if sreg is None else sreg)
         if bind.get('read_only'):
             fields += ('ro',)
-        if sampler.get('kind') == 'samp_ubo':
+        if sampler.get('kind') in ('samp_ubo', 'samp_c2a'):
             fields += (f"soff={sampler['off']}",)
+        fields += driver_array_fields(bind)
         for name in ('view', 'num'):
             if name in bind:
                 fields += (f'{name}={bind[name]}',)
