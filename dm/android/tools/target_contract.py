@@ -35,6 +35,7 @@ def exporter_digest():
     paths = set((ROOT / 'dm/android/tools').rglob('*.py'))
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/shader_contract.h')
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/geometry_contract.h')
+    paths.add(ROOT / 'dm/gfx/nvn/vulkan/meshstage_contract.h')
     h = hashlib.sha256()
     for path in sorted(paths):
         h.update(str(path.relative_to(ROOT)).encode() + b'\0')

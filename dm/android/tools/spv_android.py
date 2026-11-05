@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from dm.android.tools.target_contract import shader_contract, stamp_export
 from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
-from dm.android.tools import spv_geometry
+from dm.android.tools import spv_geometry, spv_meshstage
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
 
@@ -47,7 +47,8 @@ def capture(args):
             # Keep the shared control-section decoder's complete feedback
             # layout. Metal reflection only records strides and cannot recover
             # interleaved outputs or an attribute captured into several buffers.
-            control = {key: item[key] for key in ('tf',) if key in item}
+            # Its task/mesh summary similarly omits the full output maps.
+            control = {key: item[key] for key in ('tf', 'mesh_stage', 'stage_memory') if key in item}
             (Path(os.environ['DMSH_SPV_CAPTURE']) / (item['key'] + '.control.json')).write_text(json.dumps(control))
     spv_geometry.capture_helpers(helpers, directory, Path(os.environ['DMSH_SPV_CAPTURE']))
     return 0
@@ -162,7 +163,7 @@ def export_spirv(data, optimizer):
 
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
 RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'img', 'sbuf', 'tbuf', 'ubo_ptr',
-                  'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry'}
+                  'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh'}
 
 
 def requirements(data):
@@ -198,7 +199,7 @@ def vk_txt(meta):
     """Encode the stage, vertex inputs and guest source of each descriptor for the Vulkan executor."""
     # Shader packages include unused geometry/tessellation programs. Preserve
     # their real stages; exporting assets does not imply runtime stage support.
-    if meta['stage'] not in ('vs', 'ps', 'cs', 'gs', 'hs', 'ds'):
+    if meta['stage'] not in ('vs', 'ps', 'cs', 'gs', 'hs', 'ds', 'ts', 'ms'):
         raise ValueError(f"unsupported Vulkan stage: {meta['stage']}")
     if meta.get('schema', 2) != 2:
         raise ValueError('incompatible Vulkan shader schema')
@@ -215,6 +216,10 @@ def vk_txt(meta):
         lines.append('tg ' + ' '.join(map(str, meta['tg'])))
     if meta.get('c1'):
         lines.append(f"c1 {meta['c1']}")
+    if meta['stage'] in ('ts', 'ms'):
+        lines += spv_meshstage.lines(meta.get('mesh_stage'), meta.get('mesh_control', {}), meta['stage'])
+    elif 'mesh_stage' in meta or 'mesh_control' in meta:
+        raise ValueError('mesh metadata on ordinary shader')
     if 'geometry' in meta:
         lines.append(spv_geometry.geometry_line(meta['geometry'], meta['stage']))
         if (meta['geometry']['role'] == 'capture') != ('capture' in meta):
@@ -305,8 +310,20 @@ def validate_stage(data, reflection):
     _, instructions = decode(data)
     stages = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'gs', 4: 'ps', 5: 'cs'}
     entries = [x for x in instructions if opcode(x) == 15]
-    if len(entries) != 1 or len(entries[0]) < 4 or stages.get(entries[0][1]) != reflection.get('stage'):
+    mesh = reflection.get('stage') in ('ts', 'ms')
+    stage = 'cs' if mesh else reflection.get('stage')
+    if len(entries) != 1 or len(entries[0]) < 4 or stages.get(entries[0][1]) != stage:
         raise ValueError('shader stage metadata does not match SPIR-V')
+    if mesh:
+        info = reflection.get('mesh_stage')
+        if not isinstance(info, dict): raise ValueError('missing mesh stage metadata')
+        spv_meshstage.layout(info, reflection.get('stage_memory'))
+        if (info['kind'] != reflection['stage'] or reflection.get('threadgroup_size') != [info['threads'], 1, 1] or
+                any(k in reflection for k in ('geometry', 'tf', 'capture'))):
+            raise ValueError('invalid mesh logical stage or interface')
+        spv_meshstage.validate_module(data, info, reflection.get('stage_memory'))
+    elif 'mesh_stage' in reflection or 'stage_memory' in reflection:
+        raise ValueError('mesh metadata on ordinary shader')
     if 'tf' in reflection:
         feedback_rows(reflection['tf'], 'gs' if 'geometry' in reflection else reflection['stage'])
     if 'geometry' in reflection:
@@ -335,6 +352,12 @@ def validate_topology(key, data, reflection):
 
 def write_stage(key, raw, refl, destination, validator, optimizer):
     binary = destination / (key + '.spv')
+    mesh_control = None
+    if refl['stage'] in ('ts', 'ms'):
+        validate_stage(raw, refl)
+        raw, mesh_control = spv_meshstage.lower(raw, refl['mesh_stage'], refl['stage_memory'])
+        refl = dict(refl, bindings=refl['bindings'] + [dict(msl_name='dm_mesh_' + name, kind='mesh', reg=reg)
+                                                     for reg, name in enumerate(('input', 'output', 'control'))])
     if 'geometry' in refl:
         role = refl['geometry']['role']
         raw = spv_geometry.topology_buffer(raw) if role == 'compute' else spv_geometry.viewport_mask_reader(raw)
@@ -343,12 +366,13 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
     validate_topology(key, data, refl)
     binary.write_bytes(data)
     subprocess.run([validator, '--target-env', 'vulkan1.1', binary], check=True)
-    meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads', 'tf', 'geometry') if k in refl}
+    meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads', 'tf', 'geometry', 'mesh_stage') if k in refl}
+    if mesh_control is not None: meta['mesh_control'] = mesh_control
     try:
         bindings = vk_reflect(data, refl)
     except ValueError as exc:
         raise ValueError(f'{key}: {exc}') from exc
-    meta.update(key=key, tg=refl.get('threadgroup_size') if refl['stage'] == 'cs' else None,
+    meta.update(key=key, tg=refl.get('threadgroup_size') if refl['stage'] in ('cs', 'ts', 'ms') else None,
                 bindings=bindings, **requirements(data))
     (destination / (key + '.vk.txt')).write_text(vk_txt(meta))
     if refl['stage'] == 'vs':
@@ -447,7 +471,7 @@ def export(pkg, keys, out, *, prepare_only=False):
                 else:
                     stage_counts[write_stage(product, spv.read_bytes(), refl, dest, validator, optimizer)] += 1
                 products.append(product)
-        for stage in ('gs', 'hs', 'ds'):
+        for stage in ('gs', 'hs', 'ds', 'ts', 'ms'):
             if stage_counts[stage]:
                 print(f'[RED] Vulkan runtime does not execute {stage}: preserved {stage_counts[stage]} shader assets; games using them still require that feature', flush=True)
         if prepare_only:
