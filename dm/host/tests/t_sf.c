@@ -113,6 +113,9 @@ int main(void) {
     int start_h, start_live, start_objects; thr_counts(&start_h, &start_live, &start_objects);
     uint32_t m[0x40], h = 0;
     CHECK(RUN(h_sf_InitRes) == 0, "service resolution initializes");
+    CHECK(RUN(h_applet_CamBegin) == RES_OK, "camera resource is available");
+    CHECK(RUN(h_applet_CamEnd) == RES_OK, "camera resource releases");
+    CHECK(RUN(h_cam_ContextEnd) == RES_OK, "camera context teardown succeeds");
     CHECK(RUN(h_sf_Connect, &h, "olsc:u") == RES_OK && h, "olsc:u is served");
     CHECK(request(h, m, 0) == RES_OK, "olsc:u request");
     CHECK(!(m[1] >> 31) && m[4] == 0x4f434653 && m[6] == RES_OK, "olsc:u: success, no special header, SFCO at +0x10");
@@ -145,7 +148,7 @@ int main(void) {
     thr_counts(&nh, &live, &objects);
     CHECK(nh == start_h && live == start_live && objects == start_objects, "camera event lifetime leaves no handles or threads");
     unsigned long bytes = 0; const hle_force_ent *entries = DM_SECTION_DATA(swforce, &bytes);
-    CHECK(bytes / sizeof *entries == 10, "ten actual SF imports registered");
+    CHECK(bytes / sizeof *entries == 13, "thirteen actual SF imports registered");
     for (size_t k = 0; k < bytes / sizeof *entries; k++) {
         unsigned j = 0; while (j < nseen && seen[j] != entries[k].fn) j++;
         CHECK(j < nseen, "every actual SF import invoked");
