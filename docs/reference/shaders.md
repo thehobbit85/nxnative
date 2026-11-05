@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Vulkan resource reflection
 
+### Portable export from prepared shaders
+
+- **Symptom:** exporting Android SPIR-V required Xcode even after translation and guest-resource reflection had already been captured.
+- **Cause:** the exporter always ran the shared Metal preparation chain to obtain its resource metadata, coupling validation/publication to Mac preparation.
+- **Fix:** `spv_android.py --prepare-only` captures the shared Vulkan-target translation and reflection on a Mac. `--from-prepared` consumes that capture using Python and SPIRV-Tools only. The capture records the source/profile producer, selected shader keys and every module/reflection hash; stale producers, changed files, symlinks, invalid inventories and mismatched stages are rejected. Validation completes in a temporary directory before publishing the output. Captures contain game-derived data and stay in the game's work folder. A capture is a preparation input, not a runtime shader directory; its exported output carries the normal APK shader contract.
+- **Check:** synthetic captures and a real Hollow Knight vertex/fragment pair export with only SPIRV-Tools on PATH. Damaged captures leave no published output. This separates the Apple preparation prerequisite; it does not claim an end-to-end NSP build on Linux or Windows.
+- **Found on:** Android shader build-host portability qualification.
+
 ### Versioned Vulkan shader products
 
 - **Symptom:** an older Android runtime could read newer shader sidecars, silently ignore unknown fields, and attempt a pipeline with incomplete metadata.

@@ -1,6 +1,7 @@
 """Export SPIR-V and descriptor sidecars for the Android fork's NVN Vulkan executor."""
 import argparse
 import collections
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -234,13 +235,92 @@ def vk_txt(meta):
     return '\n'.join(lines) + '\n'
 
 
-def export(pkg, keys, out):
+def capture_manifest(directory, keys, producer):
+    files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(directory.iterdir())}
+    record = dict(schema=1, target='vulkan1.1', producer=hashlib.sha256(producer).hexdigest(), keys=keys, files=files)
+    (directory / 'capture.json').write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
+
+
+def read_prepared(directory, producer):
+    """Read and verify immutable snapshots, never paths supplied by a capture manifest."""
+    try:
+        record = json.loads((directory / 'capture.json').read_text())
+        keys = record['keys']
+        if (record['schema'] != 1 or record['target'] != 'vulkan1.1' or
+                record['producer'] != hashlib.sha256(producer).hexdigest() or
+                not isinstance(keys, list) or not keys or
+                any(not isinstance(k, str) or not re.fullmatch('[0-9a-f]{16}', k) for k in keys) or
+                keys != sorted(set(keys))):
+            raise ValueError('incompatible producer, target or shader keys')
+        expected = {k + suffix for k in keys for suffix in ('.spv', '.reflection.json')}
+        if set(record['files']) != expected or {p.name for p in directory.iterdir()} != expected | {'capture.json'}:
+            raise ValueError('capture inventory differs')
+        snapshots = {}
+        for name in sorted(expected):
+            path = directory / name
+            if path.is_symlink() or not path.is_file(): raise ValueError('capture is missing a regular file: ' + name)
+            data = path.read_bytes()
+            if hashlib.sha256(data).hexdigest() != record['files'][name]: raise ValueError('capture content changed: ' + name)
+            snapshots[name] = data
+        for key in keys:
+            validate_stage(snapshots[key + '.spv'], json.loads(snapshots[key + '.reflection.json']))
+        return keys, snapshots
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ValueError('invalid prepared shader capture: ' + str(error)) from error
+
+
+def validate_stage(data, reflection):
+    if not isinstance(reflection, dict) or not isinstance(reflection.get('bindings'), list):
+        raise ValueError('invalid shader reflection')
+    _, instructions = decode(data)
+    stages = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'gs', 4: 'ps', 5: 'cs'}
+    entries = [x for x in instructions if opcode(x) == 15]
+    if len(entries) != 1 or len(entries[0]) < 4 or stages.get(entries[0][1]) != reflection.get('stage'):
+        raise ValueError('shader stage metadata does not match SPIR-V')
+
+
+def write_stage(key, raw, refl, destination, validator, optimizer):
+    binary = destination / (key + '.spv')
+    data = export_spirv(raw, optimizer)
+    validate_stage(data, refl)
+    binary.write_bytes(data)
+    subprocess.run([validator, '--target-env', 'vulkan1.1', binary], check=True)
+    meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads') if k in refl}
+    try:
+        bindings = vk_reflect(data, refl)
+    except ValueError as exc:
+        raise ValueError(f'{key}: {exc}') from exc
+    meta.update(key=key, tg=refl.get('threadgroup_size'), bindings=bindings, **requirements(data))
+    (destination / (key + '.vk.txt')).write_text(vk_txt(meta))
+    return meta['stage']
+
+
+def export_prepared(directory, out, keys=None):
+    if out.exists(): raise ValueError(f'output already exists: {out}')
+    producer = shader_contract()
+    captured, snapshots = read_prepared(directory, producer)
+    selected = sorted(set(keys)) if keys else captured
+    if not set(selected) <= set(captured): raise ValueError('requested shader is absent from prepared capture')
+    validator, optimizer = shutil.which('spirv-val'), shutil.which('spirv-opt')
+    if not validator or not optimizer: raise ValueError('spirv-val and spirv-opt from SPIRV-Tools are required')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='vk-export-', dir=out.parent) as tmp:
+        dest = Path(tmp) / 'result'; dest.mkdir()
+        for key in selected:
+            reflection = json.loads(snapshots[key + '.reflection.json'])
+            write_stage(key, snapshots[key + '.spv'], reflection, dest, validator, optimizer)
+        stamp_export(dest, producer=producer)
+        dest.rename(out)
+    print(f'Exported {len(selected)} validated Vulkan shader stages from prepared capture to {out}')
+
+
+def export(pkg, keys, out, *, prepare_only=False):
     if not keys or any(not re.fullmatch('[0-9a-f]{16}', key) for key in keys):
         raise ValueError('expected one or more 16-digit lowercase shader keys')
     if out.exists():
         raise ValueError(f'output already exists: {out}')
     validator, optimizer = shutil.which('spirv-val'), shutil.which('spirv-opt')
-    if not validator or not optimizer:
+    if not prepare_only and (not validator or not optimizer):
         raise ValueError('spirv-val and spirv-opt from SPIRV-Tools are required')
     producer = shader_contract()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -278,23 +358,23 @@ def export(pkg, keys, out):
         for key in keys:
             spv = captured / (key + '.spv')
             refl = json.loads((libraries / (key + '_b.json')).read_text())
-            binary = dest / (key + '.spv')
-            data = export_spirv(spv.read_bytes(), optimizer)
-            binary.write_bytes(data)
-            subprocess.run([validator, '--target-env', 'vulkan1.1', binary], check=True)
-            meta = {k: refl[k] for k in ('stage', 'c1', 'vertex_inputs', 'drv_reads') if k in refl}
-            try:
-                bindings = vk_reflect(data, refl)
-            except ValueError as exc:
-                raise ValueError(f'{key}: {exc}') from exc
-            meta.update(key=key, tg=refl.get('threadgroup_size'), bindings=bindings, **requirements(data))
-            stage_counts[meta['stage']] += 1
-            (dest / (key + '.vk.txt')).write_text(vk_txt(meta))
+            if prepare_only:
+                shutil.copyfile(spv, dest / (key + '.spv'))
+                (dest / (key + '.reflection.json')).write_text(json.dumps(refl, sort_keys=True) + '\n')
+            else:
+                stage_counts[write_stage(key, spv.read_bytes(), refl, dest, validator, optimizer)] += 1
         for stage in ('gs', 'hs', 'ds'):
             if stage_counts[stage]:
                 print(f'[RED] Vulkan runtime does not execute {stage}: preserved {stage_counts[stage]} shader assets; games using them still require that feature', flush=True)
-        stamp_export(dest, producer=producer)
+        if prepare_only:
+            if shader_contract() != producer: raise ValueError('shader inputs changed while preparing capture')
+            capture_manifest(dest, keys, producer)
+        else:
+            stamp_export(dest, producer=producer)
         dest.rename(out)
+    if prepare_only:
+        print(f'Prepared {len(keys)} Vulkan shader stages for portable export to {out}')
+        return
     print(f'Exported {len(keys)} validated Vulkan shader stages to {out}')
 
 
@@ -306,10 +386,16 @@ def main():
     parser.add_argument('out', type=Path, help='a new output directory on the game drive')
     parser.add_argument('keys', nargs='*', help='individual shader keys')
     parser.add_argument('--keys-file', type=Path, help='additional keys, one per line')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--prepare-only', action='store_true', help='capture shared shader preparation on macOS for later portable export')
+    mode.add_argument('--from-prepared', action='store_true', help='export a verified capture using only Python and SPIRV-Tools')
     args = parser.parse_args()
     try:
         keys = args.keys + (args.keys_file.read_text().split() if args.keys_file else [])
-        export(args.pkg.resolve(), keys, args.out.resolve())
+        if args.from_prepared:
+            export_prepared(args.pkg.resolve(), args.out.resolve(), keys)
+        else:
+            export(args.pkg.resolve(), keys, args.out.resolve(), prepare_only=args.prepare_only)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         sys.exit(f'[RED] Vulkan export failed: {exc}')
     return 0
