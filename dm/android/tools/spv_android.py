@@ -216,8 +216,9 @@ def vk_txt(meta):
     if meta.get('c1'):
         lines.append(f"c1 {meta['c1']}")
     if 'geometry' in meta:
-        if 'capture' in meta: raise ValueError('geometry helper cannot also be vertex capture')
         lines.append(spv_geometry.geometry_line(meta['geometry'], meta['stage']))
+        if (meta['geometry']['role'] == 'capture') != ('capture' in meta):
+            raise ValueError('geometry capture role needs its capture interface exclusively')
     if 'tf' in meta:
         lines += feedback_rows(meta['tf'], 'gs' if 'geometry' in meta else meta['stage'])
     if 'capture' in meta:
@@ -350,7 +351,7 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
     meta.update(key=key, tg=refl.get('threadgroup_size') if refl['stage'] == 'cs' else None,
                 bindings=bindings, **requirements(data))
     (destination / (key + '.vk.txt')).write_text(vk_txt(meta))
-    if refl['stage'] == 'vs' and 'geometry' not in refl:
+    if refl['stage'] == 'vs':
         try:
             captured, control = geometry_capture(data)
         except ValueError as exc:
@@ -361,7 +362,10 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
         reflection = dict(refl, bindings=refl['bindings'] + [
             dict(msl_name='dm_geometry_output', kind='geometry', reg=0),
             dict(msl_name='dm_geometry_control', kind='geometry', reg=5)])
-        capture_meta = dict(meta, capture=control, bindings=vk_reflect(captured, reflection), **requirements(captured))
+        capture_meta = meta.copy()
+        capture_meta.update(capture=control, bindings=vk_reflect(captured, reflection), **requirements(captured))
+        if 'geometry' in meta:
+            capture_meta['geometry'] = dict(meta['geometry'], role='capture')
         (destination / (key + '.vc.vk.txt')).write_text(vk_txt(capture_meta))
     return meta['stage']
 

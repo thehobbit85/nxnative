@@ -5,17 +5,21 @@
 #include <stddef.h>
 #include <string.h>
 typedef struct {
-    int reader;
+    int reader, capture;
     uint32_t topology, stride, vertices, invocations, output, index_stride;
 } dm_vk_geometry;
 static const char *dm_vk_geometry_line(const char *line, size_t n, int model, dm_vk_geometry *geometry) {
     size_t at;
+    geometry->capture = 0;
     if (n >= 17 && !memcmp(line, "geometry compute ", 17)) {
         if (model != 5) return "geometry compute needs compute stage";
         geometry->reader = 0; at = 17;
     } else if (n >= 16 && !memcmp(line, "geometry reader ", 16)) {
         if (model != 0) return "geometry reader needs vertex stage";
         geometry->reader = 1; at = 16;
+    } else if (n >= 17 && !memcmp(line, "geometry capture ", 17)) {
+        if (model != 0) return "geometry capture needs vertex stage";
+        geometry->reader = 1; geometry->capture = 1; at = 17;
     } else return "invalid geometry helper role";
     uint32_t values[6]; unsigned count = 0;
     while (at < n) {

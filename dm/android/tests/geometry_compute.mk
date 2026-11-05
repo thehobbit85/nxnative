@@ -1,7 +1,9 @@
 # From repository root; CC is an NDK compiler or a native Vulkan compiler.
 # Add METAL=--metal to build the optional Apple reference corpus.
 B ?= /tmp/nx-geometry-compute
-.PHONY: fixture shaders
+.PHONY: fixture shaders capture-fixture
+capture-fixture: shaders
+	$(CC) -O1 -Wall -Wextra -Werror dm/android/tests/geometry_capture.c -o $(B)/geometry_capture -lvulkan
 fixture: shaders
 	$(CC) -O1 -Wall -Wextra -Werror -I$(B) dm/android/tests/geometry_compute.c -o $(B)/geometry_compute -lvulkan
 shaders:
