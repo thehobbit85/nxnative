@@ -61,9 +61,11 @@ static void invalid_frames(void) {
     atomic_store(&snap_used, 1); atomic_store(&snap_active, 1);
     for (unsigned i = 0; i < sizeof frames / sizeof *frames; i++) {
         ucontext_t uc = {0}; UC_PC(&uc) = 0x1111; UC_LR(&uc) = 0x2222; UC_SP(&uc) = 0x4444; UC_FP(&uc) = frames[i];
+        for (int k = 0; k < 29; k++) UC_X(&uc, k) = 0x100 + k;
         atomic_store(&snap_slots[0].request, owner | SNAP_REQUEST); snapshot_signal(&uc);
         assert(atomic_load(&snap_slots[0].request) == (owner | SNAP_DONE));
         assert(snap_slots[0].frame[0] == 0x1111 && snap_slots[0].frame[1] == 0x2222 && snap_slots[0].sp == 0x4444);
+        for (int k = 0; k < 10; k++) assert(snap_slots[0].x[k] == (unsigned)(0x100 + (k < 3 ? k : k + 16)));
         assert(snap_slots[0].frame[2] == (i == 3 ? 0x3333u : 0));
         for (int k = 3; k < SNAP_FRAMES; k++) assert(!snap_slots[0].frame[k]);
     }

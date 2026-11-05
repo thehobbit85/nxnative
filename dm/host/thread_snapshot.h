@@ -13,7 +13,7 @@
 enum { SNAP_MAX = 256, SNAP_FRAMES = 10, SNAP_REQUEST = 1, SNAP_BUSY = 2, SNAP_DONE = 3 };
 // Bind ownership to the TID in the same CAS as the state: a late handler must
 // not claim a slot that a later inspection has assigned to another thread.
-typedef struct { _Atomic uint64_t request; uint64_t frame[SNAP_FRAMES], sp; } dm_snapshot;
+typedef struct { _Atomic uint64_t request; uint64_t frame[SNAP_FRAMES], sp, x[10]; } dm_snapshot;
 static dm_snapshot snap_slots[SNAP_MAX];
 static _Atomic int snap_ready, snap_active, snap_used, snap_inspecting;
 
@@ -25,6 +25,8 @@ static void snapshot_signal(ucontext_t *uc) {
         uint64_t target = (uint64_t)(unsigned)tid << 32, expected = target | SNAP_REQUEST;
         if (!atomic_compare_exchange_strong(&s->request, &expected, target | SNAP_BUSY)) continue;
         s->frame[0] = UC_PC(uc); s->frame[1] = UC_LR(uc); s->sp = UC_SP(uc);
+        for (int k = 0; k < 3; k++) s->x[k] = UC_X(uc, k);
+        for (int k = 19; k <= 25; k++) s->x[k - 16] = UC_X(uc, k);
         uint64_t fp = UC_FP(uc);
         for (int k = 2; k < SNAP_FRAMES; k++) {
             uint64_t pair[2]; s->frame[k] = 0;
@@ -100,6 +102,9 @@ static int snapshot_dump(const char *tag, int guest_only) {
         flockfile(stderr);
         fprintf(stderr, "[dm] %s thread snapshot tid=%d sp=%#llx:", tag, (int)(target >> 32), (unsigned long long)s->sp);
         snapshot_where("pc", s->frame[0]); snapshot_where("lr", s->frame[1]);
+        if (module_of((void *)(uintptr_t)s->frame[0])) {
+            for (int k = 0; k < 10; k++) fprintf(stderr, " x%d=%#llx", k < 3 ? k : k + 16, (unsigned long long)s->x[k]);
+        }
         for (int k = 2; k < SNAP_FRAMES && s->frame[k]; k++) snapshot_where("<", s->frame[k]);
         fputc('\n', stderr); funlockfile(stderr);
     }

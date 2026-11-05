@@ -94,6 +94,7 @@ typedef struct thr {
     clockid_t cpu_clock;       // registered while the pthread is live; clock_gettime may fail after exit
 #endif
     uint32_t qos;
+    int native_tid;            // Android TID for correlating service state with asynchronous diagnostic samples; 0 on Apple
     // Pausing (SetThreadActivity, used by IL2CPP's garbage collector to stop the world): pause_req = requested, paused = stopped; when stopped inside an SVC the context comes from the gate frame svc_regs (registered on SVC entry),
     // when stopped in guest code the signal handler saves it into ctx_*; pcv lets the requester wait for "stopped" and the paused thread wait for "resume"
     _Atomic int pause_req;     // 0 running, 1 pause requested, 2 a Linux signal handler published the context and parked
@@ -374,6 +375,7 @@ static void qos_map_init(void) {
 }
 static void register_host_thread(thr_t *t) {
     signal_thread = t;
+    t->native_tid = (int)syscall(SYS_gettid);
     if (pthread_getcpuclockid(pthread_self(), &t->cpu_clock)) t->cpu_clock = 0;
 }
 static void set_thread_name(const char *name) {
@@ -537,7 +539,7 @@ static void ctx_fill(const thr_t *t, hz_ctx_t *o) {   // holding G, t is stopped
 // when it runs guest code), read with the thread suspended for a moment. At most 24 stalls per run. It found Breath of the Wild's job queue poll (patch_nso.py "Spin waits")
 _Atomic uint64_t dm_present_ns;   // nvn_mtl.m present_enqueue (every graphics API): when the last present was made (host monotonic ns)
 typedef struct {   // what one dump line needs, copied under G so that a thread that exits meanwhile is not read
-    uint32_t handle, svc; int prio, core, rs, sleeping, host_work, wkind;
+    uint32_t handle, svc; int prio, core, rs, sleeping, host_work, wkind, native_tid;
     uint64_t mask, waddr, wkey, lr;
     char name[48];
     int have, npc, guest;   // have: the registers were read; guest: pc is in a guest module
@@ -548,6 +550,7 @@ typedef struct {   // what one dump line needs, copied under G so that a thread 
 static void hitch_grab(thr_t *t, hitch_t *h) {
     memset(h, 0, sizeof *h);
     h->handle = t->handle; h->svc = t->last_svc; h->prio = t->prio; h->core = t->core; h->mask = t->mask; h->wkind = t->wkind & 7; h->waddr = t->waddr; h->wkey = t->wkey;
+    h->native_tid = t->native_tid;
     h->lr = t->last_lr; h->sleeping = t->sleeping; h->host_work = t->host_work && *t->host_work; h->rs = -1;
     char nb[48]; snprintf(h->name, sizeof h->name, "%s", thr_name(t, nb, sizeof nb));
 #ifdef __APPLE__
@@ -584,6 +587,7 @@ static void hitch_grab(thr_t *t, hitch_t *h) {
 }
 static void hitch_log(const hitch_t *h) {
     static const char *kinds[] = {"run", "mutex", "condvar", "address", "sync"};
+    char native[40] = ""; if (h->native_tid) snprintf(native, sizeof native, " tid=%d", h->native_tid);
     char w[900]; size_t q = 0, n = sizeof w; w[0] = 0;
     if (h->have) {
         if (h->guest) { q += (size_t)snprintf(w + q, n - q, " [x0=%#llx x1=%#llx x2=%#llx", (unsigned long long)h->x[0], (unsigned long long)h->x[1], (unsigned long long)h->x[2]);
@@ -598,7 +602,7 @@ static void hitch_log(const hitch_t *h) {
         }
     }
     module_t *m = module_of((void *)h->lr);
-    LOG("  %#x '%s' prio %d core %d mask %#llx %s %#llx/%#llx%s%s state %d svc %#x lr=%s+%#llx at:%s", h->handle, h->name, h->prio, h->core, (unsigned long long)h->mask,
+    LOG("  %#x%s '%s' prio %d core %d mask %#llx %s %#llx/%#llx%s%s state %d svc %#x lr=%s+%#llx at:%s", h->handle, native, h->name, h->prio, h->core, (unsigned long long)h->mask,
         kinds[h->wkind], (unsigned long long)h->waddr, (unsigned long long)h->wkey, h->sleeping ? " sleeping" : "", h->host_work ? " host-work" : "", h->rs, h->svc, m ? m->name : "?",
         (unsigned long long)(m ? h->lr - (uint64_t)m->base : h->lr), w);
 }
@@ -617,6 +621,10 @@ static void *hitch_main(void *arg) {
         int nt = 0;
         pthread_mutex_lock(&G); for (thr_t *t = g_all; t && nt < 256; t = t->all) if (t->started && !t->exited) hitch_grab(t, &hs[nt++]); pthread_mutex_unlock(&G);
         for (int k = 0; k < nt; k++) hitch_log(&hs[k]);
+#ifndef __APPLE__
+        // No scheduler lock is held while requesting or symbolizing samples.
+        dm_thread_snapshot_dump("hitch", 0);
+#endif
     }
     return NULL;
 }
