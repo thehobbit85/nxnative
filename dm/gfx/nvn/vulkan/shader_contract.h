@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "geometry_contract.h"
+#include "meshstage_contract.h"
 
 // Raster-discard vertex capture: the geometry ABI plus two helper bindings.
 typedef struct { uint32_t output_binding, control_binding; } dm_vk_capture;
@@ -76,6 +77,8 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
     const char *extensions[128]; size_t extension_lengths[128];
     unsigned char cap_seen[128] = {0}, ext_seen[128] = {0};
     int model = -1;
+    uint32_t local[3] = {0}, local_entry = 0, entry_id = 0;
+    unsigned local_modes = 0;
     for (size_t at = 5; at < count;) {
         uint32_t op = words[at] & 0xffff, n = words[at] >> 16;
         if (!n || n > count - at) return "truncated SPIR-V instruction";
@@ -92,6 +95,11 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
         } else if (op == 15) {
             if (n < 4 || ++entries != 1) return "expected one shader entry point";
             model = (int)words[at + 1];
+            entry_id = words[at + 2];
+        } else if (op == 16 && n >= 3 && words[at + 2] == 17) {
+            if (n != 6) return "invalid local size mode";
+            local_modes++; local_entry = words[at + 1];
+            for (unsigned k = 0; k < 3; k++) local[k] = words[at + 3 + k];
         } else if (op == 54) {
             if (functions++) return "nested SPIR-V function";
         } else if (op == 56) {
@@ -101,9 +109,10 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
         at += n;
     }
     if (entries != 1 || functions) return "incomplete SPIR-V module";
-    int schema = 0, target = 0, stage = 0, captures = 0, geometries = 0, feedbacks = 0;
+    int schema = 0, target = 0, stage = 0, captures = 0, geometries = 0, feedbacks = 0, meshes = 0, mesh_kind = 0;
     dm_vk_feedback feedback = {0};
     dm_vk_geometry geometry = {0};
+    dm_vk_meshstage mesh = {0};
     for (size_t at = 0; at < length;) {
         const char *line = text + at, *end = memchr(line, '\n', length - at);
         size_t n = end ? (size_t)(end - line) : length - at;
@@ -115,7 +124,10 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
             if (target++ || !dm_vk_line_is(line, n, "target vulkan1.1")) return "incompatible shader target";
         } else if (n >= 6 && !memcmp(line, "stage ", 6)) {
             const char *names[] = {"vs", "hs", "ds", "gs", "ps", "cs"};
-            if (stage++ || model < 0 || model > 5 || !dm_vk_line_is(line + 6, n - 6, names[model])) return "shader stage does not match module";
+            if (stage++ || model < 0 || model > 5) return "shader stage does not match module";
+            if (dm_vk_line_is(line + 6, n - 6, "ts")) mesh_kind = 1;
+            else if (dm_vk_line_is(line + 6, n - 6, "ms")) mesh_kind = 2;
+            if (mesh_kind ? model != 5 : !dm_vk_line_is(line + 6, n - 6, names[model])) return "shader stage does not match module";
         } else if (n >= 4 && !memcmp(line, "cap ", 4)) {
             if (n <= 4 || line[4] < '0' || line[4] > '9') return "invalid sidecar capability";
             uint32_t value = 0;
@@ -143,6 +155,13 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
             if (geometries++) return "duplicate geometry interface";
             const char *error = dm_vk_geometry_line(line, n, model, &geometry);
             if (error) return error;
+        } else if (n >= 5 && !memcmp(line, "mesh ", 5)) {
+            if (meshes++) return "duplicate mesh interface";
+            const char *error = dm_vk_meshstage_line(line, n, &mesh);
+            if (error) return error;
+        } else if (n >= 6 && (!memcmp(line, "meshv ", 6) || !memcmp(line, "meshp ", 6))) {
+            const char *error = dm_vk_meshstage_map(line, n, line[4] == 'v', &mesh);
+            if (error) return error;
         } else if (!((n >= 3 && !memcmp(line, "tg ", 3)) || (n >= 3 && !memcmp(line, "c1 ", 3)) ||
                      (n >= 4 && !memcmp(line, "vin ", 4)) || (n >= 2 && !memcmp(line, "b ", 2)))) {
             return "unknown shader sidecar record";
@@ -151,6 +170,12 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
     if (schema != 1 || target != 1 || stage != 1) return "missing shader contract";
     if (geometries && geometry.capture != captures) return "geometry capture role needs its capture interface exclusively";
     if (feedbacks && model == 5 && !geometries) return "compute feedback needs geometry interface";
+    if (!!mesh_kind != !!meshes || ((mesh.vertex_count || mesh.primitive_count) && !meshes)) return "missing or unexpected mesh interface";
+    if (meshes) {
+        if (geometries || captures || feedbacks || local_modes != 1 || local_entry != entry_id) return "invalid mesh execution interface";
+        const char *error = dm_vk_meshstage_validate(&mesh, mesh_kind == 1, local);
+        if (error) return error;
+    }
     for (unsigned i = 0; i < nc; i++) if (!cap_seen[i]) return "missing shader capability";
     for (unsigned i = 0; i < ne; i++) if (!ext_seen[i]) return "missing shader extension";
     return NULL;
