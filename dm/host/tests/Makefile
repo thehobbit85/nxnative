@@ -595,7 +595,20 @@ tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 
 MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
 # The same kernel signal test also runs on Apple Silicon in the host suite.
-run: $(B)/t_fault_access $(B)/t_lifecycle
+run: $(B)/t_fault_access $(B)/t_lifecycle diagnostics
+.PHONY: diagnostics android-diagnostics-build
+diagnostics: $(B)/t_diagnostics $(B)/t_ctl_memory
+	$(B)/t_diagnostics
+	$(B)/t_ctl_memory
+$(B)/t_ctl_memory: t_ctl_memory.c ../hle_fpslock.c ../host_memory.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -I.. $(GINC) -o $@ $<
+$(B)/t_diagnostics: t_diagnostics.c ../crash.c ../dm.h ../dm_uc.h ../host_memory.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -pthread -I.. $(GINC) -o $@ t_diagnostics.c ../crash.c -ldl
+android-diagnostics-build: $(B)/t_diagnostics_android $(B)/t_ctl_memory_android
+$(B)/t_ctl_memory_android: t_ctl_memory.c ../hle_fpslock.c ../host_memory.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -D_GNU_SOURCE -O1 -Wall -Werror -I.. $(GINC) -o $@ $<
+$(B)/t_diagnostics_android: t_diagnostics.c ../crash.c ../dm.h ../dm_uc.h ../host_memory.h $(GAME_H) | $(B)
+	$(CLANG) -D_GNU_SOURCE -O1 -Wall -Werror -pthread -I.. $(GINC) -o $@ t_diagnostics.c ../crash.c -ldl
 $(B)/t_lifecycle: t_lifecycle.c ../hle_lifecycle.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -pthread -I.. $(GINC) -o $@ t_lifecycle.c ../hle_lifecycle.c
 $(B)/t_fault_access: t_fault_access.c t_altstack_stub.c ../crash.c ../dm.h ../dm_uc.h ../host_memory.h $(GAME_H) | $(B)

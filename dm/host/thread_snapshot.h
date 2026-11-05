@@ -13,7 +13,12 @@
 enum { SNAP_MAX = 256, SNAP_FRAMES = 10, SNAP_REQUEST = 1, SNAP_BUSY = 2, SNAP_DONE = 3 };
 // Bind ownership to the TID in the same CAS as the state: a late handler must
 // not claim a slot that a later inspection has assigned to another thread.
-typedef struct { _Atomic uint64_t request; uint64_t frame[SNAP_FRAMES], sp, x[10]; } dm_snapshot;
+typedef struct {
+    _Atomic uint64_t request;
+    uint64_t frame[SNAP_FRAMES], sp, x[13], stack[128];
+    uint32_t object[2][32];
+    unsigned readable; // x19, x20, stack: complete reads only, never stale partial data.
+} dm_snapshot;
 static dm_snapshot snap_slots[SNAP_MAX];
 static _Atomic int snap_ready, snap_active, snap_used, snap_inspecting;
 
@@ -26,7 +31,11 @@ static void snapshot_signal(ucontext_t *uc) {
         if (!atomic_compare_exchange_strong(&s->request, &expected, target | SNAP_BUSY)) continue;
         s->frame[0] = UC_PC(uc); s->frame[1] = UC_LR(uc); s->sp = UC_SP(uc);
         for (int k = 0; k < 3; k++) s->x[k] = UC_X(uc, k);
-        for (int k = 19; k <= 25; k++) s->x[k - 16] = UC_X(uc, k);
+        for (int k = 19; k <= 28; k++) s->x[k - 16] = UC_X(uc, k);
+        s->readable = 0;
+        for (int k = 0; k < 2; k++)
+            if (s->x[k + 3] >= 0x1000 && dm_host_read(s->x[k + 3], s->object[k], sizeof s->object[k])) s->readable |= 1u << k;
+        if (s->sp >= 0x1000 && dm_host_read(s->sp, s->stack, sizeof s->stack)) s->readable |= 4;
         uint64_t fp = UC_FP(uc);
         for (int k = 2; k < SNAP_FRAMES; k++) {
             uint64_t pair[2]; s->frame[k] = 0;
@@ -103,10 +112,23 @@ static int snapshot_dump(const char *tag, int guest_only) {
         fprintf(stderr, "[dm] %s thread snapshot tid=%d sp=%#llx:", tag, (int)(target >> 32), (unsigned long long)s->sp);
         snapshot_where("pc", s->frame[0]); snapshot_where("lr", s->frame[1]);
         if (module_of((void *)(uintptr_t)s->frame[0])) {
-            for (int k = 0; k < 10; k++) fprintf(stderr, " x%d=%#llx", k < 3 ? k : k + 16, (unsigned long long)s->x[k]);
+            for (int k = 0; k < 13; k++) fprintf(stderr, " x%d=%#llx", k < 3 ? k : k + 16, (unsigned long long)s->x[k]);
         }
         for (int k = 2; k < SNAP_FRAMES && s->frame[k]; k++) snapshot_where("<", s->frame[k]);
-        fputc('\n', stderr); funlockfile(stderr);
+        fputc('\n', stderr);
+        if (module_of((void *)(uintptr_t)s->frame[0])) {
+            for (int k = 0; k < 2; k++) if (s->readable & (1u << k)) {
+                fprintf(stderr, "[dm] %s tid=%d x%d bytes at %#llx:", tag, (int)(target >> 32), k + 19, (unsigned long long)s->x[k + 3]);
+                for (int j = 0; j < 32; j++) fprintf(stderr, " %08x", s->object[k][j]);
+                fputc('\n', stderr);
+            }
+            if (s->readable & 4) for (int j = 0; j < 128; j += 8) {
+                fprintf(stderr, "[dm] %s tid=%d stack sp+%#x:", tag, (int)(target >> 32), j * 8);
+                for (int k = j; k < j + 8; k++) fprintf(stderr, " %016llx", (unsigned long long)s->stack[k]);
+                fputc('\n', stderr);
+            }
+        }
+        funlockfile(stderr);
     }
     if (truncated) LOG("[RED] %s thread snapshot truncated at %d threads", tag, SNAP_MAX);
     atomic_store(&snap_inspecting, 0); return sampled;

@@ -65,9 +65,25 @@ static void invalid_frames(void) {
         atomic_store(&snap_slots[0].request, owner | SNAP_REQUEST); snapshot_signal(&uc);
         assert(atomic_load(&snap_slots[0].request) == (owner | SNAP_DONE));
         assert(snap_slots[0].frame[0] == 0x1111 && snap_slots[0].frame[1] == 0x2222 && snap_slots[0].sp == 0x4444);
-        for (int k = 0; k < 10; k++) assert(snap_slots[0].x[k] == (unsigned)(0x100 + (k < 3 ? k : k + 16)));
+        assert(sizeof snap_slots[0].x / sizeof snap_slots[0].x[0] == 13);
+        for (int k = 0; k < 13; k++) assert(snap_slots[0].x[k] == (unsigned)(0x100 + (k < 3 ? k : k + 16)));
+        assert(!snap_slots[0].readable);
         assert(snap_slots[0].frame[2] == (i == 3 ? 0x3333u : 0));
         for (int k = 3; k < SNAP_FRAMES; k++) assert(!snap_slots[0].frame[k]);
+    }
+    // Capture the pointed objects/stack while the context is owned; subsequent
+    // inaccessible/partial reads must clear validity rather than print old bytes.
+    memset(area, 0x5a, page);
+    for (int i = 0; i < 3; i++) {
+        ucontext_t uc = {0}; uintptr_t at = (uintptr_t)area + (i == 0 ? 0 : i == 1 ? page - 8 : page);
+        UC_X(&uc, 19) = at; UC_X(&uc, 20) = at; UC_SP(&uc) = at;
+        atomic_store(&snap_slots[0].request, owner | SNAP_REQUEST); snapshot_signal(&uc);
+        assert(snap_slots[0].readable == (i == 0 ? 7u : 0u));
+        if (!i) {
+            assert(!memcmp(snap_slots[0].stack, area, sizeof snap_slots[0].stack));
+            assert(!memcmp(snap_slots[0].object[0], area, sizeof snap_slots[0].object[0]));
+            assert(!memcmp(snap_slots[0].object[1], area, sizeof snap_slots[0].object[1]));
+        }
     }
     atomic_store(&snap_active, 0); assert(!munmap(area, 2 * page));
 }
