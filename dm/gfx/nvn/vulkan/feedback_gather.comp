@@ -1,0 +1,40 @@
+#version 450
+// Consume the exported 144-word capture ABI; never convert attribute bits.
+// Each invocation writes a distinct complete record, even for repeated IDs.
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Source { uint words[]; } source_data;
+layout(set=0,binding=1,std430) readonly buffer Order { uint indices[]; } order_data;
+layout(set=0,binding=2,std430) writeonly buffer Destination { uint words[]; } destination;
+layout(set=0,binding=3,std140) uniform Control {
+    uvec4 source_info;       // word offset, total records, order word offset, count
+    uvec4 destination_info;  // word offset, stride words, ordered, first source record
+    uvec4 words[128];        // flattened ordered attribute component map
+} control;
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint count = control.source_info.w, stride = control.destination_info.y;
+    if (linear >= count || stride == 0 || stride > 512 || control.destination_info.z > 1) return;
+    uint record = linear;
+    if (control.destination_info.z != 0) {
+        uint offset = control.source_info.z, length = uint(order_data.indices.length());
+        if (offset > length || linear >= length - offset) return;
+        record = order_data.indices[offset + linear];
+    }
+    uint first = control.destination_info.w;
+    if (record > 0xffffffffu - first) return;
+    record += first;
+    if (record >= control.source_info.y) return;
+    uint source_offset = control.source_info.x, source_length = uint(source_data.words.length());
+    if (source_offset > source_length || source_length - source_offset < 144) return;
+    if (record > (source_length - source_offset - 144) / 144) return;
+    uint destination_offset = control.destination_info.x, destination_length = uint(destination.words.length());
+    if (destination_offset > destination_length || destination_length - destination_offset < stride) return;
+    if (linear > (destination_length - destination_offset - stride) / stride) return;
+    for (uint k = 0; k < stride; k++) {
+        uint word = control.words[k / 4][k % 4];
+        if (word < 16 || word >= 144) return;
+    }
+    uint input_base = source_offset + record * 144, output_base = destination_offset + linear * stride;
+    for (uint k = 0; k < stride; k++)
+        destination.words[output_base + k] = source_data.words[input_base + control.words[k / 4][k % 4]];
+}
