@@ -1,6 +1,7 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
+#include "watch_android.h"
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #endif
@@ -828,6 +829,9 @@ static void map_image(module_t *m, const char *dir) {
         uint8_t *a = mmap(slot ? slot - pre : NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
+#ifdef __ANDROID__
+        if (dm_android_watch_module) dm_android_watch_module(m);
+#endif
         dm_copy_image(m, raw, fl, rx); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
         free(raw); install_key_page(m);
         if (bl && seal_code(m->base + m->back_off, bl)) die("%s mprotect back patch", m->name);
@@ -840,6 +844,9 @@ static void map_image(module_t *m, const char *dir) {
     uint8_t *slot = jit_slot(m, m->size, 0);
     m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
+#ifdef __ANDROID__
+    if (dm_android_watch_module) dm_android_watch_module(m);
+#endif
     dm_copy_image(m, raw, sz, rx); free(raw); install_key_page(m);
     if (seal_code(m->base, rx)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;

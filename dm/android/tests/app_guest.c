@@ -25,6 +25,28 @@ static void sleep_frame(void) {
     __asm__ volatile("svc #0x0b" : "+r"(x0) : : "memory");
 }
 static void require(int ok) { if (!ok) { NOTE("APP_FIXTURE_FAILED\n"); for (;;) sleep_frame(); } }
+#ifdef APP_WATCH
+static uintptr_t watch_heap(size_t size) {
+    register uint64_t x0 __asm__("x0") = 0; register uint64_t x1 __asm__("x1") = size;
+    __asm__ volatile("svc #0x01" : "+r"(x0), "+r"(x1) :: "memory");
+    require(!x0); return x1;
+}
+static void check_watch(void) {
+    for (unsigned i = 0; i < 32; i++) {
+        uintptr_t at = watch_heap(0x200000) + 0x80; uint64_t value = 0xabc000 + i;
+        if (i & 1) require(*(volatile uint64_t *)at == 0);
+        __asm__ volatile("str %1, [%0]" :: "r"(at), "r"(value) : "memory");
+        require(*(volatile uint64_t *)at == value); watch_heap(0);
+    }
+    uintptr_t at = watch_heap(0x200000) + 0x80; uint64_t value = 0x7777;
+    __asm__ volatile("stlr %1, [%0]" :: "r"(at), "r"(value) : "memory");
+    require(*(volatile uint64_t *)at == value); watch_heap(0);
+    at = watch_heap(0x200000) + 0x80; value = 0xbeef;
+    __asm__ volatile("str %1, [%0]" :: "r"(at), "r"(value) : "memory");
+    require(*(volatile uint64_t *)at == value); watch_heap(0);
+    NOTE("WATCH_FIXTURE_DONE\n");
+}
+#endif
 #ifdef APP_WEB
 #include "app_web.h"
 #endif
@@ -86,6 +108,9 @@ void _init_libc2(void) {}
 static _Alignas(16384) unsigned char storage[1 << 20];
 void nnMain(void) {
     NOTE("APP_FIXTURE_MAIN\n");
+#ifdef APP_WATCH
+    check_watch();
+#endif
     check_save();
 #ifdef APP_PROGRAM
     check_program();

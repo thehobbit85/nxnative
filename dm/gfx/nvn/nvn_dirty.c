@@ -4,6 +4,7 @@
 // Signal handler constraint: the page-fault path uses only atomic operations and mprotect, no allocation, no locks.
 #include "nvn_dirty.h"
 #include "../../host/dm.h"
+#include "../../host/watch_android.h"
 #include <stdatomic.h>
 #include <pthread.h>
 #include <sys/mman.h>
@@ -140,6 +141,14 @@ static void prep_write(void *addr, size_t len) {
     }
 }
 
+#ifdef __ANDROID__
+static void watch_takeover(void *owner, uintptr_t page) {
+    range_t *r = owner;
+    // The range is already live; a delayed watch fault must count as ours even
+    // before our first protect. g_slot_mu prevents a concurrent protect/upload.
+    stamp_page(r, (page - r->base) >> g_shift);
+}
+#endif
 void nvn_dirty_add_range(const void *mem, size_t size) {
     static int inited;
     if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); init_timebase(); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
@@ -179,6 +188,9 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     r->base = base; r->end = end; r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
+#ifdef __ANDROID__
+    if (dm_android_watch_dirty_range) dm_android_watch_dirty_range((void *)base, end - base, watch_takeover, r);
+#endif
     pthread_mutex_unlock(&g_slot_mu);
 }
 // Pool destruction: first restore still-protected pages to writable (the pool memory may be reused for something else once returned to the game), then mark invalid

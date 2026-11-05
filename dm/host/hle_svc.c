@@ -19,6 +19,7 @@
 #include <os/proc.h>   // os_proc_available_memory
 #endif
 #endif
+#include "watch_android.h"
 
 #define SWITCH_ALIAS UINT64_C(0x1000000000)   // a Switch's alias region: 64 GB
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
@@ -225,6 +226,9 @@ static void mem_init_once(void) {
     g_heap  = g_as + 0x10000000; g_heap_cap = RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000;
     g_stack = g_heap + g_heap_cap; g_stack_cap = DM_GAME_MEM_STACK;
     g_alias = g_stack + g_stack_cap; g_alias_cap = alias;
+#ifdef __ANDROID__
+    if (dm_android_watch_heap_reserved) dm_android_watch_heap_reserved(g_heap, g_heap_cap);
+#endif
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
@@ -358,6 +362,9 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // it back, so the files' range only goes PROT_NONE: its pages stay file pages, out of the footprint, which the kernel writes out when it needs the room;
 // they keep their old bytes, so the call returns 0 and alias_initialize zeroes them when they are mapped again
 static int guest_release(uintptr_t lo, uintptr_t hi) {
+#ifdef __ANDROID__
+    if (dm_android_watch_release) dm_android_watch_release(lo, hi);
+#endif
     if (g_gf_n) {
         if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
         return 0;
@@ -700,7 +707,13 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
         }
         int rc = 0;
-        if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
+        if (size > g_heap_cur) {
+#ifdef __ANDROID__
+            if (dm_android_watch_open) rc = dm_android_watch_open(g_heap + g_heap_cur, size - g_heap_cur);
+            else
+#endif
+            rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
+        }
         else if (size < g_heap_cur) (void)guest_release((uintptr_t)g_heap + size, (uintptr_t)g_heap + g_heap_cur);
         if (rc) die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, errno);
         // With the guest in files a heap given back kept its old bytes (guest_release): one that grows back over them reads 0 there, as the fresh mapping reads without the files

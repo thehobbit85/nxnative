@@ -13,7 +13,7 @@ from dm.tools.tests.test_nso import make_nso
 from dm.host.tests.gate.fixture import module
 
 
-def build(output, ndk, program=None, web=False, display=False):
+def build(output, ndk, program=None, web=False, display=False, watch=False):
     output.mkdir(parents=True, exist_ok=True)
     tc = ndk / 'toolchains/llvm/prebuilt' / ('darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64') / 'bin'
     asm = output / 'entry.S'
@@ -58,6 +58,7 @@ def build(output, ndk, program=None, web=False, display=False):
                     *(['-DAPP_PROGRAM=' + str(program)] if program is not None else []),
                     *(['-DAPP_WEB=1'] if web else []),
                     *(['-DAPP_DISPLAY=1'] if display else []),
+                    *(['-DAPP_WATCH=1'] if watch else []),
                     '-I' + str(ROOT / 'dm/gfx/nvn'), '-I' + str(ROOT / 'dm/gfx/nvn/include'), ROOT / 'dm/android/tests/app_guest.c', asm, '-o', elf], check=True)
     symbols = {}
     for line in subprocess.check_output([tc / 'llvm-nm', '-P', '--defined-only', elf], text=True).splitlines():
@@ -131,6 +132,7 @@ if __name__ == '__main__':
     p.add_argument('--program-index', type=int, choices=(0, 1, 2), help='multi-program handoff fixture')
     p.add_argument('--web', action='store_true', help='offline HTML applet fixture')
     p.add_argument('--display', action='store_true', help='display resolution service fixture')
+    p.add_argument('--watch', action='store_true', help='managed write-watch diagnostic fixture')
     a = p.parse_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or --ndk')
-    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display)
+    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display, a.watch)

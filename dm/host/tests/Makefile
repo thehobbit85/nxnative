@@ -28,6 +28,13 @@ android-watch-store-build: $(B)/t_watch_store_android
 $(B)/t_watch_store_android: t_watch_store.c ../watch_store.h ../watch_page.h ../watch_decode.h ../dm_uc.h | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -pthread -o $@ $<
 android-watch-page-build: $(B)/t_watch_page_android
+.PHONY: android-watch-runtime-build
+WATCH_RUNTIME = ../watch_android.c ../watch_android.h ../watch_store.h ../watch_page.h ../watch_decode.h ../dm_uc.h
+android-watch-runtime-build: $(B)/t_watch_runtime_android $(B)/t_watch_loader_android
+$(B)/t_watch_runtime_android: t_watch_runtime.c $(WATCH_RUNTIME) ../../gfx/nvn/nvn_dirty.c | $(B)
+	$(CLANG) -D_GNU_SOURCE $(MEM_FLAGS) -g -Wno-format -pthread -I../../android/compat -o $@ $< ../../gfx/nvn/nvn_dirty.c
+$(B)/t_watch_loader_android: t_watch_loader.c t_nro.c ../loader.c ../android_text.h $(WATCH_RUNTIME) $(GAME_H) | $(B)
+	$(CLANG) -D_GNU_SOURCE -O1 -g -Wall -Werror -Wno-format -Wno-unused-function -pthread -I.. $(GINC) -I../../android/compat -o $@ $< ../../android/compat/sha256.c
 $(B)/t_watch_page_android: t_watch_page.c ../watch_page.h | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -pthread -o $@ $<
 watch-decode: $(B)/t_watch_decode
@@ -596,6 +603,7 @@ android-memory-build: | $(B)
 	$(CLANG) -D_GNU_SOURCE $(MEM_FLAGS) -DDM_GAME_MEM_MAP_LIMIT=0 -o $(B)/t_memory_android_unlimited t_svc_memory.c
 
 MEM_DEPS = t_svc_memory.c memory_profile/game_profile.h ../host_memory.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
+$(B)/t_watch_runtime_android: $(MEM_DEPS)
 $(B)/t_svc_memory: $(MEM_DEPS) | $(B)
 	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c
 $(B)/t_svc_memory_unlimited: $(MEM_DEPS) | $(B)

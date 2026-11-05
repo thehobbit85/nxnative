@@ -2,6 +2,7 @@
 #include "dm.h"
 #include "host_memory.h"
 #include "watch_decode.h"
+#include "watch_android.h"
 #include <TargetConditionals.h>
 #include <signal.h>
 #include <dlfcn.h>
@@ -186,6 +187,8 @@ static void watch_install(void) {
     pthread_t t; pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t);
     if (g_wheap) LOG("write watch on heap + %#llx + %#llx (resolved once the game opens its heap)", (unsigned long long)g_wrel, (unsigned long long)g_wlen);
     else LOG("write watch on %#llx + %#llx (host page %#llx)", (unsigned long long)g_wat, (unsigned long long)g_wlen, (unsigned long long)g_wpg);
+#elif defined(__ANDROID__)
+    if (dm_android_watch_install) dm_android_watch_install();
 #else
     LOG("[RED] DM_PROBE_WATCH requires the Apple host");
 #endif
