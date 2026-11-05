@@ -17,5 +17,7 @@ Three projects from Ryujinx 1.3.2: `Ryujinx.Graphics.Shader`, `Ryujinx.Common` a
 
 - `Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs` and `Declarations.cs`: full texture-size queries return zero for axes absent from the resolved descriptor, while retaining array layers and mip counts; 1D sampled-image declarations carry the required capability. Synthetic seven-shape queries and paired Metal/Android GPU checks cover the fix. See [absent texture dimensions](../../../docs/reference/shaders.md#a-2d-query-requests-a-nonexistent-depth-component).
 
+- `IGpuAccessor.QueryHostPreservesTextureSampleOffsets` and `Translation/Transforms/TexturePass.cs`: an opt-in target can retain sample offsets for exact downstream lowering. Android uses native constant-offset candidates; implicit/bias candidates execute in the original derivative context. Fetch and gather keep the shared lowering. The default is false, and Apple output retains its previous behavior. See [Vulkan sample offsets](../../../docs/reference/shaders.md#vulkan-target-lowers-dynamic-texture-offsets).
+
 The shader translation tool in `dm/gfx/tools/dmsh_xlate` references them to translate the original Switch shaders to SPIR-V.
 License: MIT, see `LICENSE.txt`. Upstream: <https://github.com/Ryubing>.

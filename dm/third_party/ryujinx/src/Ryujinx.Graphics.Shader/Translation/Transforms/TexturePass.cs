@@ -312,10 +312,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             bool hasLodLevel = (texOp.Flags & TextureFlags.LodLevel) != 0;
 
             // A normalized displacement cannot preserve per-mip offsets under
-            // trilinear filtering or sampler LOD clamps. This target supplies
-            // an exact downstream lowering for explicit-LOD/gradient samples.
-            if (!isGather && !intCoords && (hasLodLevel || hasDerivatives) &&
-                gpuAccessor.QueryHostPreservesExplicitTextureSampleOffsets())
+            // trilinear filtering or sampler LOD clamps. With implicit LOD it
+            // also changes the derivatives when neighboring offsets differ.
+            // This target supplies exact native samples downstream, retaining
+            // the original derivative context for implicit-LOD/bias samples.
+            if (!isGather && !intCoords && gpuAccessor.QueryHostPreservesTextureSampleOffsets())
             {
                 return node;
             }

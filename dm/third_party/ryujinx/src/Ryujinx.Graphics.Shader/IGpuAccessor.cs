@@ -322,10 +322,10 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
-        /// Leave explicit-LOD/gradient sample offsets for an exact downstream
+        /// Leave sample offsets for an exact downstream
         /// lowering instead of approximating them by normalized coordinates.
         /// </summary>
-        bool QueryHostPreservesExplicitTextureSampleOffsets()
+        bool QueryHostPreservesTextureSampleOffsets()
         {
             return false;
         }
