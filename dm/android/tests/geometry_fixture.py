@@ -77,7 +77,7 @@ def main():
     (work / 'geometry_bindings.h').write_text(''.join(
         'static const unsigned gc_' + api + '_bindings[] = {' + ','.join(str(bindings[i]) for i in range(5)) + '};\n'
         for api, bindings in maps.items()))
-    print('Validated 32 geometry modules; emitted compute bindings for ' + ', '.join(maps))
+    print(f'Validated {len(list(out.glob("*.spv")))} geometry modules; emitted compute bindings for ' + ', '.join(maps))
 
 
 if __name__ == '__main__': main()

@@ -2542,6 +2542,7 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
         if len(columns) > 4 and columns[0].endswith('.bin') and columns[3] in products:
             if columns[2] == 'geometry':
                 products.update(columns[3] + f'.{kind}{topology}' for kind in ('g', 'gc', 'gr') for topology in range(5))
+                products.update(columns[3] + f'.gr{topology}.vc' for topology in range(5))
             elif columns[2] == 'vertex':
                 products.add(columns[3] + '.vc')
     expected = {k + suffix for k in products for suffix in ('.spv', '.vk.txt')}

@@ -28,7 +28,8 @@ class AndroidTarget(unittest.TestCase):
             calls = []
             def export(cmd, log, env=None):
                 out = Path(cmd[3]); out.mkdir()
-                for name in [key] + [key + f'.{kind}{t}' for kind in ('g', 'gc', 'gr') for t in range(5)]:
+                names = [key] + [key + f'.{kind}{t}' for kind in ('g', 'gc', 'gr') for t in range(5)]
+                for name in names + [key + f'.gr{t}.vc' for t in range(5)]:
                     (out / (name + '.spv')).write_bytes(b'shader')
                     (out / (name + '.vk.txt')).write_text('stage gs\n')
                 (out / 'export-contract.json').write_text('{}')
@@ -41,13 +42,16 @@ class AndroidTarget(unittest.TestCase):
                 (out / (key + '.g3.spv')).write_bytes(b'corrupt')
                 nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
                 self.assertEqual(len(calls), 2)
-                self.assertEqual(len(json.loads((out / 'manifest.json').read_text())['files']), 32)
+                self.assertEqual(len(json.loads((out / 'manifest.json').read_text())['files']), 42)
                 (out / (key + '.gc2.spv')).unlink()
                 nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
                 self.assertEqual(len(calls), 3)
                 (out / (key + '.gr4.vk.txt')).write_text('wrong reader layout')
                 nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
                 self.assertEqual(len(calls), 4)
+                (out / (key + '.gr2.vc.spv')).unlink()
+                nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
+                self.assertEqual(len(calls), 5)
 
     def test_android_tool_failure_precedes_package_scan_conversion_and_survey(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,7 +22,7 @@ def geometry_line(geometry, stage):
     """Bound the pinned translator's output map and SPH allocation dimensions."""
     if not isinstance(geometry, dict): raise ValueError('invalid geometry helper metadata')
     role = geometry.get('role')
-    if role not in ('compute', 'reader') or stage != ('cs' if role == 'compute' else 'vs'):
+    if role not in ('compute', 'reader', 'capture') or stage != ('cs' if role == 'compute' else 'vs'):
         raise ValueError('invalid geometry helper stage or fields')
     fields: list[int] = []
     for key in ('topology', 'stride', 'vertices', 'invocations', 'output', 'index_stride'):

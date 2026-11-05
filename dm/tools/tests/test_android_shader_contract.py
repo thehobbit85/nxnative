@@ -17,6 +17,11 @@ class ShaderContract(unittest.TestCase):
         geometry = dict(role='compute', topology=3, stride=134, vertices=3, invocations=1, output=7, index_stride=6)
         self.assertIn('geometry compute 3 134 3 1 7 6\n', vk.vk_txt(dict(stage='cs', bindings=[], geometry=geometry)))
         self.assertIn('geometry reader 3 134 3 1 7 6\n', vk.vk_txt(dict(stage='vs', bindings=[], geometry=dict(geometry, role='reader'))))
+        captured = dict(stage='vs', bindings=[], geometry=dict(geometry, role='capture'),
+                        capture=dict(words=144, control_words=6, output_binding=1, control_binding=2))
+        self.assertIn('geometry capture 3 134 3 1 7 6\n', vk.vk_txt(captured))
+        with self.assertRaisesRegex(ValueError, 'geometry'):
+            vk.vk_txt({k: v for k, v in captured.items() if k != 'capture'})
         for field, value in [('role', 'unknown'), ('topology', 5), ('stride', 145), ('stride', 4),
                              ('vertices', 0), ('vertices', 4096), ('invocations', 256), ('output', 5),
                              ('index_stride', 5), ('topology', True)]:
@@ -120,6 +125,10 @@ class NativeShaderContract(unittest.TestCase):
             self.assertIsNone(check(reader, len(reader), data, len(data) // 4))
             mixed = reader + b'capture 144 6 0 1\n'
             self.assertIsNotNone(check(mixed, len(mixed), data, len(data) // 4))
+            geometry_capture = mixed.replace(b'geometry reader ', b'geometry capture ')
+            self.assertIsNone(check(geometry_capture, len(geometry_capture), data, len(data) // 4))
+            missing = geometry_capture.replace(b'capture 144 6 0 1\n', b'')
+            self.assertIsNotNone(check(missing, len(missing), data, len(data) // 4))
             capture = good + b'capture 144 6 0 1\n'
             self.assertIsNone(check(capture, len(capture), data, len(data) // 4))
             for bad in (capture + b'capture 144 6 0 1\n', capture.replace(b'144 6', b'143 6'),

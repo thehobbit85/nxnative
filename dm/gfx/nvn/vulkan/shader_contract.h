@@ -103,6 +103,7 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
     if (entries != 1 || functions) return "incomplete SPIR-V module";
     int schema = 0, target = 0, stage = 0, captures = 0, geometries = 0, feedbacks = 0;
     dm_vk_feedback feedback = {0};
+    dm_vk_geometry geometry = {0};
     for (size_t at = 0; at < length;) {
         const char *line = text + at, *end = memchr(line, '\n', length - at);
         size_t n = end ? (size_t)(end - line) : length - at;
@@ -140,7 +141,6 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
             if (error) return error;
         } else if (n >= 9 && !memcmp(line, "geometry ", 9)) {
             if (geometries++) return "duplicate geometry interface";
-            dm_vk_geometry geometry;
             const char *error = dm_vk_geometry_line(line, n, model, &geometry);
             if (error) return error;
         } else if (!((n >= 3 && !memcmp(line, "tg ", 3)) || (n >= 3 && !memcmp(line, "c1 ", 3)) ||
@@ -149,7 +149,7 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
         }
     }
     if (schema != 1 || target != 1 || stage != 1) return "missing shader contract";
-    if (geometries && captures) return "geometry helper cannot also be vertex capture";
+    if (geometries && geometry.capture != captures) return "geometry capture role needs its capture interface exclusively";
     if (feedbacks && model == 5 && !geometries) return "compute feedback needs geometry interface";
     for (unsigned i = 0; i < nc; i++) if (!cap_seen[i]) return "missing shader capability";
     for (unsigned i = 0; i < ne; i++) if (!ext_seen[i]) return "missing shader extension";

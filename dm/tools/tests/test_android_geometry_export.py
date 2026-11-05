@@ -89,7 +89,7 @@ class GeometryExport(unittest.TestCase):
                     (prepared / (name + '.reflection.json')).write_text(json.dumps(refl))
                 vk.capture_manifest(prepared, sorted(family), vk.shader_contract())
                 vk.export_prepared(prepared, work / 'export', [key])
-                self.assertEqual(len(list((work / 'export').glob('*.spv'))), 16)
+                self.assertEqual(len(list((work / 'export').glob('*.spv'))), 21)
                 for name in family:
                     sidecar = (work / 'export' / (name + '.vk.txt')).read_text()
                     if '.gc' in name:
@@ -102,6 +102,12 @@ class GeometryExport(unittest.TestCase):
                         self.assertIn('stage vs\n', sidecar)
                         self.assertIn('geometry reader ', sidecar)
                         self.assertNotIn('\ncapture ', sidecar)
+                        captured = (work / 'export' / (name + '.vc.vk.txt')).read_text()
+                        self.assertIn('geometry capture ', captured)
+                        self.assertIn('\ncapture 144 6 ', captured)
+                        self.assertIn(' geometry 0 ', captured)
+                        self.assertIn(' geometry 5 ', captured)
+                        self.assertNotIn('geometry reader ', captured)
                     else: self.assertNotIn('\ntg ', sidecar)
                 orphan = work / 'orphan'; orphan.mkdir(); helper = key + '.gc0'
                 for suffix in ('.spv', '.reflection.json'):
