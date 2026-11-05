@@ -1,6 +1,7 @@
 // Probes DM_PROBE: when the debugger needs a system authorization prompt on the Mac, use this to print registers and a backtrace at a guest address.
 #include "dm.h"
 #include "host_memory.h"
+#include "watch_decode.h"
 #include <TargetConditionals.h>
 #include <signal.h>
 #include <dlfcn.h>
@@ -36,55 +37,11 @@ static void watch_where(const char *tag, uint64_t a) {
     else fprintf(stderr, " %s=%#llx", tag, (unsigned long long)a);
 }
 static uint64_t watch_val(void) { uint64_t v = 0; memcpy(&v, (void *)g_wat, g_wlen < 8 ? g_wlen : 8); return v; }
-// Decode the store at pc: its address, size and data (up to 64 bytes); the base register write-back (wb: register number, value) for pre- and post-index forms. 0 when not a decodable store
-static int watch_decode(ucontext_t *uc, uint32_t in, uint64_t *ea, unsigned *len, uint8_t *data, int *wb, uint64_t *wbv) {
-    _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss; _STRUCT_ARM_NEON_STATE64 *ns = &uc->uc_mcontext->__ns;
-#define XN(r) ((r) == 31 ? ss->__sp : (r) == 29 ? ss->__fp : (r) == 30 ? ss->__lr : ss->__x[r])        // base register: 31 = sp
-#define XT(r) ((r) == 31 ? 0 : (r) == 29 ? ss->__fp : (r) == 30 ? ss->__lr : ss->__x[r])                // data register: 31 = zero
-    unsigned rt = in & 31, rn = (in >> 5) & 31, v = (in >> 26) & 1; *wb = -1;
-    if ((in & 0xffffffe0) == 0xd50b7420) {                        // DC ZVA: zero the 64-byte block
-        *ea = XT(rt) & ~63ull; *len = 64; memset(data, 0, 64); return 1; }
-    if ((in & 0x3a000000) == 0x28000000) {                                                               // STP / STNP: opc 101 V 0 type L imm7
-        if (in & (1u << 22)) return 0;                                                                   // LDP
-        unsigned opc = in >> 30, type = (in >> 23) & 3, sz = v ? 4u << opc : (opc & 2 ? 8 : 4);
-        if ((!v && opc == 1) || opc == 3) return 0;                                                      // STGP / LDPSW, reserved
-        int64_t imm = ((int64_t)(int32_t)(in << 10) >> 25) * (int64_t)sz; uint64_t base = XN(rn);
-        *ea = type == 1 ? base : base + imm; *len = 2 * sz;
-        unsigned r2 = (in >> 10) & 31;
-        if (v) { memcpy(data, &ns->__v[rt], sz); memcpy(data + sz, &ns->__v[r2], sz); }
-        else { uint64_t a = XT(rt), b = XT(r2); memcpy(data, &a, sz); memcpy(data + sz, &b, sz); }
-        if (type == 1 || type == 3) { *wb = (int)rn; *wbv = base + imm; }
-        return 1;
-    }
-    if ((in & 0x3b000000) == 0x39000000 || (in & 0x3b200000) == 0x38000000 || (in & 0x3b200c00) == 0x38200800) {   // STR (unsigned offset) / STUR, STR pre / post / STR (register)
-        unsigned size = in >> 30, opc = (in >> 22) & 3, sz;
-        if (v) { if (opc == 0) sz = 1u << size; else if (opc == 2 && size == 0) sz = 16; else return 0; }
-        else { if (opc != 0) return 0; sz = 1u << size; }
-        uint64_t base = XN(rn), addr;
-        if ((in & 0x3b000000) == 0x39000000) addr = base + (uint64_t)((in >> 10) & 0xfff) * sz;          // unsigned offset
-        else if (!(in & (1u << 21))) {                                                                   // imm9: unscaled, post (01), pre (11)
-            int64_t imm = (int64_t)(int32_t)(in << 11) >> 23; unsigned k = (in >> 10) & 3;
-            if (k == 2) return 0;                                                                        // STTR
-            addr = k == 1 ? base : base + imm;
-            if (k == 1 || k == 3) { *wb = (int)rn; *wbv = base + imm; }
-        } else {                                                                                         // register offset: option (15:13), S (12)
-            unsigned rm = (in >> 16) & 31, opt = (in >> 13) & 7, s = (in >> 12) & 1; uint64_t x = XT(rm);
-            if (opt == 2) x = (uint32_t)x; else if (opt == 6) x = (uint64_t)(int64_t)(int32_t)x; else if (opt != 3 && opt != 7) return 0;
-            addr = base + (s ? x << __builtin_ctz(sz) : x);
-        }
-        *ea = addr; *len = sz;
-        if (v) memcpy(data, &ns->__v[rt], sz); else { uint64_t a = XT(rt); memcpy(data, &a, sz); }
-        return 1;
-    }
-    return 0;
-#undef XN
-#undef XT
-}
 static int watch_fault(void *addr, int is_write, void *ucv) {
     uint64_t a = (uint64_t)addr;
     if (!is_write || !g_wat || a < g_wpg || a >= g_wpg + g_wpsz) return 0;
     ucontext_t *uc = ucv; uint64_t pc = uc->uc_mcontext->__ss.__pc, ea = 0, wbv = 0; unsigned len = 0; int wb = -1; uint8_t data[64];
-    if (g_walias && watch_decode(uc, *(uint32_t *)pc, &ea, &len, data, &wb, &wbv)) {
+    if (g_walias && dm_watch_decode(uc, *(uint32_t *)pc, &ea, &len, data, &wb, &wbv)) {
         int hit = ea < g_wat + g_wlen && ea + len > g_wat; uint64_t old = hit ? watch_val() : 0;
         for (unsigned i = 0; i < len; i++) {   // bytes in the watched page go through the alias; a store crossing into the next page writes the rest directly
             uint64_t b = ea + i;
