@@ -1,4 +1,5 @@
 # NDK cross-build or headless Linux replay with a local Vulkan driver.
+.DEFAULT_GOAL := replay-test
 HOST = ../../../host
 NVN = ..
 B ?= build
@@ -9,6 +10,30 @@ CPPFLAGS += -D_GNU_SOURCE -I$(HOST) -I$(HOST)/gen/$(GAME) -I../../../games/$(GAM
 CFLAGS += -O1 -Wall -Werror -Wno-unused-function
 REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
+.PHONY: vertex-capture-fixture vertex-capture-test
+vertex-capture-fixture: $(B)/t_shader_capture $(B)/capture.spv
+vertex-capture-test: vertex-capture-fixture
+	$(B)/t_shader_capture $(B)/capture.spv
+$(B)/t_shader_capture: tests/t_shader_capture.c
+	mkdir -p $(B)
+	$(CC) $(CFLAGS) $< -o $@ $(LIBS)
+$(B)/capture.spv: ../../../tools/tests/test_android_vertex_capture.py ../../../android/tools/spv_capture.py ../../../android/tools/spv_module.py ../dmsh_abi.h ../../tools/dmsh_geometry.py
+	mkdir -p $(B)
+	GLSLC="$(GLSLC)" python3 ../../../tools/tests/test_android_vertex_capture.py --fixture $@
+# Optional Mac reference: compare metal-capture.bin with the Vulkan fixture's
+# optional output file. Keep native fixture products apart from NDK binaries.
+.PHONY: vertex-capture-metal-test
+vertex-capture-metal-test: $(B)/t_shader_capture_metal $(B)/capture.metallib
+	$(B)/t_shader_capture_metal $(B)/capture.metallib $(B)/metal-capture.bin
+$(B)/t_shader_capture_metal: tests/t_shader_capture_metal.m
+	mkdir -p $(B)
+	clang -fobjc-arc -O1 -Wall -Wextra -Werror -framework Foundation -framework Metal $< -o $@
+$(B)/capture.metal: ../../../tools/tests/test_android_vertex_capture.py ../../tools/dmsh_geometry.py ../../tools/dmsh_build.py
+	mkdir -p $(B)
+	GLSLC="$(GLSLC)" python3 ../../../tools/tests/test_android_vertex_capture.py --fixture $(B)/metal-input.spv --metal-fixture $@
+$(B)/capture.metallib: $(B)/capture.metal
+	xcrun -sdk macosx metal -std=macos-metal2.4 -fmodules-cache-path=$(B)/module-cache -c $< -o $(B)/capture.air
+	xcrun -sdk macosx metallib $(B)/capture.air -o $@
 .PHONY: replay-test fixture profile
 replay-test: fixture
 	DM_VK_DIR="$(abspath $(B))/shaders" $(B)/t_replay

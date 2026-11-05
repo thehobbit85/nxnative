@@ -16,6 +16,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 from dm.android.tools.target_contract import shader_contract, stamp_export
+from dm.android.tools.spv_module import decode, opcode, string_operand
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
 
@@ -46,33 +47,6 @@ def capture(args):
             control = {key: item[key] for key in ('tf',) if key in item}
             (Path(os.environ['DMSH_SPV_CAPTURE']) / (item['key'] + '.control.json')).write_text(json.dumps(control))
     return 0
-
-
-def decode(data):
-    if len(data) < 20 or len(data) % 4:
-        raise ValueError('truncated SPIR-V module')
-    words = struct.unpack(f'<{len(data) // 4}I', data)
-    if words[0] != 0x07230203:
-        raise ValueError('invalid SPIR-V magic')
-    if words[1] not in (0x10000, 0x10100, 0x10200, 0x10300):
-        raise ValueError('SPIR-V version is incompatible with Vulkan 1.1')
-    at = 5
-    instructions = []
-    while at < len(words):
-        count = words[at] >> 16
-        if not count or at + count > len(words):
-            raise ValueError(f'invalid SPIR-V instruction at word {at}')
-        instructions.append(words[at:at + count])
-        at += count
-    return words[:5], instructions
-
-
-def opcode(instruction):
-    return instruction[0] & 0xffff
-
-
-def string_operand(words):
-    return struct.pack(f'<{len(words)}I', *words).split(b'\0', 1)[0].decode()
 
 
 def descriptor_type(ty, types, decorations, storage):
