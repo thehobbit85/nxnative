@@ -93,7 +93,11 @@ class Module:
                 op = opcode(i)
                 if op == 54: in_function = True
                 if op == 59 and i[2] == variable and len(i) > 4: return True
-                if in_function and variable in i[1:]:
+                # OpExtInst's instruction number is a literal, not an ID:
+                # GLSL Fma (50) can coincide with the output block's ID 50.
+                # Its actual arguments still count, including pointer escapes.
+                operands = i[1:4] + i[5:] if op == 12 else i[1:]
+                if in_function and variable in operands:
                     if op in (65, 66) and i[3] == variable:
                         access = [self.constants.get(index) for index in i[4:]]
                         if any(a is not None and a != b for a, b in zip(access, path)): continue

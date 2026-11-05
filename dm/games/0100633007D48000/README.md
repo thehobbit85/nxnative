@@ -50,6 +50,8 @@ The separate asset deployment uses the merged RomFS image directly. Synthetic AP
 
 ## Found on this game
 
+- [Vulkan vertex capture matches Metal's raw output words](../../../docs/reference/shaders.md#vulkan-vertex-capture-matches-metals-raw-output-words): resolved a false live-output detection caused by a literal SPIR-V instruction number matching an output variable ID; Android geometry replay remains open.
+
 - [Vulkan texture uploads visible to sampling](../../../docs/reference/rendering.md#vulkan-texture-uploads-visible-to-sampling): restored the Android player, HUD, title background and scene effects.
 
 - [Android assets and large RomFS images](../../../docs/reference/packing.md#android-assets-and-large-romfs-images): shared builder and APK review, with synthetic font/DLC and archive checks.

@@ -13,6 +13,16 @@ import spv_android as vk
 
 
 class ShaderContract(unittest.TestCase):
+    def test_capture_interface_is_bounded_and_vertex_only(self):
+        valid = dict(words=144, control_words=6, output_binding=7, control_binding=8)
+        self.assertIn('capture 144 6 7 8\n', vk.vk_txt(dict(stage='vs', bindings=[], capture=valid)))
+        for key, value in [('words', 143), ('control_words', 5), ('output_binding', 8),
+                           ('output_binding', -1), ('control_binding', 0x80000000), ('words', True)]:
+            with self.subTest(field=key, value=value), self.assertRaisesRegex(ValueError, 'capture'):
+                vk.vk_txt(dict(stage='vs', bindings=[], capture=dict(valid, **{key: value})))
+        with self.assertRaisesRegex(ValueError, 'capture'):
+            vk.vk_txt(dict(stage='cs', bindings=[], capture=valid))
+
     def test_sidecar_declares_version_and_target(self):
         text = vk.vk_txt(dict(stage='cs', bindings=[]))
         self.assertTrue(text.startswith('schema 2\ntarget vulkan1.1\n'), text)
@@ -78,6 +88,12 @@ class NativeShaderContract(unittest.TestCase):
             good = b'schema 2\ntarget vulkan1.1\nstage vs\ncap 1\ntf 0 20 0 2 1 3\ntf 2 4 1 1\n'
             self.assertIsNone(check(good, len(good), data, len(data) // 4))
             for bad in (good + b'tf 0 4 0 1\n', good.replace(b'tf 0 20', b'tf 0 16')):
+                self.assertIsNotNone(check(bad, len(bad), data, len(data) // 4))
+            capture = good + b'capture 144 6 0 1\n'
+            self.assertIsNone(check(capture, len(capture), data, len(data) // 4))
+            for bad in (capture + b'capture 144 6 0 1\n', capture.replace(b'144 6', b'143 6'),
+                        capture.replace(b'144 6', b'144 5'), capture.replace(b'6 0 1', b'6 0 0'),
+                        capture.replace(b'6 0 1', b'6 -1 1'), capture.replace(b'6 0 1', b'6 2147483648 1')):
                 self.assertIsNotNone(check(bad, len(bad), data, len(data) // 4))
 
 

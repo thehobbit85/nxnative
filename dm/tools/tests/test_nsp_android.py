@@ -191,8 +191,9 @@ class AndroidTarget(unittest.TestCase):
                 env = dict(PATH=str(tool_dir)); state = {'revision': b'first output'}
                 def exporter(cmd, log, env=None, key=key, state=state):
                     out = Path(cmd[3]); out.mkdir()
-                    (out / (key + '.spv')).write_bytes(state['revision'])
-                    (out / (key + '.vk.txt')).write_text('stage vs\n')
+                    for name in (key, key + '.vc'):
+                        (out / (name + '.spv')).write_bytes(state['revision'])
+                        (out / (name + '.vk.txt')).write_text('stage vs\n')
                     (out / 'export-contract.json').write_text('{}')
                 with mock.patch.object(nsp, 'run', exporter), mock.patch.object(nsp, 'PROG', mock.Mock()):
                     result = nsp.android_shaders(sys.executable, repo, shader, env, shader, g, 'package bytes')
@@ -221,8 +222,9 @@ class AndroidTarget(unittest.TestCase):
             mutate = False
             def exporter(cmd, log, env=None):
                 out = Path(cmd[3]); out.mkdir()
-                (out / (key + '.spv')).write_bytes(b'unstable' if mutate else b'original')
-                (out / (key + '.vk.txt')).write_text('stage vs\n')
+                for name in (key, key + '.vc'):
+                    (out / (name + '.spv')).write_bytes(b'unstable' if mutate else b'original')
+                    (out / (name + '.vk.txt')).write_text('stage vs\n')
                 (out / 'export-contract.json').write_text('{}')
                 if mutate: inputs.write_text('changed during translation')
             with mock.patch.object(nsp, 'run', exporter), mock.patch.object(nsp, 'PROG', mock.Mock()):
@@ -242,8 +244,9 @@ class AndroidTarget(unittest.TestCase):
             calls = []
             def export(cmd, log, env=None):
                 out = Path(cmd[3]); out.mkdir()
-                (out / (key + '.spv')).write_bytes(b'shader')
-                (out / (key + '.vk.txt')).write_text('stage vs\n')
+                for name in (key, key + '.vc'):
+                    (out / (name + '.spv')).write_bytes(b'shader')
+                    (out / (name + '.vk.txt')).write_text('stage vs\n')
                 (out / 'export-contract.json').write_text('{}')
                 calls.append(cmd)
             with mock.patch.object(nsp, 'run', export), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'profile_files', return_value=[]):
@@ -260,6 +263,13 @@ class AndroidTarget(unittest.TestCase):
                 nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source2')
                 self.assertEqual(len(calls), 4)
                 self.assertFalse((out / (key + '.g0.spv')).exists())
+                (out / (key + '.vc.spv')).unlink()
+                nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source2')
+                self.assertEqual(len(calls), 5)
+                self.assertEqual(len(json.loads((out / 'manifest.json').read_text())['files']), 4)
+                (out / (key + '.vc.vk.txt')).write_text('wrong capture interface')
+                nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source2')
+                self.assertEqual(len(calls), 6)
 
 
 if __name__ == '__main__':

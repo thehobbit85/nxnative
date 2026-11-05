@@ -6,6 +6,26 @@
 #include <stddef.h>
 #include <string.h>
 
+// Raster-discard vertex capture: the geometry ABI plus two helper bindings.
+typedef struct { uint32_t output_binding, control_binding; } dm_vk_capture;
+static const char *dm_vk_capture_line(const char *line, size_t n, dm_vk_capture *capture) {
+    uint32_t values[4]; unsigned count = 0;
+    if (n < 8 || memcmp(line, "capture ", 8)) return "invalid capture record";
+    for (size_t at = 8; at < n;) {
+        if (count == 4 || line[at] < '0' || line[at] > '9') return "invalid capture field";
+        uint32_t value = 0;
+        do {
+            if (value > (INT32_MAX - (uint32_t)(line[at] - '0')) / 10) return "invalid capture field";
+            value = value * 10 + (uint32_t)(line[at++] - '0');
+        } while (at < n && line[at] >= '0' && line[at] <= '9');
+        values[count++] = value;
+        if (at < n && (line[at++] != ' ' || at == n)) return "invalid capture field";
+    }
+    if (count != 4 || values[0] != 144 || values[1] != 6 || values[2] == values[3]) return "invalid capture interface";
+    capture->output_binding = values[2]; capture->control_binding = values[3];
+    return NULL;
+}
+
 // Four NVN capture buffers, each an ordered list of generic attribute slices.
 // Duplicate locations (including duplicates in different buffers) are valid.
 typedef struct {
@@ -80,7 +100,7 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
         at += n;
     }
     if (entries != 1 || functions) return "incomplete SPIR-V module";
-    int schema = 0, target = 0, stage = 0;
+    int schema = 0, target = 0, stage = 0, captures = 0;
     dm_vk_feedback feedback = {0};
     for (size_t at = 0; at < length;) {
         const char *line = text + at, *end = memchr(line, '\n', length - at);
@@ -110,6 +130,11 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
         } else if (n >= 3 && !memcmp(line, "tf ", 3)) {
             if (model != 0 && model != 3) return "invalid feedback stage";
             const char *error = dm_vk_feedback_line(line, n, &feedback);
+            if (error) return error;
+        } else if (n >= 8 && !memcmp(line, "capture ", 8)) {
+            if (model != 0 || captures++) return "invalid capture stage or duplicate interface";
+            dm_vk_capture capture;
+            const char *error = dm_vk_capture_line(line, n, &capture);
             if (error) return error;
         } else if (!((n >= 3 && !memcmp(line, "tg ", 3)) || (n >= 3 && !memcmp(line, "c1 ", 3)) ||
                      (n >= 4 && !memcmp(line, "vin ", 4)) || (n >= 2 && !memcmp(line, "b ", 2)))) {

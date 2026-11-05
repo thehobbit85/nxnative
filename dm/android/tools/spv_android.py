@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 from dm.android.tools.target_contract import shader_contract, stamp_export
 from dm.android.tools.spv_module import decode, opcode, string_operand
+from dm.android.tools.spv_capture import geometry_capture
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
 
@@ -158,7 +159,7 @@ def export_spirv(data, optimizer):
 
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
 RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'img', 'sbuf', 'tbuf', 'ubo_ptr',
-                  'samp', 'samp_ubo', 'samp_tex', 'samp_id'}
+                  'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry'}
 
 
 def requirements(data):
@@ -213,6 +214,13 @@ def vk_txt(meta):
         lines.append(f"c1 {meta['c1']}")
     if 'tf' in meta:
         lines += feedback_rows(meta['tf'], meta['stage'])
+    if 'capture' in meta:
+        capture = meta['capture']
+        values = [capture.get(k) for k in ('words', 'control_words', 'output_binding', 'control_binding')]
+        if (meta['stage'] != 'vs' or any(type(v) is not int for v in values) or values[:2] != [144, 6] or
+                any(not 0 <= v <= 0x7fffffff for v in values[2:]) or values[2] == values[3]):
+            raise ValueError('invalid vertex capture interface')
+        lines.append('capture ' + ' '.join(map(str, values)))
     for vertex in meta.get('vertex_inputs', []):
         location, ty = vertex['location'], vertex['msl_type'].rstrip('1234')
         if ty not in VERTEX_TYPES or not 0 <= location < 32:
@@ -319,6 +327,19 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
     meta.update(key=key, tg=refl.get('threadgroup_size') if refl['stage'] == 'cs' else None,
                 bindings=bindings, **requirements(data))
     (destination / (key + '.vk.txt')).write_text(vk_txt(meta))
+    if refl['stage'] == 'vs':
+        try:
+            captured, control = geometry_capture(data)
+        except ValueError as exc:
+            raise ValueError(f'{key}: {exc}') from exc
+        capture_path = destination / (key + '.vc.spv')
+        capture_path.write_bytes(captured)
+        subprocess.run([validator, '--target-env', 'vulkan1.1', capture_path], check=True)
+        reflection = dict(refl, bindings=refl['bindings'] + [
+            dict(msl_name='dm_geometry_output', kind='geometry', reg=0),
+            dict(msl_name='dm_geometry_control', kind='geometry', reg=5)])
+        capture_meta = dict(meta, capture=control, bindings=vk_reflect(captured, reflection), **requirements(captured))
+        (destination / (key + '.vc.vk.txt')).write_text(vk_txt(capture_meta))
     return meta['stage']
 
 
