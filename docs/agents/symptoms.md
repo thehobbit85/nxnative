@@ -804,6 +804,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- an older Android runtime could read newer shader sidecars, silently ignore unknown fields, and attempt a pipeline with incomplete metadata. → [Versioned Vulkan shader products](../reference/shaders.md#versioned-vulkan-shader-products)
 - an exported shader with separate texture/sampler descriptors loses its image shape or fails with an unsupported sampler kind, and the executor rejects the draw's descriptor array. → [Separate Vulkan texture and sampler descriptors](../reference/shaders.md#separate-vulkan-texture-and-sampler-descriptors)
 - a read-only storage input is treated as a GPU writer and copied back to guest memory. → [Read-only Vulkan storage blocks retain ownership](../reference/shaders.md#read-only-vulkan-storage-blocks-retain-ownership)
 - the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`). → [One scrambled archive indexed by the NRO](../reference/shaders.md#one-scrambled-archive-indexed-by-the-nro)

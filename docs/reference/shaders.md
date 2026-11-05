@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Vulkan resource reflection
 
+### Versioned Vulkan shader products
+
+- **Symptom:** an older Android runtime could read newer shader sidecars, silently ignore unknown fields, and attempt a pipeline with incomplete metadata.
+- **Cause:** the sidecar carried neither a schema nor a target version. Required SPIR-V capabilities and extensions were not represented in the runtime contract.
+- **Fix:** schema 2 declares the Vulkan 1.1 target and retains the emitted module's capability and extension lists. The bounded runtime reader checks the version, stage, complete requirements and instruction framing before creating Vulkan objects. Missing, duplicate, unknown or incompatible contract records reject the shader with a diagnostic. APK provenance and the importer require the same shader schema; rebuild the native host, exported shaders and APK together. Advanced stages can be exported but still require their renderer implementation.
+- **Check:** synthetic SPIR-V is accepted by the actual C reader; stale schemas, wrong stages, omitted/extra requirements and malformed modules are rejected. Android Vulkan replay exercises schema 2 in the driver. Device feature availability remains a separate renderer/device qualification requirement.
+- **Found on:** the Android parity contract audit (synthetic shaders; no game-specific rule).
+
 ### Separate Vulkan texture and sampler descriptors
 
 - **Symptom:** an exported shader with separate texture/sampler descriptors loses its image shape or fails with an unsupported sampler kind, and the executor rejects the draw's descriptor array.

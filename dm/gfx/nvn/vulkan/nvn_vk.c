@@ -19,6 +19,7 @@
 #include "spv_output_defaults.h"
 #include "spv_draw_parameters.h"
 #include "spv_buffer_bias.h"
+#include "shader_contract.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -1248,6 +1249,11 @@ static shader_t *shader_get(const uint8_t md[8]) {
     shader_t *s = calloc(1, sizeof *s); strcpy(s->key, key); s->stage = -1;
     g_sh = realloc(g_sh, (g_nsh + 1) * sizeof *g_sh); g_sh[g_nsh++] = s;
     if (!spv || !txt) { LOG("[RED] vk: shader %s not in %s", key, g_vkdir); free(spv); free(txt); return s; }
+    const char *contract_error = ns % 4 ? "unaligned SPIR-V length" : dm_vk_shader_contract(txt, nt, spv, ns / 4);
+    if (contract_error) {
+        LOG("[RED] vk: shader %s rejected: %s; export shaders again", key, contract_error);
+        free(spv); free(txt); return s;
+    }
     for (char *ln = strtok(txt, "\n"); ln; ln = strtok(NULL, "\n")) {
         char a[16], ty[8], kind[16], sk[16], access[4] = ""; int b, cnt, reg, off, sreg, l, t;
         if (sscanf(ln, "stage %15s", a) == 1) s->stage = !strcmp(a, "vs") ? 0 : !strcmp(a, "ps") ? 1 : !strcmp(a, "cs") ? 5 : -1;
@@ -1272,6 +1278,7 @@ static shader_t *shader_get(const uint8_t md[8]) {
         }
     }
     free(txt);
+    if (s->stage < 0) { LOG("[RED] vk: shader %s needs a stage the renderer does not execute", key); free(spv); return s; }
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
     if (!spv) return s;

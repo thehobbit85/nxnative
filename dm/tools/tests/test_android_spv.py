@@ -219,7 +219,7 @@ OpFunctionEnd
 
     def test_packaged_geometry_stage_is_preserved_without_claiming_runtime_support(self):
         for stage in ('gs', 'hs', 'ds'):
-            self.assertEqual(vk.vk_txt({'stage': stage, 'bindings': []}), f'stage {stage}\n')
+            self.assertEqual(vk.vk_txt({'stage': stage, 'bindings': []}), f'schema 2\ntarget vulkan1.1\nstage {stage}\n')
         with self.assertRaisesRegex(ValueError, 'stage'):
             vk.vk_txt({'stage': 'invalid', 'bindings': []})
 
@@ -240,7 +240,7 @@ OpFunctionEnd
                 refl = {'bindings': [{'msl_name': 'output_image', 'kind': 'img', 'reg': 3}]}
                 binds = vk.vk_reflect(prepared, refl)
                 sidecar = vk.vk_txt({'stage': 'cs', 'tg': [1, 1, 1], 'bindings': binds})
-                self.assertEqual(sidecar, 'stage cs\ntg 1 1 1\nb 7 simg 1 img 3 -1 - -1\n')
+                self.assertEqual(sidecar, 'schema 2\ntarget vulkan1.1\nstage cs\ntg 1 1 1\nb 7 simg 1 img 3 -1 - -1\n')
                 with self.assertRaisesRegex(ValueError, 'no guest resource'):
                     vk.vk_reflect(prepared, {'bindings': []})
 

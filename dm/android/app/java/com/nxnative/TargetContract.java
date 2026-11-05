@@ -81,7 +81,8 @@ final class TargetContract {
             }
         }
         need(scalar.keySet().equals(known), "missing manifest fields");
-        for (String key : new String[]{"schema", "host_abi", "shader_schema"}) need("1".equals(scalar.get(key)), key);
+        for (String key : new String[]{"schema", "host_abi"}) need("1".equals(scalar.get(key)), key);
+        need("2".equals(scalar.get("shader_schema")), "shader_schema");
         need("android".equals(scalar.get("platform")) && "arm64-v8a".equals(scalar.get("arch")) && "2".equals(scalar.get("tp_slot")), "platform or thread ABI");
         need(scalar.get("shader_chain").matches("[0-9a-f]{12}") && digest(scalar.get("exporter")) && digest(scalar.get("profile_header")), "shader/profile producer identity");
         need(scalar.get("profile").matches("[0-9A-F]{16}") && scalar.get("title").matches("[0-9A-F]{16}"), "title/profile identity");
