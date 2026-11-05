@@ -131,6 +131,19 @@ android-friends-build: $(B)/t_friends_android
 $(B)/t_friends_android: $(FRIENDS_SRC) $(FRIENDS_HEADERS) | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -DDM_TEST_GUEST_SYMBOLS -I.. -I../../android/compat $(GINC) -o $@ $(FRIENDS_SRC)
 .PHONY: network android-network-build
+run: offline-services
+.PHONY: offline-services android-offline-services-build
+OFFLINE_SERVICES_SRC = t_offline_services.c ../hle_thread.c ../hle_bigstack.c ../hle_net.c
+OFFLINE_SERVICES_HEADERS = ../hle_misc.c ../hle_offline.c ../hle_sdk16.c ../hle.h ../dm.h ../thread_snapshot.h $(GAME_H)
+offline-services: $(B)/t_offline_services
+	$(B)/t_offline_services $(QUIET)
+$(B)/t_offline_services: $(OFFLINE_SERVICES_SRC) $(OFFLINE_SERVICES_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ $(OFFLINE_SERVICES_SRC)
+android-offline-services-build: $(B)/t_offline_services_android $(B)/t_pctl_android
+$(B)/t_offline_services_android: $(OFFLINE_SERVICES_SRC) $(OFFLINE_SERVICES_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -Wno-frame-address -I.. -I../../android/compat $(GINC) -o $@ $(OFFLINE_SERVICES_SRC)
+$(B)/t_pctl_android: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $<
 .PHONY: web android-web-build
 DISPLAY_SRC = t_display.c t_display_front.c
 DISPLAY_HEADERS = ../../gfx/hle_nv.c ../../gfx/hle_vi.c ../hle_nvdrv.c ../hle.h ../dm.h $(GAME_H)
