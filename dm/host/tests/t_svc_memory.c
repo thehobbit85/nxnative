@@ -58,12 +58,13 @@ module_t *module_of(const void *p) {
 
 #ifdef TEST_REAL_DIRTY
 #include "../../gfx/nvn/nvn_dirty.h"
-static void (*write_prepare)(void *, size_t);
-static int (*fault_hook)(void *, int, void *);
-void dm_fault_hook_register(int (*fn)(void *, int, void *)) { fault_hook = fn; }
-void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { write_prepare = fn; }
+static void (*write_prepare[4])(void *, size_t);
+static int (*fault_hook[4])(void *, int, void *);
+static unsigned nwrite_prepare, nfault_hook;
+void dm_fault_hook_register(int (*fn)(void *, int, void *)) { assert(nfault_hook < 4); fault_hook[nfault_hook++] = fn; }
+void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { assert(nwrite_prepare < 4); write_prepare[nwrite_prepare++] = fn; }
 static void memory_fault(int sig, siginfo_t *info, void *ctx) {
-    if (fault_hook && fault_hook(info->si_addr, 1, ctx)) return;
+    for (unsigned i = 0; i < nfault_hook; i++) if (fault_hook[i](info->si_addr, 1, ctx)) return;
     _exit(128 + sig);
 }
 #endif
@@ -73,7 +74,7 @@ static size_t readonly_size;
 void dm_guest_write_prepare(void *addr, size_t size) {
     atomic_fetch_add(&prepares, 1);
 #ifdef TEST_REAL_DIRTY
-    if (write_prepare) write_prepare(addr, size);
+    for (unsigned i = 0; i < nwrite_prepare; i++) write_prepare[i](addr, size);
 #endif
     if (readonly_size && (uintptr_t)addr < readonly_base + readonly_size && readonly_base < (uintptr_t)addr + size) {
         assert(!mprotect((void *)readonly_base, readonly_size, PROT_READ | PROT_WRITE));
@@ -139,7 +140,8 @@ static void info_contracts(void) {
     int status; assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
     unsetenv("DM_PROGRAM_ID");
     for (unsigned k = 0; k < sizeof cases / sizeof *cases; k++) assert(info(cases[k].id) == cases[k].expected);
-    assert(info(11) == UINT64_C(0xabcd123400000001) && info(11) == UINT64_C(0xabcd123400000002));
+    assert(info(11) == UINT64_C(0xabcd123400000001));
+    assert(info(11) == UINT64_C(0xabcd123400000002));
     uintptr_t exception = info(20); assert(exception && !(exception & 0xfff) && info(20) == exception);
     *(uint64_t *)(exception + 0x1c0) = 0x9876; assert(*(uint64_t *)(info(20) + 0x1c0) == 0x9876);
     used_threads = 94; assert(info(24) == 2); used_threads = 96; assert(!info(24)); used_threads = 200; assert(!info(24)); used_threads = 0;
