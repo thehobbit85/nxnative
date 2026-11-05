@@ -1,0 +1,4 @@
+stage ps
+b 0 tex 1 tex_ubo 7 12 - -1 view=2 num=0 twin_tex=8:20
+b 1 samp 1 samp_ubo 8 20 - -1 twin_samp=7:12
+b 2 ubo 1 cbuf 9 -1 - -1

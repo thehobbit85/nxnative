@@ -21,6 +21,7 @@
 #include "spv_buffer_bias.h"
 #include "shader_contract.h"
 #include "uniform_address.h"
+#include "split_handle.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -1003,7 +1004,7 @@ enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
 static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
 }
-typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg; int32_t off, soff, view, num; } sbind;
+typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; } sbind;
 typedef struct vin_module {
     uint64_t mask;
     VkShaderModule module;
@@ -1268,6 +1269,9 @@ static shader_t *shader_get(const uint8_t md[8]) {
             if ((field = strstr(ln, " soff="))) e->soff = atoi(field + 6);
             if ((field = strstr(ln, " view="))) e->view = atoi(field + 6);
             if ((field = strstr(ln, " num="))) e->num = atoi(field + 5);
+            if (!dm_vk_split_handle_parse(ln, &e->twin)) {
+                LOG("[RED] vk: shader %s has invalid split handle metadata", key); free(txt); free(spv); return s;
+            }
             e->read_only = !strcmp(access, "ro");
             e->type = !strcmp(ty, "ubo") ? BT_UBO : !strcmp(ty, "ssbo") ? BT_SSBO : !strcmp(ty, "cis") ? BT_CIS : !strcmp(ty, "tbuf") ? BT_TBUF : !strcmp(ty, "utb") ? BT_UTB :
                       !strcmp(ty, "stb") ? BT_STB : !strcmp(ty, "simg") ? BT_SIMG : !strcmp(ty, "tex") ? BT_TEX : BT_SAMP;
@@ -1703,6 +1707,10 @@ static void shader_cpu_ready(const shader_t *s, int stage) {
             if (field) cpu_ready(field, 8);
         }
         if (b->skind == S_SAMPU) uniform_ready(stage, b->sreg, b->soff, b->count);
+        if (b->count == 1) {
+            if (b->kind == K_TEXU) uniform_ready(stage, b->twin.texture.reg, b->twin.texture.off, 1);
+            if (b->skind == S_SAMPU) uniform_ready(stage, b->twin.sampler.reg, b->twin.sampler.off, 1);
+        }
     }
 }
 // Same ABI as Metal's TEXU/SAMPU: handles occupy 8-byte elements, with the
@@ -1721,6 +1729,7 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     if ((b->kind == K_TEX || b->kind == K_TBUF) && b->reg >= 0 && (uint32_t)b->reg + element < NTEX) handle = S.tex[stage][b->reg + element];
     else if (b->kind == K_TEXU && b->off >= 0) {
         uint32_t raw = uniform_handle(stage, b->reg, b->off + 8ll * element);
+        if (b->count == 1) raw |= uniform_handle(stage, b->twin.texture.reg, b->twin.texture.off);
         uint32_t tid = raw & 0xfffff;
         handle = tid ? (uint64_t)tid + S.tex_base : 0;
     }
@@ -1733,7 +1742,9 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     }
     else if (b->skind == S_SAMP_ID && b->sreg >= 0) sid = b->sreg + (b->type == BT_SAMP ? element : 0);
     else if (b->skind == S_SAMPU && b->soff >= 0) {
-        sid = uniform_handle(stage, b->sreg, b->soff + 8ll * element) >> 20;
+        uint32_t raw = uniform_handle(stage, b->sreg, b->soff + 8ll * element);
+        if (b->count == 1) raw |= uniform_handle(stage, b->twin.sampler.reg, b->twin.sampler.off);
+        sid = raw >> 20;
         if (sid) sid += S.samp_base;
     }
     return (handle & 0xfffff) | sid << 20;
