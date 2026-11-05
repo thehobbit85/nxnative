@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from dm.android.tools.target_contract import shader_contract, stamp_export
 from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
+from dm.android.tools.spv_bindless import split_handle_fields
 from dm.android.tools import spv_geometry, spv_meshstage
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
@@ -257,6 +258,7 @@ def vk_txt(meta):
         for name in ('view', 'num'):
             if name in bind:
                 fields += (f'{name}={bind[name]}',)
+        fields += split_handle_fields(bind)
         lines.append('b ' + ' '.join(map(str, fields)))
     return '\n'.join(lines) + '\n'
 

@@ -52,7 +52,8 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/0000000000000039.spv $(B)/shaders/000000000000003a.spv $(B)/shaders/0000000000000040.spv \
          $(B)/shaders/0000000000000041.spv $(B)/shaders/0000000000000042.spv $(B)/shaders/0000000000000043.spv \
          $(B)/shaders/0000000000000044.spv $(B)/shaders/0000000000000045.spv $(B)/shaders/0000000000000046.spv $(B)/shaders/0000000000000047.spv $(B)/shaders/0000000000000048.spv $(B)/shaders/0000000000000049.spv $(B)/shaders/000000000000004a.spv \
-         $(B)/shaders/000000000000004b.spv $(B)/shaders/000000000000004c.spv
+         $(B)/shaders/000000000000004b.spv $(B)/shaders/000000000000004c.spv \
+         $(B)/shaders/000000000000004d.spv $(B)/shaders/000000000000004e.spv $(B)/shaders/000000000000004f.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
 $(B)/shaders/000000000000004a.spv: tests/texel.vert tests/texel.vert.vk.txt
 	mkdir -p $(B)/shaders
@@ -85,7 +86,7 @@ $(B)/shaders/0000000000000040.spv: tests/buffer.comp tests/buffer.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/buffer.vk.txt $(@:.spv=.vk.txt)
-$(B)/t_replay: $(SRC) tests/uniform_storage.inc spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h shader_contract.h geometry_contract.h meshstage_contract.h uniform_address.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
+$(B)/t_replay: $(SRC) tests/split_handle.inc tests/uniform_storage.inc spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h shader_contract.h geometry_contract.h meshstage_contract.h uniform_address.h split_handle.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile
@@ -228,3 +229,16 @@ $(B)/t_buffer_bias: tests/t_buffer_bias.c spv_buffer_bias.h
 buffer-bias-check: $(B)/t_buffer_bias $(B)/shaders/0000000000000043.spv
 	$(B)/t_buffer_bias $(B)/shaders/0000000000000043.spv $(B)/buffer-biased.spv
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/buffer-biased.spv
+
+$(B)/shaders/000000000000004d.spv: tests/split_handle.frag tests/split_combined.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 -DSEPARATE=0 $< -o $@
+	cp tests/split_combined.vk.txt $(@:.spv=.vk.txt)
+$(B)/shaders/000000000000004e.spv: tests/split_handle.frag tests/split_separate.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 -DSEPARATE=1 $< -o $@
+	cp tests/split_separate.vk.txt $(@:.spv=.vk.txt)
+
+$(B)/shaders/000000000000004f.spv: $(B)/shaders/000000000000004d.spv tests/split_fixed.vk.txt
+	cp $< $@
+	cp tests/split_fixed.vk.txt $(@:.spv=.vk.txt)
