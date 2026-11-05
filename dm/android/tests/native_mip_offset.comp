@@ -1,0 +1,17 @@
+// Native driver diagnostic: texture_ops runner, variant3 mode4 only.
+// RGBA = native offset, independent two-mip offset, native zero, independent zero.
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=2,std140) uniform Input {vec4 value;} input_data;
+layout(set=0,binding=3,std430) buffer Output {vec4 value;} output_data;
+layout(set=0,binding=4) uniform sampler2D sampled;
+void main(){
+ vec2 uv=clamp(input_data.value.xy,vec2(.0625),vec2(.453125));
+ float actual=textureLodOffset(sampled,uv,1.25,ivec2(1,0)).r;
+ // The first input and both mip footprints are strictly inside the texture.
+ ivec2 lo=ivec2(floor(uv*4.0)),hi=ivec2(floor(uv*2.0));
+ float manual=mix(texelFetch(sampled,lo+ivec2(1,0),1).r,texelFetch(sampled,hi+ivec2(1,0),2).r,.25);
+ float zero=textureLodOffset(sampled,uv,1.25,ivec2(0,0)).r;
+ float manual_zero=mix(texelFetch(sampled,lo,1).r,texelFetch(sampled,hi,2).r,.25);
+ output_data.value=vec4(actual,manual,zero,manual_zero);
+}
