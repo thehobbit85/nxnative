@@ -42,6 +42,28 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 // Shared host_preload initializes cheats after resolving the modules' build IDs.
 void front_run(void (*guest)(void)) { guest(); }
 
+int front_display_pixels(int *w, int *h) {
+    if (!g_act) return 0;
+    JNIEnv *env = NULL; int attached = 0, ok = 0;
+    if ((*g_act->vm)->GetEnv(g_act->vm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+        if ((*g_act->vm)->AttachCurrentThread(g_act->vm, &env, NULL) != JNI_OK) return 0;
+        attached = 1;
+    }
+    if (!env) return 0;
+    jclass cls = (*env)->GetObjectClass(env, g_act->clazz);
+    jmethodID method = cls ? (*env)->GetMethodID(env, cls, "displayPixels", "()[I") : NULL;
+    jintArray size = method ? (*env)->CallObjectMethod(env, g_act->clazz, method) : NULL;
+    if (!(*env)->ExceptionCheck(env) && size && (*env)->GetArrayLength(env, size) == 2) {
+        jint pixels[2]; (*env)->GetIntArrayRegion(env, size, 0, 2, pixels);
+        if (!(*env)->ExceptionCheck(env) && pixels[0] > 0 && pixels[1] > 0) { *w = pixels[0]; *h = pixels[1]; ok = 1; }
+    }
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); }
+    if (size) (*env)->DeleteLocalRef(env, size);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    if (attached) (*g_act->vm)->DetachCurrentThread(g_act->vm);
+    return ok;
+}
+
 // ---------- Controllers: one state per input device; buttons are ORed, each stick comes from the device that moves it furthest ----------
 #define NDEV 8
 static struct { int32_t id, used; uint64_t btn; float ax[10]; } g_dev[NDEV];   // id: Android's device ID (adb's injected events come from -1)

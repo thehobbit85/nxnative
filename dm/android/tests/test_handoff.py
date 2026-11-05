@@ -44,8 +44,15 @@ STUBS = {
         public void onBackPressed(){finish();}
         public boolean dispatchKeyEvent(android.view.KeyEvent e){return false;}
         public boolean dispatchGenericMotionEvent(android.view.MotionEvent e){return false;}
+        public android.view.WindowManager getWindowManager(){return new android.view.WindowManager();}
     }''',
     'android/app/NativeActivity.java': 'package android.app; public class NativeActivity extends Activity {}',
+    'android/view/WindowManager.java': 'package android.view; public class WindowManager { public Display getDefaultDisplay(){return new Display();} }',
+    'android/view/Display.java': '''package android.view; public class Display {
+        public Mode getMode(){return new Mode();} public static class Mode {
+            public int getPhysicalWidth(){return 1280;} public int getPhysicalHeight(){return 720;}
+        }
+    }''',
     'android/view/InputDevice.java': 'package android.view; public class InputDevice { public static final int SOURCE_JOYSTICK=16; }',
     'android/view/KeyEvent.java': '''package android.view; public class KeyEvent {
         public static final int KEYCODE_BACK=4,ACTION_DOWN=0;

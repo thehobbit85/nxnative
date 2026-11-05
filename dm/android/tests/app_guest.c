@@ -141,6 +141,15 @@ void nnMain(void) {
 #ifdef APP_WEB
         if (frame == 60) check_web();
 #endif
+#ifdef APP_DISPLAY
+        if (frame == 60) {
+            extern uint32_t vi_resolution(uint32_t *, const void *);
+            uint32_t result[3] = {123, 99, 456};
+            require(!vi_resolution(result + 1, NULL) && result[0] == 123 && result[2] == 456 && result[1] < 4);
+            const char *names[] = {"DISPLAY_MODE_0\n", "DISPLAY_MODE_1\n", "DISPLAY_MODE_2\n", "DISPLAY_MODE_3\n"};
+            message(names[result[1]], 15);
+        }
+#endif
 #ifdef APP_PROGRAM
         if (frame == 90) next_program();
 #endif

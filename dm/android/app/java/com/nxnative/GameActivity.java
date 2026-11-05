@@ -22,6 +22,13 @@ public final class GameActivity extends NativeActivity {
     private static native void nativeWebAxes(int device, float[] axes);
     private static String text(byte[] bytes) { return bytes == null ? "" : new String(bytes, StandardCharsets.UTF_8); }
 
+    public int[] displayPixels() {
+        // VI asks for the physical display mode, not the app's surface size or
+        // density-scaled logical bounds. Read it each time for mode changes.
+        android.view.Display.Mode mode = getWindowManager().getDefaultDisplay().getMode();
+        return new int[] {mode.getPhysicalWidth(), mode.getPhysicalHeight()};
+    }
+
     // Never wait for the UI thread: hle_web calls these with its session mutex
     // held, and UI callbacks take the same mutex to deliver page messages.
     public void webCommand(long id, int command, byte[] a, byte[] b, byte[] c, byte[] d, int hidden, int delay, int pulse, int muted) {
