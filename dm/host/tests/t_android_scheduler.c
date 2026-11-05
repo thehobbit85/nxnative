@@ -40,6 +40,26 @@ __asm__(".text\n.p2align 2\n"
         "spin_begin: ldar w10,[x0]\ncmp w10,#3\nb.ne spin_begin\nspin_end: ret\n");
 static module_t synthetic;
 static _Atomic unsigned gate_visits[0x26];
+static void check_live_dump(int unavailable) {
+    void svc_thread_dump(void);
+    int pipefd[2]; assert(!pipe(pipefd)); int previous = dup(STDERR_FILENO); assert(previous >= 0);
+    assert(dup2(pipefd[1], STDERR_FILENO) >= 0); close(pipefd[1]);
+    svc_thread_dump(); fflush(stderr);
+    assert(dup2(previous, STDERR_FILENO) >= 0); close(previous);
+    char text[16384]; size_t used = 0; ssize_t got;
+    while ((got = read(pipefd[0], text + used, sizeof text - used - 1)) > 0) used += (size_t)got;
+    close(pipefd[0]); text[used] = 0;
+    if (!strstr(text, "thread snapshot") || !strstr(text, "pc=probe-worker+")) { fputs(text, stderr); abort(); }
+    assert(!unavailable || strstr(text, "unavailable (blocked signal, exited or timed out)"));
+}
+static _Atomic int blocked_sample;
+static void *blocked_sampler(void *unused) {
+    (void)unused; sigset_t mask; sigemptyset(&mask); sigaddset(&mask, SIGUSR2);
+    assert(!pthread_sigmask(SIG_BLOCK, &mask, NULL)); atomic_store(&blocked_sample, 1);
+    while (atomic_load(&blocked_sample) == 1) sched_yield();
+    assert(!pthread_sigmask(SIG_UNBLOCK, &mask, NULL)); // Deliver the timed-out request safely.
+    return NULL;
+}
 // Use the production SVC counter hook to check that dispatch is running on the pthread stack.
 void hlecount_svc(int num) {
     uintptr_t host_sp = (uintptr_t)&num;
@@ -190,6 +210,7 @@ int main(void) {
         gate_register(site + 20, "svc", i, site);
     }
     synthetic.base = (uint8_t *)spin_begin; synthetic.size = (uintptr_t)spin_end - (uintptr_t)spin_begin;
+    strcpy(synthetic.name, "probe-worker");
     g_mod = &synthetic; g_nmod = 1;
     guest_thread_init();
     main_tls = dm_slot_get(g_keytls); main_tlr = dm_slot_get(g_keytlr);
@@ -215,7 +236,13 @@ int main(void) {
     assert(svc_thread(0x33, r) && r[0] == 0xfa01); // The resumed SVC is still waiting; its old pause cannot leak.
     r[0] = write_end; call(0x11, r);
     while (atomic_load(&phases) != 2) sched_yield();
+    check_live_dump(0);
+    pthread_t blocked; assert(!pthread_create(&blocked, NULL, blocked_sampler, NULL));
+    while (!atomic_load(&blocked_sample)) sched_yield();
+    check_live_dump(1); atomic_store(&blocked_sample, 2); assert(!pthread_join(blocked, NULL));
+    check_live_dump(0);
     for (int i = 0; i < 32; i++) {
+        check_live_dump(0);
         r[0] = worker; r[1] = 1; call(0x32, r); // Now it is executing guest instructions.
         r[0] = (uintptr_t)&ctx; r[1] = worker; call(0x33, r);
         assert(ctx.pc >= (uintptr_t)spin_begin && ctx.pc < (uintptr_t)spin_end);

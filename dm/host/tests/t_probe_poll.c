@@ -19,12 +19,16 @@ void dm_fault_hook_register(int (*fn)(void *, int, void *)) { (void)fn; abort();
 void dm_backtrace(uint64_t fp) { (void)fp; abort(); }
 uint32_t thr_cur_handle(void) { return 0; }
 void svc_thread_dump(void) { fputs("PROBE_SERVICE_DUMP\n", stderr); }
+int dm_thread_snapshot_dump(const char *tag, int guest_only) {
+    assert(!strcmp(tag, "POLL") && guest_only); fputs("PROBE_SNAPSHOT\n", stderr); return 0;
+}
 
-static int dumps;
+static int dumps, snapshots;
 static void await_line(FILE *log, const char *needle) {
     char line[2048];
     while (fgets(line, sizeof line, log)) {
         if (strstr(line, "PROBE_SERVICE_DUMP")) dumps++;
+        if (strstr(line, "PROBE_SNAPSHOT")) snapshots++;
         if (strstr(line, needle)) return;
         if (strstr(line, "[RED]")) fputs(line, stderr);
     }
@@ -32,7 +36,7 @@ static void await_line(FILE *log, const char *needle) {
 }
 static void run(int heap, int filter, unsigned bytes) {
     shared = mmap(NULL, (size_t)getpagesize(), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
-    assert(shared != MAP_FAILED); atomic_init(&shared->ready, 0); atomic_init(&shared->value, 0); dumps = 0;
+    assert(shared != MAP_FAILED); atomic_init(&shared->ready, 0); atomic_init(&shared->value, 0); dumps = snapshots = 0;
     int pipefd[2]; assert(!pipe(pipefd));
     pid_t child = fork(); assert(child >= 0);
     if (!child) {
@@ -54,6 +58,9 @@ static void run(int heap, int filter, unsigned bytes) {
         char expected[64]; snprintf(expected, sizeof expected, "→ %#x", value);
         await_line(log, expected);
         unsigned matches = filter ? (i + 1) / 2 : i + 1;
+#ifndef __APPLE__
+        assert(snapshots == (int)(matches < 8 ? matches : 8));
+#endif
         while (dumps < (int)(matches < 2 ? matches : 2)) await_line(log, "PROBE_SERVICE_DUMP");
         assert(dumps == (int)(matches < 2 ? matches : 2));
     }

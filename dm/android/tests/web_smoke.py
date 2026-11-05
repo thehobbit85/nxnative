@@ -75,6 +75,8 @@ def main():
         width, height = struct.unpack_from('>II', png, 16)
         assert width >= 1280 and width * 9 == height * 16, (width, height)
         (a.output / 'webshot.png').write_bytes(png)
+        shell("printf 'dump\\n' >> " + ctl)
+        wait(lambda text: 'thread snapshot tid=' in text and 'pc=' in text, 'live native thread diagnostics in the APK')
         adb('shell', 'input', 'keyevent', 'KEYCODE_BUTTON_B')  # Android's right button = Switch A.
         wait(lambda text: 'WEB_WAIT_B' in text, 'A delivered only to the page; requested exit')
         adb('shell', 'input', 'keyevent', 'KEYCODE_BUTTON_A')  # Android's bottom button = Switch B.
