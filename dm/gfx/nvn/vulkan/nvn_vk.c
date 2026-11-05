@@ -1267,6 +1267,9 @@ static shader_t *shader_get(const uint8_t md[8]) {
             if (!strcmp(kind, "tex_c2a") || !strcmp(kind, "samp_c2a") || !strcmp(sk, "samp_c2a")) {
                 LOG("[RED] vk: shader %s requires driver-table descriptor array replay", key); free(txt); free(spv); return s;
             }
+            if (!strcmp(kind, "gmem_map") || !strcmp(kind, "gmem_log")) {
+                LOG("[RED] vk: shader %s requires physical-address pool replay", key); free(txt); free(spv); return s;
+            }
             sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = off; e->sreg = (int16_t)sreg;
             e->soff = e->view = -1;
             const char *field;
