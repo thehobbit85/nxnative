@@ -5,6 +5,7 @@
 #include <poll.h>
 #include <stdatomic.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 int svc_thread(int, uint64_t *);
@@ -45,23 +46,29 @@ static void check_hitch(void) {
     extern _Atomic uint64_t dm_present_ns;
     int pipefd[2]; assert(!pipe(pipefd)); int previous = dup(STDERR_FILENO); assert(previous >= 0);
     assert(dup2(pipefd[1], STDERR_FILENO) >= 0); close(pipefd[1]);
-    FILE *log = fdopen(pipefd[0], "r"); assert(log);
-    setvbuf(log, NULL, _IONBF, 0);
     atomic_store(&dm_present_ns, now_ns() - 2000000);
-    char line[2048], evidence[8192] = {0}; size_t used = 0; int metadata = 0, found = 0;
+    char evidence[16384] = {0}; size_t used = 0; int metadata = 0, found = 0;
     struct pollfd ready = {.fd = pipefd[0], .events = POLLIN};
-    while (poll(&ready, 1, 1000) > 0 && fgets(line, sizeof line, log)) {
-        size_t n = strlen(line); if (n < sizeof evidence - used) { memcpy(evidence + used, line, n + 1); used += n; }
-        if (strstr(line, "prio 28 core 1") && strstr(line, "tid=")) metadata = 1;
-        if (strstr(line, "hitch thread snapshot") && strstr(line, "pc=probe-worker+") && strstr(line, "x1=0x2468")) { found = 1; break; }
+    while (used < sizeof evidence - 1) {
+        int result = poll(&ready, 1, 1000);
+        if (result < 0 && errno == EINTR) continue; // The live sampler itself signals this reader.
+        if (result <= 0) break;
+        ssize_t got = read(pipefd[0], evidence + used, sizeof evidence - 1 - used);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) break;
+        used += (size_t)got; evidence[used] = 0;
+        metadata = strstr(evidence, "prio 28 core 1") && strstr(evidence, "tid=");
+        char *line = strstr(evidence, "pc=probe-worker+");
+        if (line && strstr(line, "x1=0x2468")) { found = 1; break; }
     }
-    assert(dup2(previous, STDERR_FILENO) >= 0); close(previous); fclose(log);
+    assert(dup2(previous, STDERR_FILENO) >= 0); close(previous);
     if (!metadata || !found) fputs(evidence, stderr);
     assert(metadata && found);
     // The final line reaches the pipe just before the inspector releases its
     // ownership. Wait for a subsequent capture before testing another dump.
     int dm_thread_snapshot_dump(const char *, int);
     while (dm_thread_snapshot_dump("hitch-check", 1) < 0) sched_yield();
+    close(pipefd[0]);
     puts("Hitch diagnostic: live guest PC, x1 marker and native/Horizon thread correlation: OK");
 }
 static void check_live_dump(int unavailable) {
@@ -240,6 +247,9 @@ int main(void) {
     setenv("DM_HITCH_DUMP", "1", 1);
     main_tls = dm_slot_get(g_keytls); main_tlr = dm_slot_get(g_keytlr);
     main_thread = svc_thread_main_init();
+    int thr_name_of_tid(int, char *, size_t); char sampled_name[96];
+    assert(thr_name_of_tid((int)syscall(SYS_gettid), sampled_name, sizeof sampled_name) && strstr(sampled_name, "main thread"));
+    assert(!thr_name_of_tid(INT_MAX, sampled_name, sizeof sampled_name));
     uint64_t r[32] = {0};
     call(0x45, r); write_end = r[1]; read_end = r[2];
     stack = mmap(NULL, 3 * STACK_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
