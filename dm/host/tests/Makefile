@@ -110,6 +110,17 @@ android-symbols-build: $(B)/t_symbols_android
 $(B)/t_symbols_android: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h ../android_text.h ../../android/compat/sha256.c $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $< ../../android/compat/sha256.c
 .PHONY: account-mii android-account-mii-build
+run: friends
+.PHONY: friends android-friends-build
+FRIENDS_SRC = t_friends.c t_condvar_stub.c ../hle_thread.c
+FRIENDS_HEADERS = ../hle_friends.c ../hle.h ../dm.h ../thread_snapshot.h $(GAME_H)
+friends: $(B)/t_friends
+	$(B)/t_friends $(QUIET)
+$(B)/t_friends: $(FRIENDS_SRC) $(FRIENDS_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_GUEST_SYMBOLS -I.. $(GINC) -o $@ $(FRIENDS_SRC)
+android-friends-build: $(B)/t_friends_android
+$(B)/t_friends_android: $(FRIENDS_SRC) $(FRIENDS_HEADERS) | $(B)
+	$(CLANG) -O1 -g -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -DDM_TEST_GUEST_SYMBOLS -I.. -I../../android/compat $(GINC) -o $@ $(FRIENDS_SRC)
 .PHONY: network android-network-build
 .PHONY: web android-web-build
 DISPLAY_SRC = t_display.c t_display_front.c
