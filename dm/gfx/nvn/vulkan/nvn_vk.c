@@ -22,6 +22,7 @@
 #include "shader_contract.h"
 #include "uniform_address.h"
 #include "split_handle.h"
+#include "driver_c2.h"
 #include "../../tex/nvn_deswizzle.h"
 #ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -1726,7 +1727,7 @@ static uint32_t uniform_handle(int stage, int reg, int64_t off) {
 }
 static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     uint64_t handle = 0;
-    if ((b->kind == K_TEX || b->kind == K_TBUF) && b->reg >= 0 && (uint32_t)b->reg + element < NTEX) handle = S.tex[stage][b->reg + element];
+    if ((b->kind == K_TEX || b->kind == K_TBUF) && b->reg >= 0 && (uint32_t)b->reg + element < NTEX) handle = dm_vk_texture_slot(S.tex[stage], S.img[stage], b->reg + element);
     else if (b->kind == K_TEXU && b->off >= 0) {
         uint32_t raw = uniform_handle(stage, b->reg, b->off + 8ll * element);
         if (b->count == 1) raw |= uniform_handle(stage, b->twin.texture.reg, b->twin.texture.off);
@@ -2084,10 +2085,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
             } else if (b->kind == K_DRVCB) {   // driver segments: c2 holds the bound texture / sampler handles (as nvn_mtl.m fills them), c0 the storage buffer table
                 uint8_t seg[4096]; memset(seg, 0, sizeof seg);
                 if (b->off == 2) {
-                    for (int r = 0; r < 32 && 0x20 + 8 * r < 0x120; r++) { uint32_t v = (uint32_t)S.tex[stage][r]; memcpy(seg + 0x20 + 8 * r, &v, 4); }
-                    for (int r = 0; r < 8; r++) { uint32_t v = (uint32_t)S.img[stage][r]; memcpy(seg + 0x120 + 8 * r, &v, 4); }
-                    for (int r = 0; r < 128 && 0x168 + 8 * r + 4 <= 0x568; r++) { uint32_t v = (uint32_t)S.tex[stage][128 + r]; memcpy(seg + 0x168 + 8 * r, &v, 4); }
-                    for (int r = 0; r < 128 && 0x568 + 8 * r + 4 <= (int)sizeof seg; r++) { uint32_t v = (uint32_t)S.samp[stage][r]; memcpy(seg + 0x568 + 8 * r, &v, 4); }
+                    dm_vk_c2_fill(seg, sizeof seg, S.tex[stage], S.img[stage], S.samp[stage]);
                 } else {
                     int base = stage == 0 ? 0x110 : stage == 1 ? 0x510 : stage == 5 ? 0x310 : -1;
                     if (base >= 0) for (int r = 0; r < 16; r++) { uint64_t a = S.ssbo[stage][r].addr; uint32_t n = (uint32_t)S.ssbo[stage][r].size; memcpy(seg + base + 16 * r, &a, 8); memcpy(seg + base + 16 * r + 8, &n, 4); }

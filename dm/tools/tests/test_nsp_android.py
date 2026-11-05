@@ -176,7 +176,7 @@ class AndroidTarget(unittest.TestCase):
     def test_shader_reuse_hashes_lowering_tools_helpers_and_effective_options(self):
         # A cached export is observable output: a changed compiler input must
         # replace it, even when a DLL keeps the same size and mtime.
-        cases = ('optimizer', 'validator', 'dll_same_stat', 'helper', 'source', 'debug', 'precision', 'target_env', 'geometry_contract', 'mesh_contract', 'uniform_address', 'split_handle')
+        cases = ('optimizer', 'validator', 'dll_same_stat', 'helper', 'source', 'debug', 'precision', 'target_env', 'geometry_contract', 'mesh_contract', 'uniform_address', 'split_handle', 'driver_c2')
         for change in cases:
             with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); repo = root / 'repo'; shader = root / 'shader'; shader.mkdir()
@@ -196,6 +196,7 @@ class AndroidTarget(unittest.TestCase):
                     'dm/gfx/nvn/vulkan/meshstage_contract.h': '// mesh0',
                     'dm/gfx/nvn/vulkan/uniform_address.h': '// address0',
                     'dm/gfx/nvn/vulkan/split_handle.h': '// split0',
+                    'dm/gfx/nvn/vulkan/driver_c2.h': '// c2v0',
                 }
                 for name, content in inputs.items():
                     path = repo / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content)
@@ -227,6 +228,7 @@ class AndroidTarget(unittest.TestCase):
                     elif change == 'mesh_contract': (repo / 'dm/gfx/nvn/vulkan/meshstage_contract.h').write_text('// mesh1')
                     elif change == 'uniform_address': (repo / 'dm/gfx/nvn/vulkan/uniform_address.h').write_text('// address1')
                     elif change == 'split_handle': (repo / 'dm/gfx/nvn/vulkan/split_handle.h').write_text('// split1')
+                    elif change == 'driver_c2': (repo / 'dm/gfx/nvn/vulkan/driver_c2.h').write_text('// c2v1')
                     result = nsp.android_shaders(sys.executable, repo, shader, env, shader, g, 'package bytes')
                     self.assertEqual((result / (key + '.spv')).read_bytes(), b'rebuilt output')
 
