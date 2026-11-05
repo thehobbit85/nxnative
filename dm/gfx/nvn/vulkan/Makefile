@@ -10,6 +10,14 @@ CPPFLAGS += -D_GNU_SOURCE -I$(HOST) -I$(HOST)/gen/$(GAME) -I../../../games/$(GAM
 CFLAGS += -O1 -Wall -Werror -Wno-unused-function
 REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
+.PHONY: geometry-topology-fixture
+geometry-topology-fixture: $(B)/t_geometry_topology $(B)/topology.spv
+$(B)/t_geometry_topology: tests/t_geometry_topology.c
+	mkdir -p $(B)
+	$(CC) $(CFLAGS) $< -o $@ $(LIBS)
+$(B)/topology.spv: ../../../tools/tests/test_android_geometry_compute.py ../../../android/tools/spv_geometry.py ../../../android/tools/spv_capture.py ../../../android/tools/spv_module.py
+	mkdir -p $(B)
+	GLSLC="$(GLSLC)" python3 ../../../tools/tests/test_android_geometry_compute.py --fixture $@
 .PHONY: vertex-capture-fixture vertex-capture-test
 vertex-capture-fixture: $(B)/t_shader_capture $(B)/capture.spv
 vertex-capture-test: vertex-capture-fixture
