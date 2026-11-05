@@ -842,6 +842,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** the synthetic `dm/host/tests/t_jit.c` Android/Mac lifecycle fixture. [Super Mario 64](../../dm/games/010049900F546001/README.md) is a known consumer of this plugin API; this failure was not observed in a new commercial-game run.
 - **Check:** `make -C dm/host/tests GAME=<id> jit`, or NDK cross-build `android-jit-build` and run `t_jit_android`. The fixture exercises the actual guest API for eight environments, generated A64 replacement on a persistent thread, concurrent serialized requests, result/range contracts, init/fini ordering and unmapping before caller-owned work memory is freed. `t_nro` checks the shared normal-loader path.
 
+### JIT captures disagree with their requests
+
+- **Symptom:** a `DM_JIT_CAPTURE` record contains code or data from a later request, or equivalent requests have different keys after another JIT environment is created.
+- **Cause:** capture read mutable plugin mappings after releasing the environment's request lock. Address normalization used the most recently created environment instead of the request's environment. Independent environments also shared a PID-named temporary file and an unsynchronized diagnostic counter.
+- **Fix:** capture the request under its environment lock, pass that environment explicitly to address normalization and key construction, and serialize capture publication across environments. Existing complete records remain unchanged. The extra file I/O holds the request lock only when capture is enabled.
+- **Found on:** synthetic Android/Mac `dm/host/tests/t_jit.c` capture fixtures, including a deterministic overwrite after unlock and a ThreadSanitizer report from concurrent publication; not a commercial-game failure.
+- **Check:** `make -C dm/host/tests GAME=<id> jit` runs ordinary execution and capture modes. For Android, cross-build `android-jit-build`, then run `t_jit_android` both without arguments and with a new capture-directory path. The independent DMJ5 parser checks matching request/code/data/output, per-environment address masking, concurrent publication, and retry after an unavailable directory. Mac ASan/UBSan and TSan runs cover the same paths.
+
 ### `nn::jit` served from an image on iOS
 
 - **Symptom:** `[RED] jit::GenerateCode command <n>: request <key> … is not in the image …: capture it on the Mac (DM_JIT_CAPTURE) and rebuild the image`, then the game crashes there (the iPhone, or the Mac with `DM_JIT_SERVE`).
