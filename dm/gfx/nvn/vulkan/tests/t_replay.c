@@ -18,6 +18,7 @@ static prog_t texel_program = {.nstage = 1};
 static prog_t texel_graphics_program = {.nstage = 2};
 static prog_t separate_program[4]={{.nstage=2},{.nstage=2},{.nstage=2},{.nstage=2}};
 static prog_t storage_program = {.nstage = 2};
+static prog_t uniform_storage_program = {.nstage = 2};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
@@ -31,6 +32,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &uniform_storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x4b + stage; return 1; }
     if (p == &texel_graphics_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x49 : 0x4a; return 1; }
     if (p == &texel_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x48; return 1; }
     for(int i=0;i<4;i++) if(p==&separate_program[i]) { assert(stage<2);memset(key,0,8);key[7]=stage?0x44+i:1;return 1; }
@@ -1266,7 +1268,10 @@ static void typed_graphics(void) {
     mtl_tex_release(&output);
     puts("Shared vertex/fragment typed-buffer atomics, GPU-produced uniform handles, ordered updates and compute consumers passed");
 }
+#include "uniform_storage.inc"
 int main(void) {
+    if (getenv("DM_VK_TEST_UNIFORM_STORAGE")) { uniform_storage(); return 0; }
+    uniform_storage();
     if (getenv("DM_VK_TEST_TEXEL_GRAPHICS")) { typed_graphics(); return 0; }
     typed_graphics();
     if (getenv("DM_VK_TEST_TEXEL")) { typed_buffers(); return 0; }

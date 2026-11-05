@@ -1,0 +1,3 @@
+stage ps
+b 0 ssbo 1 sbuf_ubo 0 20 - -1
+b 1 ubo 1 drvcb -1 24 - -1
