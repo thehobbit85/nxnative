@@ -34,6 +34,7 @@ def exporter_digest():
     # while edits or newly added lowering modules cannot reuse an old producer.
     paths = set((ROOT / 'dm/android/tools').rglob('*.py'))
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/shader_contract.h')
+    paths.add(ROOT / 'dm/gfx/nvn/vulkan/geometry_contract.h')
     h = hashlib.sha256()
     for path in sorted(paths):
         h.update(str(path.relative_to(ROOT)).encode() + b'\0')

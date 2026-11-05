@@ -2483,7 +2483,7 @@ def android_shader_tool_inputs(repo, env):
     files.update((repo / 'dm/gfx/tools/dmsh_xlate').glob('*.csproj'))
     files.update((repo / 'dm/gfx/tools').glob('*.metal'))
     files.update(repo / p for p in ('dm/gfx/nvn/dmsh_chain.h', 'dm/gfx/nvn/dmsh_abi.h',
-                                   'dm/gfx/nvn/vulkan/shader_contract.h'))
+                                   'dm/gfx/nvn/vulkan/shader_contract.h', 'dm/gfx/nvn/vulkan/geometry_contract.h'))
     # All bundled runtime dependencies matter, including Spv.Generator.dll.
     binaries = repo / 'dm/gfx/tools/dmsh_xlate_bin'
     files.update(p for p in binaries.rglob('*') if p.is_file())
@@ -2510,7 +2510,7 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
         columns = line.split('\t')
         if len(columns) > 4 and columns[0].endswith('.bin') and columns[3] in products:
             if columns[2] == 'geometry':
-                products.update(columns[3] + f'.g{topology}' for topology in range(5))
+                products.update(columns[3] + f'.{kind}{topology}' for kind in ('g', 'gc', 'gr') for topology in range(5))
             elif columns[2] == 'vertex':
                 products.add(columns[3] + '.vc')
     expected = {k + suffix for k in products for suffix in ('.spv', '.vk.txt')}

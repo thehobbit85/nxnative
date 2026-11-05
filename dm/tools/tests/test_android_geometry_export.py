@@ -30,6 +30,26 @@ def passthrough_shader():
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE') and all(shutil.which(t) for t in ('spirv-val', 'spirv-opt')),
                      'requires the offline translator and SPIRV-Tools')
 class GeometryExport(unittest.TestCase):
+    def test_capture_keeps_compute_and_reader_products_with_shared_layout(self):
+        with tempfile.TemporaryDirectory(prefix='vk_geometry_helpers_') as directory:
+            work = Path(directory); captured = work / 'capture'; captured.mkdir()
+            code = work / 'geometry.bin'; code.write_bytes(passthrough_shader()); key = '0123456789abcdef'
+            jobs = work / 'jobs.json'
+            jobs.write_text(json.dumps([dict(key=key, stage='gs', code=str(code), tex={}, img={}, attr={}, fout={})]))
+            with mock.patch.object(vk, 'XLATE', Path(os.environ['DMSH_TEST_XLATE'])), \
+                 mock.patch.dict(os.environ, {'DMSH_SPV_CAPTURE': str(captured)}):
+                vk.capture([str(jobs), str(work)])
+            for t, vertices, output in ((0, 1, 1), (1, 2, 6), (2, 2, 6), (3, 3, 7), (4, 3, 7)):
+                for suffix, role, model in (('gc', 'compute', 5), ('gr', 'reader', 0)):
+                    with self.subTest(topology=t, role=role):
+                        name = key + f'.{suffix}{t}'
+                        self.assertTrue((captured / (name + '.spv')).is_file(), name)
+                        data = (captured / (name + '.spv')).read_bytes()
+                        self.assertEqual([i[1] for i in vk.decode(data)[1] if vk.opcode(i) == 15], [model])
+                        control = json.loads((captured / (name + '.control.json')).read_text())
+                        self.assertEqual(control['geometry'], dict(role=role, topology=t, stride=133,
+                            vertices=vertices, invocations=1, output=output, index_stride=vertices * 2))
+
     def test_capture_exports_all_native_topologies_without_replacing_compute_helpers(self):
         with tempfile.TemporaryDirectory(prefix='vk_geometry_capture_') as directory:
             work = Path(directory); captured = work / 'capture'; captured.mkdir()
@@ -60,15 +80,35 @@ class GeometryExport(unittest.TestCase):
             with mock.patch.object(vk, 'XLATE', Path(os.environ['DMSH_TEST_XLATE'])), \
                  mock.patch.dict(os.environ, {'DMSH_SPV_CAPTURE': str(raw), 'DM_GAME': '0100633007D48000'}):
                 vk.capture([str(jobs), str(work)])
-                family = [key] + [key + f'.g{t}' for t in range(5)]
+                family = [key] + [key + f'.{kind}{t}' for kind in ('g', 'gc', 'gr') for t in range(5)]
                 for name in family:
                     shutil.copyfile(raw / (name + '.spv'), prepared / (name + '.spv'))
-                    (prepared / (name + '.reflection.json')).write_text(json.dumps(dict(stage='gs', bindings=[], threadgroup_size=[32, 1, 1])))
+                    base = dict(stage='gs', bindings=[], threadgroup_size=[32, 1, 1])
+                    control = json.loads((raw / (name + '.control.json')).read_text())
+                    refl = vk.spv_geometry.helper_reflection(base, control)
+                    (prepared / (name + '.reflection.json')).write_text(json.dumps(refl))
                 vk.capture_manifest(prepared, sorted(family), vk.shader_contract())
                 vk.export_prepared(prepared, work / 'export', [key])
-                self.assertEqual(len(list((work / 'export').glob('*.spv'))), 6)
+                self.assertEqual(len(list((work / 'export').glob('*.spv'))), 16)
                 for name in family:
-                    self.assertNotIn('\ntg ', (work / 'export' / (name + '.vk.txt')).read_text())
+                    sidecar = (work / 'export' / (name + '.vk.txt')).read_text()
+                    if '.gc' in name:
+                        self.assertIn('stage cs\n', sidecar)
+                        self.assertIn('\ntg 32 1 1\n', sidecar)
+                        self.assertIn('geometry compute ', sidecar)
+                        topology = next(line for line in sidecar.splitlines() if ' geometry 4 ' in line)
+                        self.assertIn('num=2', topology)
+                    elif '.gr' in name:
+                        self.assertIn('stage vs\n', sidecar)
+                        self.assertIn('geometry reader ', sidecar)
+                        self.assertNotIn('\ncapture ', sidecar)
+                    else: self.assertNotIn('\ntg ', sidecar)
+                orphan = work / 'orphan'; orphan.mkdir(); helper = key + '.gc0'
+                for suffix in ('.spv', '.reflection.json'):
+                    shutil.copyfile(prepared / (helper + suffix), orphan / (helper + suffix))
+                vk.capture_manifest(orphan, [helper], vk.shader_contract())
+                with self.assertRaisesRegex(ValueError, 'incomplete geometry'):
+                    vk.read_prepared(orphan, vk.shader_contract())
                 # A corrupt manifest cannot relabel one input topology as another.
                 shutil.copyfile(prepared / (key + '.g3.spv'), prepared / (key + '.g0.spv'))
                 (prepared / 'capture.json').unlink()

@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include "geometry_contract.h"
 
 // Raster-discard vertex capture: the geometry ABI plus two helper bindings.
 typedef struct { uint32_t output_binding, control_binding; } dm_vk_capture;
@@ -100,7 +101,7 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
         at += n;
     }
     if (entries != 1 || functions) return "incomplete SPIR-V module";
-    int schema = 0, target = 0, stage = 0, captures = 0;
+    int schema = 0, target = 0, stage = 0, captures = 0, geometries = 0, feedbacks = 0;
     dm_vk_feedback feedback = {0};
     for (size_t at = 0; at < length;) {
         const char *line = text + at, *end = memchr(line, '\n', length - at);
@@ -128,7 +129,8 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
             while (i < ne && (extension_lengths[i] != n - 4 || memcmp(extensions[i], line + 4, n - 4))) i++;
             if (i == ne || ext_seen[i]++) return "incompatible or duplicate shader extension";
         } else if (n >= 3 && !memcmp(line, "tf ", 3)) {
-            if (model != 0 && model != 3) return "invalid feedback stage";
+            if (model != 0 && model != 3 && model != 5) return "invalid feedback stage";
+            feedbacks++;
             const char *error = dm_vk_feedback_line(line, n, &feedback);
             if (error) return error;
         } else if (n >= 8 && !memcmp(line, "capture ", 8)) {
@@ -136,12 +138,19 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
             dm_vk_capture capture;
             const char *error = dm_vk_capture_line(line, n, &capture);
             if (error) return error;
+        } else if (n >= 9 && !memcmp(line, "geometry ", 9)) {
+            if (geometries++) return "duplicate geometry interface";
+            dm_vk_geometry geometry;
+            const char *error = dm_vk_geometry_line(line, n, model, &geometry);
+            if (error) return error;
         } else if (!((n >= 3 && !memcmp(line, "tg ", 3)) || (n >= 3 && !memcmp(line, "c1 ", 3)) ||
                      (n >= 4 && !memcmp(line, "vin ", 4)) || (n >= 2 && !memcmp(line, "b ", 2)))) {
             return "unknown shader sidecar record";
         }
     }
     if (schema != 1 || target != 1 || stage != 1) return "missing shader contract";
+    if (geometries && captures) return "geometry helper cannot also be vertex capture";
+    if (feedbacks && model == 5 && !geometries) return "compute feedback needs geometry interface";
     for (unsigned i = 0; i < nc; i++) if (!cap_seen[i]) return "missing shader capability";
     for (unsigned i = 0; i < ne; i++) if (!ext_seen[i]) return "missing shader extension";
     return NULL;

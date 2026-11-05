@@ -28,7 +28,7 @@ class AndroidTarget(unittest.TestCase):
             calls = []
             def export(cmd, log, env=None):
                 out = Path(cmd[3]); out.mkdir()
-                for name in [key] + [key + f'.g{t}' for t in range(5)]:
+                for name in [key] + [key + f'.{kind}{t}' for kind in ('g', 'gc', 'gr') for t in range(5)]:
                     (out / (name + '.spv')).write_bytes(b'shader')
                     (out / (name + '.vk.txt')).write_text('stage gs\n')
                 (out / 'export-contract.json').write_text('{}')
@@ -41,7 +41,13 @@ class AndroidTarget(unittest.TestCase):
                 (out / (key + '.g3.spv')).write_bytes(b'corrupt')
                 nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
                 self.assertEqual(len(calls), 2)
-                self.assertEqual(len(json.loads((out / 'manifest.json').read_text())['files']), 12)
+                self.assertEqual(len(json.loads((out / 'manifest.json').read_text())['files']), 32)
+                (out / (key + '.gc2.spv')).unlink()
+                nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
+                self.assertEqual(len(calls), 3)
+                (out / (key + '.gr4.vk.txt')).write_text('wrong reader layout')
+                nsp.android_shaders(sys.executable, REPO, sh, {}, sh, g, 'source')
+                self.assertEqual(len(calls), 4)
 
     def test_android_tool_failure_precedes_package_scan_conversion_and_survey(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,7 +172,7 @@ class AndroidTarget(unittest.TestCase):
     def test_shader_reuse_hashes_lowering_tools_helpers_and_effective_options(self):
         # A cached export is observable output: a changed compiler input must
         # replace it, even when a DLL keeps the same size and mtime.
-        cases = ('optimizer', 'validator', 'dll_same_stat', 'helper', 'source', 'debug', 'precision', 'target_env')
+        cases = ('optimizer', 'validator', 'dll_same_stat', 'helper', 'source', 'debug', 'precision', 'target_env', 'geometry_contract')
         for change in cases:
             with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); repo = root / 'repo'; shader = root / 'shader'; shader.mkdir()
@@ -182,6 +188,7 @@ class AndroidTarget(unittest.TestCase):
                     'dm/android/tools/spv_android.py': 'import spv_metadata\n',
                     'dm/android/tools/spv_metadata.py': 'value = 1\n',
                     'dm/android/tools/target_contract.py': 'schema = 2\n',
+                    'dm/gfx/nvn/vulkan/geometry_contract.h': '// reader0',
                 }
                 for name, content in inputs.items():
                     path = repo / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content)
@@ -209,6 +216,7 @@ class AndroidTarget(unittest.TestCase):
                     elif change == 'debug': env['XLATE_DEBUG'] = '0'
                     elif change == 'precision': env['XLATE_REDUCED'] = '0'
                     elif change == 'target_env': env['SPIRV_CROSS'] = str(tool_dir / 'alternate-cross')
+                    elif change == 'geometry_contract': (repo / 'dm/gfx/nvn/vulkan/geometry_contract.h').write_text('// reader1')
                     result = nsp.android_shaders(sys.executable, repo, shader, env, shader, g, 'package bytes')
                     self.assertEqual((result / (key + '.spv')).read_bytes(), b'rebuilt output')
 
