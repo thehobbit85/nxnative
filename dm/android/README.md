@@ -24,6 +24,11 @@ presses and `passdump N` to log the next N complete frames' passes, shaders and
 copies. Screenshot and texture-dump commands remain separate Vulkan diagnostics
 (`DM_VK_SHOTS`, `DM_VK_RTDUMP`); Metal's interactive dump commands are not all supported.
 
+`DM_CTL` also supports `webshot <path>` for the offline HTML page. Memory-change
+polling (`DM_PROBE_POLL`) supports addresses, heap offsets and value filters;
+live thread snapshots and write interception remain open. See
+[memory polling](../../docs/reference/memory.md#memory-change-polling-on-android).
+
 ## Packaging and verification
 
 Set `ANDROID_SDK_ROOT` to an SDK with build-tools and an Android platform installed, and `JAVA_HOME` to a JDK. Build-tools 35.0.0 / platform 35 were used for this integration. The manifest and dex minimum are API 30; the target SDK remains the donor's API 33. This is a local development APK, not a store release.

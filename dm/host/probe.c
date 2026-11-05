@@ -1,5 +1,6 @@
 // Probes DM_PROBE: when the debugger needs a system authorization prompt on the Mac, use this to print registers and a backtrace at a guest address.
 #include "dm.h"
+#include "host_memory.h"
 #include <TargetConditionals.h>
 #include <signal.h>
 #include <dlfcn.h>
@@ -19,7 +20,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
-#if defined(__APPLE__) && !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE
+#ifdef __APPLE__
 // DM_PROBE_WATCH=<address>[+<length>] (hex guest address, length 8 by default): who writes these bytes, without a debugger. Their host page is write-protected for good once it is writable,
 // and every store that faults on it is carried out by the fault handler through a writable alias of the page (STR / STUR / STP of general and SIMD registers in their immediate, pre- and
 // post-index forms, register-offset STR, DC ZVA), so a burst of stores to a busy page cannot slip past. A store reaching the watched bytes prints the thread, pc, lr, the store address,
@@ -146,11 +148,13 @@ static void *watch_arm(void *p) {
     }
     return NULL;
 }
+#endif
 // DM_PROBE_POLL=<address>[+<length>] (hex guest address, up to 8 bytes, 4 by default): when even the watch above misses a write (a page that atomics keep unprotected), a host thread spins on
 // the bytes and, on each change, prints old → new and dumps every guest thread with its backtrace (svc_thread_dump, the first 8 changes): the writer is still inside the code that wrote.
 // Tears of the Kingdom's memory-shortage flag (a word its frame check compares with 1 and clears) lies on such a page. A suffix =<value> (hex) snapshots and dumps only the changes to that value,
 // for a word that changes thousands of times before the bad store (Mario vs. Donkey Kong: a heap block's list link, rewritten by every allocation beside it, until 0x3f landed in it)
 static uint64_t g_poll, g_plen, g_pval; static int g_pwant, g_pheap;
+#ifdef __APPLE__
 // All threads but this one stopped at once, then their pc, lr and 8 frame-pointer frames read and printed after they run again: the writer is caught a few microseconds after its store
 static void poll_snap(void) {
     enum { MT = 256, NF = 8 }; static uint64_t fr[MT][NF + 2]; static thread_act_t keep[MT];
@@ -177,17 +181,25 @@ static void poll_snap(void) {
     }
     funlockfile(stderr);
 }
+#endif
+static int poll_read(uint64_t *out) {
+    uint64_t value = 0;
+    if (!dm_host_read(g_poll, &value, (size_t)g_plen)) return 0;
+    *out = value; return 1;
+}
 static void *poll_run(void *p) {
-    (void)p; void svc_thread_dump(void); extern uint64_t g_t0_ns; uint64_t now_ns(void); vm_size_t got;
+    (void)p; void svc_thread_dump(void); extern uint64_t g_t0_ns; uint64_t now_ns(void);
     uint64_t old = 0;   // read through the kernel: the address is not readable until the game maps it (the heap before SetHeapSize)
     if (g_pheap) { uint64_t hb = 0; while (dm_guest_heap_range(&hb, NULL), !hb) usleep(1000); g_poll += hb; }   // heap+<offset>
-    while (vm_read_overwrite(mach_task_self(), g_poll, g_plen, (vm_address_t)&old, &got) || got != g_plen) usleep(1000);
+    while (!poll_read(&old)) usleep(1000);
     LOG("POLL %#llx + %llu armed, value %#llx", (unsigned long long)g_poll, (unsigned long long)g_plen, (unsigned long long)old);
     for (int n = 0;;) {
         uint64_t v = 0;
-        if (vm_read_overwrite(mach_task_self(), g_poll, g_plen, (vm_address_t)&v, &got) || v == old) continue;
+        if (!poll_read(&v) || v == old) continue;
         int hit = !g_pwant || v == g_pval;
+#ifdef __APPLE__
         if (hit && n < 8) poll_snap();
+#endif
         fprintf(stderr, "[dm] POLL %#llx [%.4fs] %#llx → %#llx\n", (unsigned long long)g_poll, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)old, (unsigned long long)v);
         old = v;
         if (hit && n++ < 2) svc_thread_dump();
@@ -199,8 +211,15 @@ static void watch_install(void) {
       if (e) { char *end; g_pheap = !strncmp(e, "heap+", 5); if (g_pheap) e += 5; g_poll = strtoull(e, &end, 16); g_plen = *end == '+' ? strtoull(end + 1, &end, 16) : 4;
                if (*end == '=') { g_pwant = 1; g_pval = strtoull(end + 1, 0, 16); }
                if ((!g_poll && !g_pheap) || !g_plen || g_plen > 8) die("DM_PROBE_POLL format: <address>[+<length up to 8>][=<value>] (hex)");
-               pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t); } }
+               pthread_t t; int rc = pthread_create(&t, NULL, poll_run, NULL);
+               if (rc) die("DM_PROBE_POLL thread: %s", strerror(rc));
+               pthread_detach(t);
+#ifndef __APPLE__
+               LOG("[RED] POLL live thread snapshots are unavailable on this target; memory changes and service-state dumps are enabled");
+#endif
+      } }
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
+#ifdef __APPLE__
     char *end; g_wheap = !strncmp(e, "heap+", 5);
     uint64_t at = strtoull(e + (g_wheap ? 5 : 0), &end, 16); g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
     if ((!at && !g_wheap) || !g_wlen) die("DM_PROBE_WATCH format: [heap+]<address>[+<length>] (hex)");
@@ -211,6 +230,9 @@ static void watch_install(void) {
     pthread_t t; pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t);
     if (g_wheap) LOG("write watch on heap + %#llx + %#llx (resolved once the game opens its heap)", (unsigned long long)g_wrel, (unsigned long long)g_wlen);
     else LOG("write watch on %#llx + %#llx (host page %#llx)", (unsigned long long)g_wat, (unsigned long long)g_wlen, (unsigned long long)g_wpg);
+#else
+    LOG("[RED] DM_PROBE_WATCH requires the Apple host");
+#endif
 }
 
 #endif
@@ -219,14 +241,6 @@ void probe_install(void) {
 #if !TARGET_OS_IPHONE
     void dm_probe_text_install(void);
     dm_probe_text_install();
-#ifdef __APPLE__
     watch_install();
-#else
-    // The write-watch/poll implementation above depends on Mach aliases and task-wide
-    // thread snapshots. Android instruction probes are supported by probe_text.c;
-    // these additional diagnostics remain an explicit platform gap.
-    if (getenv("DM_PROBE_WATCH") || getenv("DM_PROBE_POLL"))
-        LOG("[RED] DM_PROBE_WATCH and DM_PROBE_POLL require the Apple host");
-#endif
 #endif
 }
