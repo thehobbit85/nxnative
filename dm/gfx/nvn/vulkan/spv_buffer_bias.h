@@ -4,6 +4,7 @@
 // original meaning; two bindings of one block type can have different biases.
 #pragma once
 #include <stdint.h>
+#include "resource_contract.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,10 +18,10 @@ static uint32_t *spv_buffer_bias(const uint32_t *w, size_t count, const uint32_t
            ArrayLength=68, InBoundsPtrAccessChain=70, Decorate=71, MemberDecorate=72, CopyObject=83,
            Select=169, Phi=245, Block=2, BufferBlock=3, Binding=33, Offset=35 };
     *reason = "invalid buffer-bias SPIR-V";
-    if (count<5 || w[0]!=0x07230203 || !w[3] || w[3]>0x3fffff || nbindings>64 || count>SIZE_MAX/sizeof(uint32_t)/128) return NULL;
+    if (count<5 || w[0]!=0x07230203 || !w[3] || w[3]>0x3fffff || nbindings>DM_VK_MAX_BINDINGS || count>SIZE_MAX/sizeof(uint32_t)/128) return NULL;
     uint32_t bound=w[3];
     buffer_bias_id *ids=calloc(bound,sizeof *ids);
-    buffer_bias_edit edits[64]; size_t ne=0, annotations=count, extra=0;
+    buffer_bias_edit edits[DM_VK_MAX_BINDINGS]; size_t ne=0, annotations=count, extra=0;
     uint32_t *out=NULL;
     if (!ids) { *reason="out of memory"; return NULL; }
     for (size_t i=5;i<count;) {

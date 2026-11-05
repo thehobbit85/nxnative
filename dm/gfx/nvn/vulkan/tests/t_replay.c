@@ -15,6 +15,7 @@ static int test_nvn2;
 int dm_sdk_ounce(void) { return test_nvn2; }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t driver_program = {.nstage = 1};
+static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
 static prog_t alias_program = {.nstage = 1};
@@ -37,6 +38,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
     if (p == &c2_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x51 : 0x35; return 1; }
     if (p == &driver_c2_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x50; return 1; }
     for (int i = 0; i < 3; i++) if (p == &split_program[i]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x4d+i : 0x35; return 1; }
@@ -1282,6 +1284,7 @@ static void typed_graphics(void) {
 #include "uniform_storage.inc"
 #include "split_handle.inc"
 #include "driver_c2.inc"
+#include "resource_shapes.inc"
 int main(void) {
     if (getenv("DM_VK_TEST_C0")) { compute_driver_constants(); draw_parameters(); return 0; }
     if (getenv("DM_VK_TEST_C2")) { driver_c2(); c2_sample(); return 0; }
@@ -1321,6 +1324,7 @@ int main(void) {
     initial_texture_content();
     uniform_texture_array();
     compute_driver_constants();
+    many_resource_bindings();
     vertex_output_defaults();
     textured_draw(0, 0);  // CPU argument block, followed by a fully GPU-generated block
     textured_draw(1, 0);  // X is GPU-generated, Y and Z are CPU-written

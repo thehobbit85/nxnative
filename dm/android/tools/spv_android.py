@@ -19,6 +19,7 @@ from dm.android.tools.target_contract import shader_contract, stamp_export
 from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
 from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
+from dm.android.tools import spv_resources
 from dm.android.tools.spv_globalmem import global_memory_fields, lower_physical_addresses, drop_unused_int64
 from dm.android.tools import spv_geometry, spv_meshstage, spv_pool, spv_texture_offsets
 from dm.android.tools.spv_cache import capture_cache
@@ -108,7 +109,9 @@ def vk_reflect(data, reflection):
             if name != 'support_buffer':
                 raise ValueError(f'no guest resource for descriptor {binding} ({name!r})')
             resource = {'kind': 'support'}
-        entry = dict(resource, binding=binding, count=count, type=descriptor_type(ty, types, dec, x[3]))
+        descriptor = descriptor_type(ty, types, dec, x[3])
+        resource = spv_resources.slot_array(resource, descriptor, count)
+        entry = dict(resource, binding=binding, count=count, type=descriptor)
         if entry['type'] in ('cis', 'tex', 'tbuf', 'utb', 'stb'):
             image = types[ty[2]] if entry['type'] in ('cis', 'tbuf') else ty
             # Vulkan image view type, including the array shape; used for views
@@ -185,7 +188,7 @@ def export_spirv(data, optimizer):
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
 RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'tex_c2a', 'samp_c2a', 'img', 'sbuf', 'sbuf_ubo', 'tbuf', 'ubo_ptr',
                   'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh', 'gmem_map', 'gmem_log',
-                  'tex_pool', 'samp_pool', 'pool_bounds'}
+                  'tex_pool', 'samp_pool', 'pool_bounds', 'tex_slots', 'samp_slots'}
 
 
 def requirements(data):
@@ -260,8 +263,8 @@ def vk_txt(meta):
         if ty not in VERTEX_TYPES or not 0 <= location < 32:
             raise ValueError(f'unsupported Vulkan vertex input {location} ({ty})')
         lines.append(f'vin {location} {VERTEX_TYPES[ty]}')
-    if len(meta['bindings']) > 64:
-        raise ValueError('Vulkan executor supports at most 64 descriptor bindings per stage')
+    if len(meta['bindings']) > spv_resources.MAX_BINDINGS:
+        raise ValueError(f"Vulkan exports support at most {spv_resources.MAX_BINDINGS} descriptor bindings per stage")
     for bind in meta['bindings']:
         if bind['kind'] not in RESOURCE_KINDS:
             raise ValueError(f"unsupported guest binding kind: {bind['kind']}")
@@ -283,6 +286,7 @@ def vk_txt(meta):
             if name in bind:
                 fields += (f'{name}={bind[name]}',)
         fields += split_handle_fields(bind)
+        fields += spv_resources.fields(bind)
         lines.append('b ' + ' '.join(map(str, fields)))
     return '\n'.join(lines) + '\n'
 
@@ -381,6 +385,7 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
     # Compact pool bindings before wrappers allocate their helper bindings;
     # otherwise their control metadata would retain the old sparse numbers.
     raw, refl = spv_pool.lower(raw, refl)
+    raw = spv_resources.nonuniform_slots(raw, refl)
     mesh_control = None
     if refl['stage'] in ('ts', 'ms'):
         validate_stage(raw, refl)

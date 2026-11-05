@@ -40,6 +40,8 @@ def exporter_digest():
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/split_handle.h')
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/driver_c2.h')
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/driver_c0.h')
+    paths.add(ROOT / 'dm/gfx/nvn/vulkan/resource_contract.h')
+    paths.add(ROOT / 'dm/gfx/nvn/vulkan/driver_c2_modes.h')
     h = hashlib.sha256()
     for path in sorted(paths):
         h.update(str(path.relative_to(ROOT)).encode() + b'\0')

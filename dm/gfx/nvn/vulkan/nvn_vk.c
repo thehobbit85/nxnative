@@ -1006,7 +1006,7 @@ enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
 static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
 }
-typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; } sbind;
+typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 typedef struct vin_module {
     uint64_t mask;
     VkShaderModule module;
@@ -1015,11 +1015,11 @@ typedef struct vin_module {
 typedef struct shader shader_t;
 struct shader {
     shader_t *buffer_variants, *next_buffer_variant;
-    uint32_t buffer_bias[64]; // byte prefix before each reflected storage binding
+    uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
     VkShaderModule mod; VkDescriptorSetLayout dsl;
-    sbind b[64]; int nb; uint8_t vin[32]; uint32_t vin_mask;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
+    sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
     uint8_t *c1; uint32_t c1_len; uint32_t tg[3];
     VkPipelineLayout cpl; VkPipeline cpp;   // compute shaders: their layout and pipeline (dispatch)
 };
@@ -1183,7 +1183,7 @@ static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
 }
 
 static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
-    uint32_t bindings[64]; int any=0;
+    uint32_t bindings[DM_VK_MAX_BINDINGS]; int any=0;
     for (int i=0;i<s->nb;i++) { bindings[i]=s->b[i].binding;any|=s->buffer_bias[i]!=0; }
     if (!spv || !any) return spv;
     size_t words; const char *reason;
@@ -1264,7 +1264,10 @@ static shader_t *shader_get(const uint8_t md[8]) {
         else if (sscanf(ln, "tg %u %u %u", &s->tg[0], &s->tg[1], &s->tg[2]) == 3) {}
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
         else if (sscanf(ln, "vin %d %d", &l, &t) == 2 && l >= 0 && l < 32) { s->vin[l] = (uint8_t)t; s->vin_mask |= 1u << l; }
-        else if (sscanf(ln, "b %d %7s %d %15s %d %d %15s %d %3s", &b, ty, &cnt, kind, &reg, &off, sk, &sreg, access) >= 8 && s->nb < 64) {
+        else if (sscanf(ln, "b %d %7s %d %15s %d %d %15s %d %3s", &b, ty, &cnt, kind, &reg, &off, sk, &sreg, access) >= 8 && s->nb < DM_VK_MAX_BINDINGS) {
+            if (!strcmp(kind, "tex_slots") || !strcmp(kind, "samp_slots")) {
+                LOG("[RED] vk: shader %s requires logical slot array replay", key); free(txt); free(spv); return s;
+            }
             if (!strcmp(kind, "tex_c2a") || !strcmp(kind, "samp_c2a") || !strcmp(sk, "samp_c2a")) {
                 LOG("[RED] vk: shader %s requires driver-table descriptor array replay", key); free(txt); free(spv); return s;
             }
@@ -1275,6 +1278,7 @@ static shader_t *shader_get(const uint8_t md[8]) {
                 LOG("[RED] vk: shader %s requires runtime descriptor pool replay", key); free(txt); free(spv); return s;
             }
             sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = off; e->sreg = (int16_t)sreg;
+            if (dm_vk_resource_line(ln, strlen(ln), &e->shape)) { free(txt); free(spv); return s; }
             e->soff = e->view = -1;
             const char *field;
             if ((field = strstr(ln, " soff="))) e->soff = atoi(field + 6);
@@ -1301,13 +1305,13 @@ static shader_t *shader_get(const uint8_t md[8]) {
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, ns, spv};
     VkResult r = vkCreateShaderModule(g_dev, &mi, NULL, &s->mod); free(spv);
     if (r != VK_SUCCESS) { LOG("[RED] vk: shader %s rejected (%d)", key, (int)r); s->mod = VK_NULL_HANDLE; }
-    VkDescriptorSetLayoutBinding lb[64]; VkShaderStageFlags sf = s->stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : s->stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutBinding lb[DM_VK_MAX_BINDINGS]; VkShaderStageFlags sf = s->stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : s->stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
     for (int i = 0; i < s->nb; i++) lb[i] = (VkDescriptorSetLayoutBinding){s->b[i].binding, descriptor_type[s->b[i].type], s->b[i].count, sf, NULL};
     VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, (uint32_t)s->nb, lb};
     VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &s->dsl));
     return s;
 }
-static shader_t *buffer_variant(shader_t *base, const uint32_t bias[64]) {
+static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BINDINGS]) {
     int any=0;for(int i=0;i<base->nb;i++) any|=bias[i]!=0;
     if (!any) return base;
     for(shader_t *s=base->buffer_variants;s;s=s->next_buffer_variant)
@@ -1767,6 +1771,9 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int *ok, vtex **vo) {
     if (!tid) { g_tex_miss[0]++; return dummy; }
     treg_t tr; vtex *v = registered_texture(tid, &tr);
     if (!tr.ok) { g_tex_miss[1]++; return dummy; }
+    if (tr.t.d.target == NVN_TEXTURE_TARGET_BUFFER && b->view == VK_IMAGE_VIEW_TYPE_2D && (b->shape.fetch1d || b->kind == K_TEXU)) {
+        RED_ONCE(24, "wrapped buffer fetch requires a 16384-texel row view"); return VK_NULL_HANDLE;
+    }
     if (!v) { g_tex_miss[2]++; return dummy; }
     if (b->view >= 0) {
         int one = v->target == NVN_TEXTURE_TARGET_1D || v->target == NVN_TEXTURE_TARGET_1D_ARRAY;
@@ -1834,7 +1841,7 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
 // All storage descriptors of a command are resolved together. Overlapping
 // ranges share one backing allocation, so writes and atomics through either
 // descriptor see the same bytes, including across vertex and fragment sets.
-#define MAX_BUFFER_BINDINGS (2 * 64 * 32) // two stages, reflected bindings, descriptor-array elements
+#define MAX_BUFFER_BINDINGS (2 * DM_VK_MAX_BINDINGS * 32) // two stages, reflected bindings, descriptor-array elements
 typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; int has_texel; } storage_range;
 static storage_range g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
 static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
@@ -1941,7 +1948,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
     }
     for (int st=0;st<2;st++) {
         shader_t *s=stages[st];if(!s) continue;
-        uint32_t bias[64]={0};
+        uint32_t bias[DM_VK_MAX_BINDINGS]={0};
         for (int b=0;b<s->nb;b++) {
             p_bind_buf u=storage_binding(&s->b[b],s->stage);
             if(!u.addr || !u.size) continue;
@@ -2056,7 +2063,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
         result = vkAllocateDescriptorSets(g_dev, &ai, &ds);
     }
     VKCHECK(result);
-    VkWriteDescriptorSet w[64]; VkDescriptorBufferInfo bi[64]; int nw = 0;
+    VkWriteDescriptorSet w[DM_VK_MAX_BINDINGS]; VkDescriptorBufferInfo bi[DM_VK_MAX_BINDINGS]; int nw = 0;
     for (int i = 0; i < s->nb; i++) {
         const sbind *b = &s->b[i];
         VkWriteDescriptorSet *x = &w[nw]; *x = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0, 1};
