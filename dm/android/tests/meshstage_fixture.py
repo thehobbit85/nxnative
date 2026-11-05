@@ -16,6 +16,7 @@ from dm.android.tools import spv_android as vk
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
+    parser.add_argument('--apple', action='store_true', help='Also emit the shared Apple stages and their raw-memory adapters')
     args = parser.parse_args(); work = args.directory.resolve(); work.mkdir(parents=True, exist_ok=True)
     export = work / 'export'; export.mkdir(exist_ok=True)
     for variant, (kind, threads, task) in enumerate((('ts', 8, False), ('ts', 129, False),
@@ -43,6 +44,11 @@ def main():
             os.environ['DMSH_SPV_CAPTURE'] = str(captured)
             vk.capture([str(jobs), str(work)])
             raw = captured / raw.name
+            if args.apple:
+                apple = work / 'apple-raw'; apple.mkdir(exist_ok=True)
+                subprocess.run([ROOT / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate', jobs, apple], check=True)
+                if raw.read_bytes() != (apple / raw.name).read_bytes():
+                    raise ValueError('Ampere task translation differs between Apple and Vulkan targets')
         else:
             body = 'memory[12] = memory[0]; memory[13] = 2048u; memory[14] = 0x7fc12345u; memory[16] = memory[5];'
             if kind == 'ms':
@@ -55,6 +61,13 @@ def main():
                            input=source, text=True, check=True)
         reflection = dict(stage=kind, bindings=[], threadgroup_size=[threads, 1, 1], mesh_stage=info, stage_memory=offsets)
         vk.write_stage(key, raw.read_bytes(), reflection, export, shutil.which('spirv-val'), shutil.which('spirv-opt'))
+        if args.apple:
+            from meshstage_apple import sources
+            cross = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'
+            msl = subprocess.run([cross, raw, '--msl', '--msl-version', '30100'], capture_output=True, text=True, check=True).stdout
+            native, adapter = sources(msl, info)
+            (work / (key + '.native.metal')).write_text(native)
+            (work / (key + '.metal')).write_text(adapter)
     print(f'Exported five task/mesh memory fixtures to {export}')
 
 
