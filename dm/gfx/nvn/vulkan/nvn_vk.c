@@ -1270,6 +1270,9 @@ static shader_t *shader_get(const uint8_t md[8]) {
             if (!strcmp(kind, "gmem_map") || !strcmp(kind, "gmem_log")) {
                 LOG("[RED] vk: shader %s requires physical-address pool replay", key); free(txt); free(spv); return s;
             }
+            if (!strcmp(kind, "tex_pool") || !strcmp(kind, "samp_pool") || !strcmp(kind, "pool_bounds")) {
+                LOG("[RED] vk: shader %s requires runtime descriptor pool replay", key); free(txt); free(spv); return s;
+            }
             sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = off; e->sreg = (int16_t)sreg;
             e->soff = e->view = -1;
             const char *field;
