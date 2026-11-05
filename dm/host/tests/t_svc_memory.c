@@ -641,9 +641,12 @@ int main(int argc, char **argv) {
         layout_order();
         return 0;
     }
+    uint8_t *accounting_base; size_t accounting_size;
+    svc_guest_range(&accounting_base, &accounting_size); assert(!accounting_base && !accounting_size);
     pthread_t threads[8]; uint64_t addresses[8];
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
+    svc_guest_range(&accounting_base, &accounting_size); assert(accounting_base == g_as && accounting_size == g_reserve);
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
 #if defined(__APPLE__) && !TARGET_OS_IPHONE
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's

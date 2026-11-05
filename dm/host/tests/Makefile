@@ -7,6 +7,17 @@ CLANG = clang $(SAN)
 # stderr that the plain run hides is kept in sanitizer builds: the sanitizers report there
 QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
 .DEFAULT_GOAL := run
+run: proc-accounting
+.PHONY: proc-accounting android-accounting-build
+proc-accounting: $(B)/t_proc_accounting
+	$(B)/t_proc_accounting
+$(B)/t_proc_accounting: t_proc_accounting.c ../proc_accounting.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -o $@ $<
+android-accounting-build: $(B)/t_proc_accounting_android $(B)/t_accounting_android
+$(B)/t_proc_accounting_android: t_proc_accounting.c ../proc_accounting.h | $(B)
+	$(CLANG) -D_GNU_SOURCE -O1 -Wall -Werror -o $@ $<
+$(B)/t_accounting_android: t_accounting.c ../memstat_android.c ../proc_accounting.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -D_GNU_SOURCE -O1 -Wall -Werror -pthread -I.. $(GINC) -o $@ $<
 run: jit-memory
 .PHONY: jit-memory
 jit-memory: $(B)/t_jit_memory

@@ -742,6 +742,13 @@ int thr_name_of(pthread_t pt, char *out, size_t n) {
     return ok;
 }
 uint32_t thr_cur_handle(void) { thr_t *t = pthread_getspecific(g_keythr); return t ? t->handle : 0; }   // Only reads TSD, usable in a signal handler
+int thr_name_of_tid(int tid, char *out, size_t n) {
+    int ok = 0; char nb[64];
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t; t = t->all) if (t->native_tid == tid && !t->exited) { snprintf(out, n, "%#x %s", t->handle, thr_name(t, nb, sizeof nb)); ok = 1; break; }
+    pthread_mutex_unlock(&G);
+    return ok;
+}
 // Find a live guest thread by thread name (used by the sampler); returns 0 if not found
 int thr_find_by_name(const char *name, pthread_t *out) {
     char nb[32]; int ok = 0;

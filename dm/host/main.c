@@ -219,6 +219,10 @@ int main(int argc, char **argv) {
         void crash_thread_init(void); crash_thread_init();   // The signal alternate stack is per thread: loading installed it on another thread, so add it for this thread
         LOG("host loading already finished early in the background (dm_host_preload_start)");
     } else host_preload(argc, argv);
+#ifdef __ANDROID__
+    // env.txt and the complete immutable module layout are available now.
+    { void dm_android_accounting_start(void) __attribute__((weak)); if (dm_android_accounting_start) dm_android_accounting_start(); }
+#endif
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
     front_run(guest_main);
     return 0;

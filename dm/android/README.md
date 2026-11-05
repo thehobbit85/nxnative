@@ -13,7 +13,7 @@ make -C dm/android GAME=<title-ID> BUILD_ROOT=<outside-build-directory> dmhost
 
 The first builds `<outside-build-directory>/<title-ID>/libdmhost.so`; the second builds the windowless `dmhost` CLI. There is no default game. Derived profiles use `DM_GAMES_DIR` as on Apple. Run the CLI from an Android shell as `dmhost <rewritten-module-directory> [module names]`. All modules must be rewritten with `patch_nso.py --thread-slots android`; Apple rewrites are incompatible.
 
-The app frontend owns the NativeActivity window, input queue, controller/touch overlay, settings environment and pause/resume callbacks. Graphics work drains on pause, and a recreated native window gets a new Vulkan swapchain. Touch controls and physical controllers currently feed one guest player. Text keyboard, native motion/haptic routing, and Apple-specific diagnostics remain parity work.
+The app frontend owns the NativeActivity window, input queue, controller/touch overlay, settings environment and pause/resume callbacks. Graphics work drains on pause, and a recreated native window gets a new Vulkan swapchain. Touch controls and physical controllers currently feed one guest player. Text keyboard and native motion/haptic routing remain parity work.
 
 The complete CLI and native library link without unresolved references using NDK r27d. Synthetic modules have reached SDK initialization and `nnMain` through the production CLI and app, submitted NVN commands and presented a Vulkan image on an ARM64 Android 15 emulator (SwiftShader). Background/resume and surface recreation have been observed. Commercial integration checks are tracked in the [Hollow Knight note](../games/0100633007D48000/README.md); physical Android hardware remains untested.
 
@@ -30,6 +30,10 @@ live thread backtraces are asynchronous. `DM_PROBE_WATCH` intercepts writes to
 managed heap, alias, stack or module data; arbitrary host allocations use polling.
 See [memory polling](../../docs/reference/memory.md#memory-change-polling-on-android)
 and [managed write watches](../../docs/reference/memory.md#managed-write-watches-on-android).
+`DM_MEMSTAT=<path>` and `DM_THRCPU=<path>[,seconds]` write target-native memory
+and CPU time series; `DM_MEMSTAT_DUMP=<seconds>` adds a region breakdown. See
+[Android accounting](../../docs/reference/memory.md#android-memory-and-thread-cpu-accounting)
+for units, classification and unavailable-data behavior. Use paths writable by the app.
 
 ## Packaging and verification
 
