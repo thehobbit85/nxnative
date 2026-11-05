@@ -38,7 +38,7 @@ def host_contract(profile=None, *, programs=True):
     # not change the portable contract.
     header = '\n'.join(line for line in (game.header(g) if programs else game.header_one(g)).splitlines() if not line.startswith('//'))
     rows = [('schema', 1), ('platform', 'android'), ('arch', 'arm64-v8a'), ('host_abi', 1), ('tp_slot', 2),
-            ('shader_schema', 1), ('shader_chain', chain), ('exporter', digest(ROOT / 'dm/android/tools/spv_android.py')),
+            ('shader_schema', 2), ('shader_chain', chain), ('exporter', digest(ROOT / 'dm/android/tools/spv_android.py')),
             ('profile', g.id), ('profile_header', hashlib.sha256(header.encode()).hexdigest()), ('feature', 'guest-nvn')]
     profiles = [(0, g)] + [(int(n), game.load(gid)) for n, gid in g.pairs('programs')] if programs and g.get('programs', '') else [(0, g)]
     if len(profiles) > 1:

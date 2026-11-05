@@ -45,6 +45,8 @@ def decode(data):
     words = struct.unpack(f'<{len(data) // 4}I', data)
     if words[0] != 0x07230203:
         raise ValueError('invalid SPIR-V magic')
+    if words[1] not in (0x10000, 0x10100, 0x10200, 0x10300):
+        raise ValueError('SPIR-V version is incompatible with Vulkan 1.1')
     at = 5
     instructions = []
     while at < len(words):
@@ -176,13 +178,30 @@ RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'img', 'sb
                   'samp', 'samp_ubo', 'samp_tex', 'samp_id'}
 
 
+def requirements(data):
+    """Retain the emitted module's optional feature requirements verbatim."""
+    _, instructions = decode(data)
+    return dict(capabilities=sorted({x[1] for x in instructions if opcode(x) == 17}),
+                extensions=sorted({string_operand(x[1:]) for x in instructions if opcode(x) == 10}))
+
+
 def vk_txt(meta):
     """Encode the stage, vertex inputs and guest source of each descriptor for the Vulkan executor."""
     # Shader packages include unused geometry/tessellation programs. Preserve
     # their real stages; exporting assets does not imply runtime stage support.
     if meta['stage'] not in ('vs', 'ps', 'cs', 'gs', 'hs', 'ds'):
         raise ValueError(f"unsupported Vulkan stage: {meta['stage']}")
-    lines = [f"stage {meta['stage']}"]
+    if meta.get('schema', 2) != 2:
+        raise ValueError('incompatible Vulkan shader schema')
+    lines = ['schema 2', 'target vulkan1.1', f"stage {meta['stage']}"]
+    for cap in sorted(set(meta.get('capabilities', []))):
+        if type(cap) is not int or not 0 <= cap <= 0xffffffff:
+            raise ValueError('invalid SPIR-V capability')
+        lines.append(f'cap {cap}')
+    for ext in sorted(set(meta.get('extensions', []))):
+        if not re.fullmatch(r'SPV_[A-Za-z0-9_]+', ext):
+            raise ValueError('invalid SPIR-V extension')
+        lines.append(f'ext {ext}')
     if meta.get('tg'):
         lines.append('tg ' + ' '.join(map(str, meta['tg'])))
     if meta.get('c1'):
@@ -268,7 +287,7 @@ def export(pkg, keys, out):
                 bindings = vk_reflect(data, refl)
             except ValueError as exc:
                 raise ValueError(f'{key}: {exc}') from exc
-            meta.update(key=key, tg=refl.get('threadgroup_size'), bindings=bindings)
+            meta.update(key=key, tg=refl.get('threadgroup_size'), bindings=bindings, **requirements(data))
             stage_counts[meta['stage']] += 1
             (dest / (key + '.vk.txt')).write_text(vk_txt(meta))
         for stage in ('gs', 'hs', 'ds'):

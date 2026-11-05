@@ -1,0 +1,81 @@
+#ifndef DM_VK_SHADER_CONTRACT_H
+#define DM_VK_SHADER_CONTRACT_H
+// Versioned offline products: reject incompatible sidecars before creating driver objects.
+// spirv-val validates exported modules; this bounded reader checks their runtime contract.
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+static int dm_vk_line_is(const char *line, size_t length, const char *value) {
+    return strlen(value) == length && !memcmp(line, value, length);
+}
+static const char *dm_vk_shader_contract(const char *text, size_t length, const uint32_t *words, size_t count) {
+    if (count < 5 || words[0] != 0x07230203 || words[4]) return "invalid SPIR-V header";
+    if (words[1] < 0x10000 || words[1] > 0x10300 || (words[1] & 0xff)) return "incompatible SPIR-V version";
+    if (memchr(text, 0, length)) return "embedded NUL in shader sidecar";
+    uint32_t caps[128]; unsigned nc = 0, ne = 0, entries = 0, functions = 0;
+    const char *extensions[128]; size_t extension_lengths[128];
+    unsigned char cap_seen[128] = {0}, ext_seen[128] = {0};
+    int model = -1;
+    for (size_t at = 5; at < count;) {
+        uint32_t op = words[at] & 0xffff, n = words[at] >> 16;
+        if (!n || n > count - at) return "truncated SPIR-V instruction";
+        if (op == 17) {
+            if (n != 2 || nc == 128) return "invalid capability list";
+            for (unsigned i = 0; i < nc; i++) if (caps[i] == words[at + 1]) return "duplicate module capability";
+            caps[nc++] = words[at + 1];
+        } else if (op == 10) {
+            if (n < 2 || ne == 128) return "invalid extension list";
+            const char *name = (const char *)(words + at + 1);
+            const char *end = memchr(name, 0, (n - 1) * 4);
+            if (!end) return "unterminated SPIR-V extension";
+            extensions[ne] = name; extension_lengths[ne++] = (size_t)(end - name);
+        } else if (op == 15) {
+            if (n < 4 || ++entries != 1) return "expected one shader entry point";
+            model = (int)words[at + 1];
+        } else if (op == 54) {
+            if (functions++) return "nested SPIR-V function";
+        } else if (op == 56) {
+            if (!functions) return "unmatched SPIR-V function end";
+            functions--;
+        }
+        at += n;
+    }
+    if (entries != 1 || functions) return "incomplete SPIR-V module";
+    int schema = 0, target = 0, stage = 0;
+    for (size_t at = 0; at < length;) {
+        const char *line = text + at, *end = memchr(line, '\n', length - at);
+        size_t n = end ? (size_t)(end - line) : length - at;
+        at += n + (end != NULL);
+        if (!n) continue;
+        if (n >= 7 && !memcmp(line, "schema ", 7)) {
+            if (schema++ || !dm_vk_line_is(line, n, "schema 2")) return "incompatible shader schema";
+        } else if (n >= 7 && !memcmp(line, "target ", 7)) {
+            if (target++ || !dm_vk_line_is(line, n, "target vulkan1.1")) return "incompatible shader target";
+        } else if (n >= 6 && !memcmp(line, "stage ", 6)) {
+            const char *names[] = {"vs", "hs", "ds", "gs", "ps", "cs"};
+            if (stage++ || model < 0 || model > 5 || !dm_vk_line_is(line + 6, n - 6, names[model])) return "shader stage does not match module";
+        } else if (n >= 4 && !memcmp(line, "cap ", 4)) {
+            if (n <= 4 || line[4] < '0' || line[4] > '9') return "invalid sidecar capability";
+            uint32_t value = 0;
+            for (size_t k = 4; k < n; k++) {
+                if (line[k] < '0' || line[k] > '9' || value > (UINT32_MAX - (uint32_t)(line[k] - '0')) / 10) return "invalid sidecar capability";
+                value = value * 10 + (uint32_t)(line[k] - '0');
+            }
+            unsigned i = 0; while (i < nc && caps[i] != value) i++;
+            if (i == nc || cap_seen[i]++) return "incompatible or duplicate shader capability";
+        } else if (n >= 4 && !memcmp(line, "ext ", 4)) {
+            unsigned i = 0;
+            while (i < ne && (extension_lengths[i] != n - 4 || memcmp(extensions[i], line + 4, n - 4))) i++;
+            if (i == ne || ext_seen[i]++) return "incompatible or duplicate shader extension";
+        } else if (!((n >= 3 && !memcmp(line, "tg ", 3)) || (n >= 3 && !memcmp(line, "c1 ", 3)) ||
+                     (n >= 4 && !memcmp(line, "vin ", 4)) || (n >= 2 && !memcmp(line, "b ", 2)))) {
+            return "unknown shader sidecar record";
+        }
+    }
+    if (schema != 1 || target != 1 || stage != 1) return "missing shader contract";
+    for (unsigned i = 0; i < nc; i++) if (!cap_seen[i]) return "missing shader capability";
+    for (unsigned i = 0; i < ne; i++) if (!ext_seen[i]) return "missing shader extension";
+    return NULL;
+}
+#endif

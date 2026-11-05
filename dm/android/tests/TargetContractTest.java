@@ -13,7 +13,7 @@ public final class TargetContractTest {
     }
     public static void main(String[] args) throws Exception {
         String sha = "a".repeat(64), id = "0100633007D48000", pkg = "com.nxnative.t" + id.toLowerCase();
-        String producer = "schema\t1\nplatform\tandroid\narch\tarm64-v8a\nhost_abi\t1\ntp_slot\t2\nshader_schema\t1\nshader_chain\tcacaa37ecb55\nexporter\t" + sha + "\nprofile\t" + id + "\nprofile_header\t" + sha + "\nfeature\tguest-nvn\nprofile_input\t" + id + "/game.tsv\t" + sha + "\n";
+        String producer = "schema\t1\nplatform\tandroid\narch\tarm64-v8a\nhost_abi\t1\ntp_slot\t2\nshader_schema\t2\nshader_chain\tcacaa37ecb55\nexporter\t" + sha + "\nprofile\t" + id + "\nprofile_header\t" + sha + "\nfeature\tguest-nvn\nprofile_input\t" + id + "/game.tsv\t" + sha + "\n";
         byte[] host = ("native bytes NXNATIVE_ANDROID_HOST_V1\n" + producer + "NXNATIVE_ANDROID_HOST_END\n").getBytes(StandardCharsets.UTF_8);
         String rows = "dm/main.patched.bin\t4\t=d\t" + sha + "\ndm/main.fixups.tsv\t5\t=d\t" + sha + "\n";
         GameAssets.Manifest assets = GameAssets.Manifest.read(new ByteArrayInputStream(rows.getBytes(StandardCharsets.UTF_8)));
@@ -32,7 +32,7 @@ public final class TargetContractTest {
             if (!AssetDeploy.readManifest(apk.toFile()).identity.equals(assets.identity)) throw new AssertionError("deployment contract differs");
         } finally { java.nio.file.Files.delete(apk); }
 
-        for (String[] change : new String[][]{{"schema\t1", "schema\t2"}, {"platform\tandroid", "platform\tios"}, {"arch\tarm64-v8a", "arch\tx86_64"}, {"tp_slot\t2", "tp_slot\t3"}, {"host_abi\t1", "host_abi\t2"}, {"shader_schema\t1", "shader_schema\t2"}, {"feature\tguest-nvn", "feature\tguest-vulkan"}}) {
+        for (String[] change : new String[][]{{"schema\t1", "schema\t2"}, {"platform\tandroid", "platform\tios"}, {"arch\tarm64-v8a", "arch\tx86_64"}, {"tp_slot\t2", "tp_slot\t3"}, {"host_abi\t1", "host_abi\t2"}, {"shader_schema\t2", "shader_schema\t1"}, {"feature\tguest-nvn", "feature\tguest-vulkan"}}) {
             // Change both producer and target: matching records still cannot opt
             // into an ABI/backend this menu cannot launch.
             byte[] other = new String(host, StandardCharsets.UTF_8).replace(change[0], change[1]).getBytes(StandardCharsets.UTF_8);
