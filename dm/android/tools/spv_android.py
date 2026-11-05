@@ -20,7 +20,8 @@ from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
 from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
 from dm.android.tools.spv_globalmem import global_memory_fields, lower_physical_addresses, drop_unused_int64
-from dm.android.tools import spv_geometry, spv_meshstage, spv_pool
+from dm.android.tools import spv_geometry, spv_meshstage, spv_pool, spv_texture_offsets
+from dm.android.tools.spv_cache import capture_cache
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
 
@@ -174,6 +175,7 @@ def export_spirv(data, optimizer):
     # Keep live descriptor numbers and shader operations unchanged. The raw
     # translator can retain unused texture declarations that SPIRV-Cross drops
     # from Metal's argument buffer (Link's Awakening's uber shaders).
+    data = spv_texture_offsets.lower(data)
     data, physical = lower_physical_addresses(prepare_spirv(data))
     result = subprocess.run([optimizer, '--eliminate-dead-variables', '-', '-o', '-'],
                             input=data, stdout=subprocess.PIPE, check=True).stdout
@@ -460,11 +462,7 @@ def export(pkg, keys, out, *, prepare_only=False):
         # Only compiled Metal libraries are shared. The shader/metadata cache
         # must remain private: a cache hit there skips raw SPIR-V capture and
         # does not distinguish the wrapper's Vulkan target from Apple's job.
-        cas = work / 'cas'
-        cas.mkdir()
-        metal_cache = out.parent / 'vk-metallib'
-        metal_cache.mkdir(exist_ok=True)
-        (cas / 'metallib').symlink_to(metal_cache.resolve(), target_is_directory=True)
+        cas = work / 'cas.db'
         for src in XLATE.parent.iterdir():
             if src != XLATE:
                 (xlate_dir / src.name).symlink_to(src)
@@ -479,8 +477,9 @@ def export(pkg, keys, out, *, prepare_only=False):
                    DMSH_PREFILL=str(out.parent / 'cache'), DMSH_TARGETS='mac')
         env.pop('IOSOUT', None)
         keys = sorted(set(keys))
-        for i in range(0, len(keys), 512):
-            subprocess.run([sys.executable, TOOLS / 'own_compilers.py', pkg, cache, *keys[i:i + 512]], env=env, check=True)
+        with capture_cache(cas, out.parent / 'vk-metallib.db'):
+            for i in range(0, len(keys), 512):
+                subprocess.run([sys.executable, TOOLS / 'own_compilers.py', pkg, cache, *keys[i:i + 512]], env=env, check=True)
         libraries, = cache.glob('b-*')
         stage_counts = collections.Counter()
         products = []

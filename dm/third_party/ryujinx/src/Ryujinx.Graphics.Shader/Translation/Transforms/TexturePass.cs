@@ -311,6 +311,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             bool hasLodBias = (texOp.Flags & TextureFlags.LodBias) != 0;
             bool hasLodLevel = (texOp.Flags & TextureFlags.LodLevel) != 0;
 
+            // A normalized displacement cannot preserve per-mip offsets under
+            // trilinear filtering or sampler LOD clamps. This target supplies
+            // an exact downstream lowering for explicit-LOD/gradient samples.
+            if (!isGather && !intCoords && (hasLodLevel || hasDerivatives) &&
+                gpuAccessor.QueryHostPreservesExplicitTextureSampleOffsets())
+            {
+                return node;
+            }
+
             bool isArray = (texOp.Type & SamplerType.Array) != 0;
             bool isMultisample = (texOp.Type & SamplerType.Multisample) != 0;
             bool isShadow = (texOp.Type & SamplerType.Shadow) != 0;

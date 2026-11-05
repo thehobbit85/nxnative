@@ -10,6 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'android/tools'))
 import spv_android as vk
+from dm.tools.shader_cache import Store
 
 
 # The same typed image load/write pattern as the two Legends Z-A compute shaders.
@@ -173,9 +174,20 @@ OpFunctionEnd
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             seen = []
+            compiled = 'metallib/mac/' + 'a' * 64 + '.metallib'
             def stop_before_translation(command, **kwargs):
                 env = kwargs['env']
-                seen.append(dict(env, metal_cache=str((Path(env['DMSH_CAS']) / 'metallib').resolve())))
+                # Use the real shared cache API: a directory here no longer
+                # works, and reusing translation entries would skip capture.
+                store = Store(env['DMSH_CAS'])
+                try:
+                    self.assertIsNone(store.get('shader/capture/result.spv'))
+                    self.assertEqual(store.get(compiled), b'compiled Metal' if seen else None)
+                    store.put(compiled, b'compiled Metal')
+                    store.put('shader/capture/result.spv', b'old translation')
+                finally:
+                    store.close()
+                seen.append(env)
                 raise RuntimeError('translation boundary')
             for name in ('first', 'retry'):
                 with mock.patch.object(vk.subprocess, 'run', side_effect=stop_before_translation), \
@@ -184,8 +196,6 @@ OpFunctionEnd
                     with self.assertRaisesRegex(RuntimeError, 'translation boundary'):
                         vk.export(root / 'pkg', ['0' * 16], root / name)
             self.assertNotEqual(seen[0]['DMSH_CAS'], seen[1]['DMSH_CAS'])
-            self.assertEqual(seen[0]['metal_cache'], seen[1]['metal_cache'])
-            self.assertEqual(Path(seen[0]['metal_cache']), (root / 'vk-metallib').resolve())
             self.assertEqual(Path(seen[0]['DMSH_PREFILL']), root / 'cache')
             self.assertNotEqual(seen[0]['DMSH_SPV_CAPTURE'], seen[1]['DMSH_SPV_CAPTURE'])
 
