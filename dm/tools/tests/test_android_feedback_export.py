@@ -36,6 +36,9 @@ class FeedbackMetadata(unittest.TestCase):
             text = (work / 'export' / (key + '.vk.txt')).read_text()
             self.assertIn('tf 0 20 0 2 1 3\n', text)
             self.assertIn('tf 2 4 1 1\n', text)
+            capture = (work / 'export' / (key + '.vc.vk.txt')).read_text()
+            self.assertIn('tf 0 20 0 2 1 3\n', capture)
+            self.assertIn('capture 144 6 ', capture)
 
     def test_interleaved_and_duplicate_capture_outputs_survive(self):
         text = vk.vk_txt(dict(stage='vs', bindings=[], tf=LAYOUT))

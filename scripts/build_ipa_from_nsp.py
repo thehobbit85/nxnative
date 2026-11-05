@@ -2539,8 +2539,11 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
     products = set(keys)
     for line in g.table('shader_map.tsv').read_text(errors='replace').splitlines():
         columns = line.split('\t')
-        if len(columns) > 4 and columns[0].endswith('.bin') and columns[2] == 'geometry' and columns[3] in products:
-            products.update(columns[3] + f'.g{topology}' for topology in range(5))
+        if len(columns) > 4 and columns[0].endswith('.bin') and columns[3] in products:
+            if columns[2] == 'geometry':
+                products.update(columns[3] + f'.g{topology}' for topology in range(5))
+            elif columns[2] == 'vertex':
+                products.add(columns[3] + '.vc')
     expected = {k + suffix for k in products for suffix in ('.spv', '.vk.txt')}
     def inventory(directory):
         return {p.name for p in directory.iterdir() if p.is_file() and (p.suffix == '.spv' or p.name.endswith('.vk.txt'))}

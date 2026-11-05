@@ -56,6 +56,23 @@ def metal_fixture(raw):
 
 @unittest.skipUnless(all(shutil.which(t) for t in ('glslc', 'spirv-val')), 'requires shader tools')
 class VertexCapture(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('spirv-opt'), 'requires SPIRV-Tools')
+    def test_export_derives_capture_without_modifying_the_ordinary_vertex_stage(self):
+        exporter = importlib.import_module('dm.android.tools.spv_android')
+        raw = subprocess.run(['glslc', '--target-env=vulkan1.1', '-fshader-stage=vertex', '-', '-o', '-'],
+                             input=SOURCE.encode(), stdout=subprocess.PIPE, check=True).stdout
+        key = '0123456789abcdef'
+        with tempfile.TemporaryDirectory(prefix='vertex_capture_export_') as tmp:
+            work = Path(tmp)
+            exporter.write_stage(key, raw, dict(stage='vs', bindings=[]), work, shutil.which('spirv-val'), shutil.which('spirv-opt'))
+            self.assertEqual((work / (key + '.spv')).read_bytes(), exporter.export_spirv(raw, shutil.which('spirv-opt')))
+            self.assertTrue((work / (key + '.vc.spv')).is_file())
+            text = (work / (key + '.vc.vk.txt')).read_text()
+            self.assertIn('capture 144 6 0 1\n', text)
+            self.assertIn('b 0 ssbo 1 geometry 0 -1 - -1\n', text)
+            self.assertIn('b 1 ubo 1 geometry 5 -1 - -1\n', text)
+            self.assertNotIn('capture ', (work / (key + '.vk.txt')).read_text())
+
     def test_unused_builtin_declarations_keep_defaults_but_live_unknown_builtins_fail(self):
         capture = importlib.import_module('dm.android.tools.spv_capture')
         source = '''#version 450
@@ -80,6 +97,28 @@ void main(){ gl_Position=vec4(0,0,0,1); }
                              input=source.encode(), stdout=subprocess.PIPE, check=True).stdout
         with self.assertRaisesRegex(ValueError, '32-bit'):
             capture.geometry_capture(raw)
+
+    @unittest.skipUnless(all(shutil.which(t) for t in ('spirv-as', 'spirv-dis')), 'requires SPIRV-Tools')
+    def test_extended_instruction_number_is_not_an_output_pointer(self):
+        capture = importlib.import_module('dm.android.tools.spv_capture')
+        source = '''#version 450
+out gl_PerVertex { vec4 gl_Position; float gl_CullDistance[1]; };
+void main(){ gl_Position=fma(vec4(float(gl_VertexIndex)),vec4(2),vec4(1)); }
+'''
+        raw = subprocess.run(['glslc', '--target-env=vulkan1.1', '-fshader-stage=vertex', '-', '-o', '-'],
+                             input=source.encode(), stdout=subprocess.PIPE, check=True).stdout
+        code = capture.decode(raw)[1]
+        variable, = [i[2] for i in code if capture.opcode(i) == 59 and i[3] == 3]
+        self.assertTrue(any(capture.opcode(i) == 12 and i[4] == 50 for i in code))  # GLSL Fma
+        assembly = subprocess.check_output(['spirv-dis', '--raw-id', '-'], input=raw).decode()
+        # Force the legal ID collision seen in the commercial shader corpus.
+        assembly = re.sub(r'%(\d+)', lambda m: '%50' if int(m[1]) == variable else '%id' + m[1], assembly)
+        raw = subprocess.run(['spirv-as', '--preserve-numeric-ids', '--target-env', 'spv1.3', '-', '-o', '-'],
+                             input=assembly.encode(), stdout=subprocess.PIPE, check=True).stdout
+        self.assertEqual(set(capture.Module(raw).output_words()), {0, 1, 2, 3})
+        data, _ = capture.geometry_capture(raw)
+        result = subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=data, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE') and shutil.which('spirv-opt'), 'requires offline translator')
     def test_shared_maxwell_vertex_translation_can_be_captured(self):
