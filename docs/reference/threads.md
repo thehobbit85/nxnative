@@ -4,6 +4,15 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 
 ## Thread creation and cores
 
+### Live Android diagnostic backtraces
+
+- **Symptom:** an Android `DM_CTL dump` reports service wait state but no live PC/backtrace for a thread executing guest or host code; polling cannot identify a likely writer.
+- **Cause:** live register capture in `svc_thread_dump` and `DM_PROBE_POLL` used Mach thread APIs only.
+- **Fix:** Android shares the scheduler's existing `SIGUSR2` handler to sample each requested thread's PC/LR/SP and eight frame-pointer frames through safe kernel reads. The handler does no allocation, logging, host locking or waiting, then continues normal guest pause handling. TID and request state share one atomic word; a timed-out writer retains its buffer until it finishes. Inspectors have one 20 ms signal-response budget and report blocked/exited/timed-out threads, truncation or unavailable sampling explicitly. Concurrent/reentrant inspectors return without starting another capture.
+- **Found on:** the synthetic production scheduler and `DM_CTL` APK fixtures, not a newly diagnosed commercial-game crash.
+- **Check:** `android-snapshot-build` covers repeated/concurrent requests, forced overlap, delayed writers, blocked/late signals and unreadable/partial/cyclic frame pointers. `t_android_scheduler` checks live guest PC capture alongside 32 GC pause/resumes and 64 thread lifetimes. `web_smoke.py` requests a live dump from the release-linked APK while its HTML applet remains functional. The poll fixture checks the first eight matching snapshot requests and first two service dumps.
+- **Limits:** samples are asynchronous; they do not freeze all threads at the same instant as the Mac poller does. Frames require usable frame pointers; blocked signals may omit a thread. Android NDK sanitizer qualification is open: the tested runtime also failed in a minimal `pthread_create`/join executable without project code. `DM_PROBE_WATCH` and full hitch-register parity remain separate work.
+
 ### Publishing a new thread's scheduler fields
 
 - **Symptom:** TSan reports `thread_main` writing `host_work` while `thr_runnable` reads it during a same-core yield (`t_notify_sched`, issue #411).

@@ -381,8 +381,12 @@ $(B)/t_oe_android: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 # Run a synthetic worker through thread_main, the guest stack switch, the SVC gate and bionic signals.
 .PHONY: android-scheduler-build
 android-scheduler-build: $(B)/t_android_scheduler $(B)/t_thread_leak
+.PHONY: android-snapshot-build
+android-snapshot-build: $(B)/t_thread_snapshot
+$(B)/t_thread_snapshot: t_thread_snapshot.c ../thread_snapshot.h ../dm_uc.h ../host_memory.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -fno-omit-frame-pointer -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -I.. -I../../android/compat $(GINC) -o $@ $< -ldl
 ANDROID_SCHED_SRC = t_android_scheduler.c ../hle_thread.c ../thread.c ../entry.S ../crash.c ../hle_os.c ../loader.c ../hle.c ../hle_svc.c
-$(B)/t_android_scheduler: $(ANDROID_SCHED_SRC) ../dm.h ../dm_uc.h ../host_memory.h ../android_text.h $(GAME_H) | $(B)
+$(B)/t_android_scheduler: $(ANDROID_SCHED_SRC) ../dm.h ../dm_uc.h ../host_memory.h ../thread_snapshot.h ../android_text.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -D_GNU_SOURCE -Wall -Werror -Wno-format -Wno-unused-function -UNDEBUG -fPIC -fvisibility=hidden \
 	    -ffunction-sections -fdata-sections -I.. -I../../android/compat $(GINC) $(ANDROID_SCHED_SRC) \
 	    -Wl,--gc-sections -Wl,--no-undefined -Wl,-z,max-page-size=16384 -ldl -o $@

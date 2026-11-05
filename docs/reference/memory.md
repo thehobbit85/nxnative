@@ -19,7 +19,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** share the parser and change loop across Mac and Android, reading through `dm_host_read` so unmapped or partially readable words do not produce a false change. Absolute addresses, delayed `heap+` resolution, lengths up to eight bytes and value filters retain the Mac behavior. Matching changes trigger the existing service-state dump twice.
 - **Found on:** the synthetic `dm/host/tests/t_probe_poll.c` Android fixture, not a commercial-game failure.
 - **Check:** `probe-poll` and NDK `android-probe-poll-build`, then run the target binary. The fixture observes 320 acknowledged changes across 1/2/4/8-byte lengths, absolute/heap addresses and filtered/unfiltered dumps; it also checks inaccessible and partially readable words.
-- **Open:** Android still lacks the Mac poller's immediate task-wide register/backtrace snapshot and `DM_PROBE_WATCH` write interception. Enabling polling reports that limitation explicitly. This change does not complete host diagnostic parity.
+- **Android snapshots:** the first eight matching changes request [asynchronous live thread backtraces](threads.md#live-android-diagnostic-backtraces). `DM_PROBE_WATCH` write interception remains open; this does not complete host diagnostic parity.
 
 ### Partitioning the guest block between alias region, stacks and heap
 

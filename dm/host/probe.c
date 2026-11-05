@@ -199,6 +199,8 @@ static void *poll_run(void *p) {
         int hit = !g_pwant || v == g_pval;
 #ifdef __APPLE__
         if (hit && n < 8) poll_snap();
+#else
+        if (hit && n < 8) { int dm_thread_snapshot_dump(const char *, int); dm_thread_snapshot_dump("POLL", 1); }
 #endif
         fprintf(stderr, "[dm] POLL %#llx [%.4fs] %#llx → %#llx\n", (unsigned long long)g_poll, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)old, (unsigned long long)v);
         old = v;
@@ -214,9 +216,6 @@ static void watch_install(void) {
                pthread_t t; int rc = pthread_create(&t, NULL, poll_run, NULL);
                if (rc) die("DM_PROBE_POLL thread: %s", strerror(rc));
                pthread_detach(t);
-#ifndef __APPLE__
-               LOG("[RED] POLL live thread snapshots are unavailable on this target; memory changes and service-state dumps are enabled");
-#endif
       } }
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
 #ifdef __APPLE__

@@ -27,6 +27,10 @@
 #endif
 #include <dlfcn.h>
 #include <stdatomic.h>
+#ifndef __APPLE__
+#include "thread_snapshot.h"
+int dm_thread_snapshot_dump(const char *tag, int guest_only) { return snapshot_dump(tag, guest_only); }
+#endif
 
 #define R_TIMEOUT     0xEA01u   // Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
@@ -476,6 +480,9 @@ static void pause_from_signal(ucontext_t *uc) {
 static void on_pause_sig(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)si;
     int saved_errno = errno;
+#ifndef __APPLE__
+    snapshot_signal(uc);
+#endif
     pause_from_signal(uc);
     errno = saved_errno;
 }
@@ -501,7 +508,10 @@ void thr_svc_leave(void) {
 static void pause_install(void) {
     struct sigaction sa = {.sa_sigaction = on_pause_sig, .sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART};
     sigemptyset(&sa.sa_mask);
-    sigaction(SIGUSR2, &sa, NULL);
+    if (sigaction(SIGUSR2, &sa, NULL)) die("installing guest pause signal: %s", strerror(errno));
+#ifndef __APPLE__
+    atomic_store(&snap_ready, 1);
+#endif
 }
 // Horizon svc::ThreadContext (arm64, 0x320 bytes)
 typedef struct { uint64_t r[29], fp, lr, sp, pc; uint32_t pstate, pad; __uint128_t v[32]; uint32_t fpcr, fpsr; uint64_t tpidr; } hz_ctx_t;
@@ -856,6 +866,8 @@ void svc_thread_dump(void) {
         }
         vm_deallocate(mach_task_self(), (vm_address_t)ths, nth * sizeof *ths);
     }
+#else
+    dm_thread_snapshot_dump("dump", 0);
 #endif
 }
 

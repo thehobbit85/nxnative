@@ -26,7 +26,7 @@ copies. Screenshot and texture-dump commands remain separate Vulkan diagnostics
 
 `DM_CTL` also supports `webshot <path>` for the offline HTML page. Memory-change
 polling (`DM_PROBE_POLL`) supports addresses, heap offsets and value filters;
-live thread snapshots and write interception remain open. See
+live thread backtraces are asynchronous, and write interception remains open. See
 [memory polling](../../docs/reference/memory.md#memory-change-polling-on-android).
 
 ## Packaging and verification
