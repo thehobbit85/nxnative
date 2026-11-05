@@ -6,6 +6,8 @@ The [Android host and builder plan](android-parity.md) and [NVN-to-Vulkan parity
 
 The standalone Vulkan vertex-capture fixture is built with `make -C dm/gfx/nvn/vulkan GAME=<id> B=<output> vertex-capture-fixture` (`CC` and `GLSLC` select the target compiler and shader tools). Run `t_shader_capture capture.spv [capture.bin]` on the target to check raw output words, range guards and overflow rejection. On a Mac, `vertex-capture-metal-test` uses the existing Apple capture helper and writes `metal-capture.bin`; compare it byte for byte with the optional Vulkan output. Use separate output directories for native and cross-built executables. These fixtures validate the [capture interface](reference/shaders.md#vulkan-vertex-capture-matches-metals-raw-output-words); production Android geometry and feedback replay remain unfinished.
 
+The `geometry-topology-fixture` target in the same Makefile builds `t_geometry_topology` and `topology.spv`. Run `t_geometry_topology topology.spv` on the Vulkan target to check raw integer indices alongside an unrelated floating-point buffer view, including size queries and output guards. `t_geometry_topology topology.original.spv float-view` runs the original floating-point control; whether it preserves the patterns depends on the driver. See [geometry topology buffer reads](reference/shaders.md#vulkan-geometry-topology-uses-integer-buffer-reads).
+
 ## How it works
 
 | Part | State |
