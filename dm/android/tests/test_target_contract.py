@@ -105,6 +105,19 @@ class TargetContract(unittest.TestCase):
             with (Path(a.profile) / 'game.tsv').open('a') as stream: stream.write('# changed profile input\n')
             with self.assertRaisesRegex(ValueError, 'host.*rebuild'): contract.target_manifest(a, lib, files)
 
+    def test_native_and_capture_producers_track_exporter_helper_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); a, _ = self.fixture(root); repo = root / 'repo'
+            tools = repo / 'dm/android/tools'; tools.mkdir(parents=True)
+            (tools / 'spv_android.py').write_text('import spv_metadata\n')
+            helper = tools / 'spv_metadata.py'; helper.write_text('schema = 1\n')
+            header = repo / 'dm/gfx/nvn/dmsh_chain.h'; header.parent.mkdir(parents=True)
+            header.write_text('#define DMSH_CHAIN "012345abcdef"\n')
+            with patch.object(contract, 'ROOT', repo):
+                before = contract.host_contract(a.profile)
+                helper.write_text('schema = 2\n')
+                self.assertNotEqual(before, contract.host_contract(a.profile))
+
     def test_exporter_uses_the_selected_environment_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             a, _ = self.fixture(Path(tmp))

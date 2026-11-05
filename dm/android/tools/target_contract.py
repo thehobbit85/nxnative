@@ -28,6 +28,20 @@ def rows_bytes(rows):
     return ''.join('\t'.join(map(str, row)) + '\n' for row in rows).encode()
 
 
+def exporter_digest():
+    # Capture/export helpers evolve independently of the entry point. Hash
+    # their contents and relative names so a moved checkout has the same ABI,
+    # while edits or newly added lowering modules cannot reuse an old producer.
+    paths = set((ROOT / 'dm/android/tools').rglob('*.py'))
+    paths.add(ROOT / 'dm/gfx/nvn/vulkan/shader_contract.h')
+    h = hashlib.sha256()
+    for path in sorted(paths):
+        h.update(str(path.relative_to(ROOT)).encode() + b'\0')
+        h.update(path.read_bytes() if path.is_file() else b'missing')
+        h.update(b'\0')
+    return h.hexdigest()
+
+
 def host_contract(profile=None, *, programs=True):
     g = game.load(profile)
     match = re.search(r'#define DMSH_CHAIN "([a-f0-9]+)"', (ROOT / 'dm/gfx/nvn/dmsh_chain.h').read_text())
@@ -38,7 +52,7 @@ def host_contract(profile=None, *, programs=True):
     # not change the portable contract.
     header = '\n'.join(line for line in (game.header(g) if programs else game.header_one(g)).splitlines() if not line.startswith('//'))
     rows = [('schema', 1), ('platform', 'android'), ('arch', 'arm64-v8a'), ('host_abi', 1), ('tp_slot', 2),
-            ('shader_schema', 2), ('shader_chain', chain), ('exporter', digest(ROOT / 'dm/android/tools/spv_android.py')),
+            ('shader_schema', 2), ('shader_chain', chain), ('exporter', exporter_digest()),
             ('profile', g.id), ('profile_header', hashlib.sha256(header.encode()).hexdigest()), ('feature', 'guest-nvn')]
     profiles = [(0, g)] + [(int(n), game.load(gid)) for n, gid in g.pairs('programs')] if programs and g.get('programs', '') else [(0, g)]
     if len(profiles) > 1:
