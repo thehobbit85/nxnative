@@ -678,6 +678,22 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Fix:** Android capture sets `host_target=vulkan` in a temporary translation job. The accessor then disables nonconstant-offset support and reuses Ryujinx's existing `TexturePass.InsertConstOffsets` lowering: add integer offsets to fetch coordinates, or normalized offsets using the mip dimensions to sampled coordinates. The normal Apple job keeps its previous capability. A synthetic Maxwell shader loads offsets from a guest uniform buffer and checks that the actual bundled translator removes the illegal sample operand and passes Vulkan 1.1 validation; the capture check also verifies that the caller's job is unchanged. Validation remains strict.
 - **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#found-on-this-game), captured postprocess shader `9338e3f1b597fe7c`.
 
+**Open:** the inherited coordinate lowering is not exact for all sampling modes. `TexturePass.InsertTextureLod` queries mip zero outside fragment shaders, even for explicit LOD and gradients. The generated Maxwell probes in `dm/android/tests/texture_ops.mk` reproduce this with variants 3 (`TEX.B.LL.AOFFI`) and 9 (`TXD.B.AOFFI`): case 49 reads texel value 10102 instead of 10002 on Vulkan; the original Apple translation matches the independent oracle. Merely using the integer LOD would still leave fractional LOD, trilinear filtering and sampler LOD clamps unresolved. These two probes deliberately fail until an exact lowering is implemented.
+
+### Vulkan shaders require unused extended-gather support
+
+- **Symptom:** a shader with ordinary sampling or gather is rejected on a Vulkan device reporting `shaderImageGatherExtended=0`, including the Android SwiftShader emulator.
+- **Cause:** the shared generator declares `ImageGatherExtended` for every module. Its Vulkan target can already replace guest offsets with coordinate arithmetic, leaving no instruction that needs the capability.
+- **Fix:** Android export removes the declaration only when no image instruction uses `Offset` or `ConstOffsets`. It retains those requirements for ordinary, depth-reference, sparse and extension image instructions according to the SPIR-V grammar; a single `ConstOffset` does not need extended gather. This changes the Android product identity without changing the Apple chain.
+- **Found on:** synthetic Maxwell texture operations. `test_android_texture_capability.py` validates ten ordinary/depth-gather forms, including both required operand kinds. `dm/android/tests/texture_ops.mk` generates 23 original Apple and Vulkan translations over 144 inputs each: four mips, distinct RGBA texels, edge/repeat addressing, signed offsets, explicit gradients, all gather components and per-result gather offsets, integer fetch and width/height/mip-count queries. All 3,312 Apple cases match the CPU oracle. The 21 Vulkan variants excluding the two open mip-offset failures above match 3,096,576 bytes including surrounding memory guards (3,024 cases). A compiled shader with swapped result components fails the oracle. This is partial texture qualification, not complete texture or renderer parity.
+
+### A 2D query requests a nonexistent depth component
+
+- **Symptom:** the generated `texture_ops_fixture.py --full-query <directory>` probe fails SPIR-V validation with a two-component vector accessed at index 2.
+- **Cause:** a full-mask bindless `TXQ.B` starts as a 3D query, then resource resolution selects its actual 2D type. The shared SPIR-V generator still extracts all requested dimensions. The same invalid operation occurs in the Apple and Vulkan target modules. SPIRV-Cross accepting it does not establish the correct guest result.
+- **Fix:** **open** pending authoritative missing-dimension semantics and a shared translator fix. The positive corpus requests width, height and mip count, preserving a sentinel in the fourth output register; the separate full-query mode retains the failing reproduction.
+- **Found on:** synthetic Maxwell texture-query qualification; no game-specific workaround.
+
 ### Vulkan textures from uniform-buffer handles
 
 - **Symptom:** Android export stops with `unsupported guest binding kind: tex_ubo`; the Vulkan replay rejects a combined-image descriptor with count 32.
