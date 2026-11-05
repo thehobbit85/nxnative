@@ -68,7 +68,7 @@ STUBS = {
     'com/nxnative/OfflineWeb.java': '''package com.nxnative; final class OfflineWeb {
         static OfflineWeb last; long id; boolean paused,closed;
         OfflineWeb(GameActivity a,long i,String d,String p,String c,String f,boolean h,int x,int y,boolean m){id=i;last=this;}
-        void close(){closed=true;} void show(){} void send(String m){} void pause(boolean p){paused=p;} void back(){} boolean active(){return false;}
+        void close(){closed=true;} void show(){} void send(String m){} void shot(String p){} void pause(boolean p){paused=p;} void back(){} boolean active(){return false;}
     }''',
     'android/view/Gravity.java': 'package android.view; public final class Gravity { public static final int CENTER=17; }',
     'android/widget/TextView.java': '''package android.widget; public class TextView {

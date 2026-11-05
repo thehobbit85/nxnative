@@ -41,6 +41,9 @@ public final class GameActivity extends NativeActivity {
                 if (command == 1) web.show();
                 if (command == 2) web.send(text(a));
                 if (command == 3) { web.close(); web = null; }
+                if (command == 4) web.shot(text(a));
+            } else if (command == 4) {
+                nativeWebEvent(id, 3, 0, "webshot: no page".getBytes(StandardCharsets.UTF_8));
             }
         });
     }
