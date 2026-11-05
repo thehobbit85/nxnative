@@ -11,7 +11,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / 'dm/tools/tests'), str(ROOT / 'dm/gfx/tests')]
-from test_txq_type import TABLE
+from test_txq_type import TABLE, base, mov, shader
 from test_dmsh_reflect import REFLECT
 from dm.android.tools import spv_android as vk
 from dm.gfx.tools import dmsh_geometry
@@ -34,15 +34,37 @@ def primitive_id_program(invocations):
     return bytes(header) + struct.pack('<8Q', 0, *ops[:3], 0, ops[3], 0, 0)
 
 
+def explicit_program(invocations):
+    # Emit two strips (three/four vertices) into a nine-vertex allocation.
+    # Copy every generic attribute from input vertex zero, retaining raw bits;
+    # loc0.xyz identifies the primitive, invocation and emitted vertex.
+    def load(address, vector=False):
+        return base('Ald') | (7 << 16) | (255 << 8) | (255 << 39) | (address << 20) | (3 << 47 if vector else 0)
+    def store(address, vector=False):
+        return base('Ast') | (7 << 16) | (255 << 8) | (255 << 39) | (address << 20) | (3 << 47 if vector else 0)
+    ops = [load(0x70, True), store(0x70, True)]
+    for location in range(32): ops += [load(0x80 + 16 * location, True), store(0x80 + 16 * location, True)]
+    ops += [mov(0, 1), store(0x3a0), load(0x60), store(0x80),
+            base('S2r') | (7 << 16) | (17 << 20), store(0x84)]
+    for vertex in range(7):
+        out = 3 if vertex in (2, 6) else 1  # Maxwell OUT emit versus emit-and-cut.
+        ops += [mov(0, vertex), store(0x88), base('Out') | (7 << 16) | (255 << 8) | (255 << 20) | 255 | (out << 39)]
+    header = bytearray(0x50)
+    struct.pack_into('<5I', header, 0, (4 << 10) | (3 << 5) | 1, 0, invocations << 24, 7 << 24, 9)
+    return bytes(header) + shader(*ops)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     parser.add_argument('--metal', action='store_true')
+    parser.add_argument('--explicit', action='store_true', help='exercise explicit vertex emission and primitive cuts')
     args = parser.parse_args(); work = args.directory.resolve(); work.mkdir(parents=True, exist_ok=True)
     raw = work / 'raw'; raw.mkdir(exist_ok=True); out = work / 'export'; out.mkdir(exist_ok=True)
     jobs = []
     for inv in (1, 3):
-        key = f'{0xfeed0000 + inv:016x}'; code = work / (key + '.bin'); code.write_bytes(primitive_id_program(inv))
+        key = f'{0xfeed0000 + inv:016x}'; code = work / (key + '.bin')
+        code.write_bytes(explicit_program(inv) if args.explicit else primitive_id_program(inv))
         jobs.append(dict(key=key, stage='gs', code=str(code), tex={}, img={}, attr={}, fout={}, debug=True, reduced=True,
                          tf=[dict(stride=16, outputs=[[0, 4]]), [], [], []]))
     (work / 'jobs.json').write_text(json.dumps(jobs)); os.environ['DMSH_SPV_CAPTURE'] = str(raw)
