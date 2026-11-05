@@ -20,7 +20,7 @@ from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
 from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
 from dm.android.tools.spv_globalmem import global_memory_fields, lower_physical_addresses, drop_unused_int64
-from dm.android.tools import spv_geometry, spv_meshstage
+from dm.android.tools import spv_geometry, spv_meshstage, spv_pool
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
 
@@ -93,12 +93,16 @@ def vk_reflect(data, reflection):
         if dec[x[2]].get(34) != 0 or binding in bindings:
             raise ValueError(f'unsupported descriptor set or duplicate binding {binding}')
         ty = types[types[x[1]][3]]
+        name = names.get(x[2], '')
+        resource = resources.get(name)
         count = 1
         while opcode(ty) == 28:
             count *= constants[ty[3]]
             ty = types[ty[2]]
-        name = names.get(x[2], '')
-        resource = resources.get(name)
+        if opcode(ty) == 29:
+            if not resource or resource.get('runtime') is not True or resource['kind'] not in spv_pool.COUNTS:
+                raise ValueError('runtime array has no descriptor pool metadata')
+            count = resource['pool_count']; ty = types[ty[2]]
         if resource is None:
             if name != 'support_buffer':
                 raise ValueError(f'no guest resource for descriptor {binding} ({name!r})')
@@ -167,7 +171,8 @@ def export_spirv(data, optimizer):
 
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
 RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'tex_c2a', 'samp_c2a', 'img', 'sbuf', 'sbuf_ubo', 'tbuf', 'ubo_ptr',
-                  'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh', 'gmem_map', 'gmem_log'}
+                  'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh', 'gmem_map', 'gmem_log',
+                  'tex_pool', 'samp_pool', 'pool_bounds'}
 
 
 def requirements(data):
@@ -260,6 +265,7 @@ def vk_txt(meta):
             fields += (f"soff={sampler['off']}",)
         fields += driver_array_fields(bind)
         fields += global_memory_fields(bind)
+        fields += spv_pool.fields(bind)
         for name in ('view', 'num'):
             if name in bind:
                 fields += (f'{name}={bind[name]}',)
@@ -359,6 +365,9 @@ def validate_topology(key, data, reflection):
 
 def write_stage(key, raw, refl, destination, validator, optimizer):
     binary = destination / (key + '.spv')
+    # Compact pool bindings before wrappers allocate their helper bindings;
+    # otherwise their control metadata would retain the old sparse numbers.
+    raw, refl = spv_pool.lower(raw, refl)
     mesh_control = None
     if refl['stage'] in ('ts', 'ms'):
         validate_stage(raw, refl)
