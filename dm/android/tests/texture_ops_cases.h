@@ -5,7 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-#define TEX_OP_VARIANTS 23
+#define TEX_OP_VARIANTS 24
 #define TEX_OP_CASES 144
 static uint32_t tex_bits(float value) { uint32_t bits;memcpy(&bits,&value,4);return bits; }
 static float tex_value(unsigned mip,unsigned x,unsigned y,unsigned component) {
@@ -28,8 +28,9 @@ static void tex_case(unsigned variant,unsigned index,uint32_t *uniform,uint32_t 
     uint32_t packed=((unsigned)ox&15)|(((unsigned)oy&15)<<4);
     memset(uniform,0,65536);
     uniform[0]=tex_bits(coords[point][0]);uniform[1]=tex_bits(coords[point][1]);
-    if(variant==22) {
-        uniform[2]=mip;expected[0]=expected[1]=8u>>mip;expected[2]=4;expected[3]=0x76543210;return;
+    if(variant>=22) {
+        uniform[2]=mip;expected[0]=expected[1]=8u>>mip;
+        expected[2]=variant==22?4:0;expected[3]=variant==22?0x76543210:4;return;
     }
     unsigned offset=variant<10?variant%2:(variant-10)%3;
     unsigned lod=variant<8?(variant%4)/2:1;
