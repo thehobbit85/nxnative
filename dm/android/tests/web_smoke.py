@@ -43,7 +43,10 @@ def main():
         shell('rm -f ' + EXTERNAL + '/log.txt')
         adb('shell', 'am', 'start', '-W', '-n', PACKAGE + '/com.nxnative.MenuActivity')
         wait(lambda _: shell('cat ' + EXTERNAL + '/.unpacked 2>/dev/null || true').strip() == identity, 'installed HTML assets')
-        shell("printf 'DM_DBG=1\\nDM_WEB_LOG=1\\n' > " + EXTERNAL + '/env.txt')
+        ctl = EXTERNAL + '/web-ctl.txt'
+        shot = EXTERNAL + '/webshot.png'
+        shell('rm -f ' + ctl + ' ' + shot)
+        shell("printf 'DM_DBG=1\\nDM_WEB_LOG=1\\nDM_CTL=" + ctl + "\\n' > " + EXTERNAL + '/env.txt')
         adb('shell', 'input', 'keyevent', 'KEYCODE_BUTTON_START')
         wait(lambda text: 'WEB_WAIT_A' in text, 'hidden page ready and bidirectional messages')
         adb('shell', 'input', 'keyevent', 'KEYCODE_HOME')
@@ -63,6 +66,15 @@ def main():
             return sum(pixels[i] > 220 and pixels[i + 1] > 220 and pixels[i + 2] > 220 for i in range(0, len(pixels), 4)) > 1000
         wait(page_visible, 'visible HTML text over the native surface')
         (a.output / 'page.png').write_bytes(subprocess.check_output([*base, 'exec-out', 'screencap', '-p'], timeout=30))
+        shell("printf 'webshot /proc/nxnative-no-output/page.png\\n' >> " + ctl)
+        wait(lambda text: '[RED] webshot: nothing written' in text, 'unwritable diagnostic output is reported')
+        shell("printf 'webshot " + shot + "\\n' >> " + ctl)
+        wait(lambda _: shell('test -s ' + shot + ' && echo ready || true').strip() == 'ready', 'offline page PNG diagnostic')
+        png = subprocess.check_output([*base, 'exec-out', 'cat', shot], timeout=30)
+        assert png[:8] == b'\x89PNG\r\n\x1a\n' and png[-8:-4] == b'IEND', 'incomplete page PNG'
+        width, height = struct.unpack_from('>II', png, 16)
+        assert width >= 1280 and width * 9 == height * 16, (width, height)
+        (a.output / 'webshot.png').write_bytes(png)
         adb('shell', 'input', 'keyevent', 'KEYCODE_BUTTON_B')  # Android's right button = Switch A.
         wait(lambda text: 'WEB_WAIT_B' in text, 'A delivered only to the page; requested exit')
         adb('shell', 'input', 'keyevent', 'KEYCODE_BUTTON_A')  # Android's bottom button = Switch B.
@@ -74,12 +86,15 @@ def main():
              'ended page releases its input window before WaitForExit')
         adb('shell', 'input', 'keyevent', 'KEYCODE_BUTTON_Y')  # Switch X goes to the game again.
         wait(lambda text: 'WEB_FIXTURE_DONE' in text, 'Back, callback URL, script end and missing document')
+        shell("printf 'webshot " + shot + "\\n' >> " + ctl)
+        wait(lambda text: 'webshot: no page' in text or 'webshot: no ready page' in text, 'diagnostic after applet closure')
+        assert subprocess.check_output([*base, 'exec-out', 'cat', shot], timeout=30) == png, 'closed applet replaced the capture'
         text = log()
         expected = ['WEB_REQUEST_EXIT_OK', 'WEB_BACK_OK', 'WEB_SYSTEM_BACK_OK', 'WEB_EXIT_INPUT_OK',
                     'WEB_CALLBACK_OK', 'WEB_SCRIPT_EXIT_OK', 'WEB_HTTP_FAILURE_OK', 'WEB_FIXTURE_DONE']
         for marker in expected: assert marker in text, marker
         (a.output / 'log.txt').write_text(text)
-        (a.output / 'result.json').write_text(json.dumps({'checks': expected, 'passed': True}, indent=2))
+        (a.output / 'result.json').write_text(json.dumps({'checks': [*expected, 'webshot PNG'], 'passed': True}, indent=2))
         print('PASS: offline HTML, messages, input isolation and all four exit reasons', flush=True)
     finally:
         (a.output / 'log.txt').write_text(log())

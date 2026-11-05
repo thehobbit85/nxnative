@@ -37,6 +37,7 @@ int front_web_open(const char *dir, const char *path, const char *callback, int 
 void front_web_show(void) { web_command(1, NULL, 0, NULL, NULL, NULL, 0, 0, 0, 0); }
 void front_web_send(const char *message, size_t n) { web_command(2, message, n, NULL, NULL, NULL, 0, 0, 0, 0); }
 void front_web_close(void) { web_command(3, NULL, 0, NULL, NULL, NULL, 0, 0, 0, 0); }
+void front_web_shot(const char *path) { web_command(4, path, strlen(path), NULL, NULL, NULL, 0, 0, 0, 0); }
 JNIEXPORT void JNICALL Java_com_nxnative_GameActivity_nativeWebEvent(JNIEnv *env, jclass cls, jlong id, jint kind, jint reason, jbyteArray message) {
     (void)cls;
     size_t n = message ? (size_t)(*env)->GetArrayLength(env, message) : 0;

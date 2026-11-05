@@ -1,7 +1,10 @@
 package com.nxnative;
 
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.drawable.ColorDrawable;
+import android.util.AtomicFile;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
@@ -18,6 +21,8 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.PopupWindow;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -139,6 +144,30 @@ final class OfflineWeb extends FrameLayout {
     private void eval(String js) { if (!closed) view.evaluateJavascript(js, null); }
     private void deliver(String message) { eval("window.__dm&&__dm.recv(" + JSONObject.quote(message) + ")"); }
     void send(String message) { if (!closed) { if (loaded) deliver(message); else pending.add(message); } }
+    private void shotLog(String message) { GameActivity.nativeWebEvent(id, 3, 0, message.getBytes(StandardCharsets.UTF_8)); }
+    void shot(String path) {
+        if (closed || paused || !loaded) { shotLog("webshot: no ready page"); return; }
+        // DOM messages can arrive before Chromium has a drawable frame. Draw
+        // after this callback completes, on the owning UI thread.
+        view.postVisualStateCallback(0, new WebView.VisualStateCallback() {
+            @Override public void onComplete(long requestId) { view.post(() -> saveShot(path)); }
+        });
+    }
+    private void saveShot(String path) {
+        if (closed || paused || view.getWidth() <= 0 || view.getHeight() <= 0) { shotLog("webshot: no ready page"); return; }
+        Bitmap bitmap = null; FileOutputStream stream = null;
+        AtomicFile file = new AtomicFile(new File(path));
+        try {
+            bitmap = Bitmap.createBitmap(view.getWidth(), view.getHeight(), Bitmap.Config.ARGB_8888);
+            view.draw(new Canvas(bitmap));
+            stream = file.startWrite();
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) throw new IOException("PNG encoding failed");
+            file.finishWrite(stream); stream = null;
+            shotLog("webshot: saved " + path);
+        } catch (IOException | RuntimeException | OutOfMemoryError error) {
+            file.failWrite(stream); shotLog("[RED] webshot: nothing written to " + path + " (" + error + ")");
+        } finally { if (bitmap != null) bitmap.recycle(); }
+    }
     void show() {
         if (closed || shown) return;
         shown = true; setAlpha(1); window.setFocusable(true); window.setTouchable(true); window.update(); view.requestFocus();
