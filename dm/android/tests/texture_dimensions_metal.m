@@ -1,0 +1,73 @@
+// Execute unmodified Apple-target translations of the texture-operation corpus.
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include "texture_dimensions_cases.h"
+int main(int argc,const char **argv) { @autoreleasepool {
+    if(argc<3 || argc>4)return 2;unsigned variant=(unsigned)strtoul(argv[2],NULL,10),mode=argc==4?(unsigned)strtoul(argv[3],NULL,10):0;
+    if(variant>1 || mode>1)return 2;
+    NSString *directory=@(argv[1]),*key=[NSString stringWithFormat:@"%016llx",0xfeed9300ull+variant];
+    id<MTLDevice> device=MTLCreateSystemDefaultDevice();if(!device)return 77;
+    NSError *error=nil;
+    id<MTLLibrary> library=[device newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]]] error:&error];
+    if(!library) { fprintf(stderr,"%s\n",error.description.UTF8String);return 1; }
+    id<MTLFunction> function=[library newFunctionWithName:@"main0"];if(!function)return 1;
+    id<MTLComputePipelineState> pipeline=[device newComputePipelineStateWithFunction:function error:&error];
+    if(!pipeline) { fprintf(stderr,"%s\n",error.description.UTF8String);return 1; }
+    id<MTLArgumentEncoder> arguments=[function newArgumentEncoderWithBufferIndex:0];if(!arguments)return 1;
+    id<MTLBuffer> argumentBuffer=[device newBufferWithLength:arguments.encodedLength options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uniform=[device newBufferWithLength:65536 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> output=[device newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> support=[device newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+    if(!argumentBuffer || !uniform || !output || !support)return 1;
+    memset(support.contents,0,4096);for(unsigned i=0;i<73*4;i++)((float*)support.contents)[48+i]=1;
+    [arguments setArgumentBuffer:argumentBuffer offset:0];
+    MTLTextureDescriptor *descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:8 height:8 mipmapped:YES];
+    descriptor.textureType=variant?MTLTextureType3D:MTLTextureType2DArray;descriptor.depth=variant?8:1;descriptor.arrayLength=variant?1:4;
+    descriptor.storageMode=MTLStorageModeShared;descriptor.usage=MTLTextureUsageShaderRead|MTLTextureUsagePixelFormatView;
+    id<MTLTexture> storage=[device newTextureWithDescriptor:descriptor];if(!storage)return 1;
+    for(unsigned mip=0;mip<4;mip++) {
+        unsigned size=td_size(mip),depth=variant?size:1;
+        for(unsigned layer=0;layer<(variant?1u:4u);layer++) {
+            float pixels[8*8*8*4];td_pixels(pixels,variant,mip,layer);
+            [storage replaceRegion:MTLRegionMake3D(0,0,0,size,size,depth) mipmapLevel:mip slice:layer withBytes:pixels bytesPerRow:size*16 bytesPerImage:size*size*16];
+        }
+    }
+    id<MTLTexture> texture=[storage newTextureViewWithPixelFormat:MTLPixelFormatRGBA32Float textureType:descriptor.textureType levels:NSMakeRange(mode,4-mode) slices:NSMakeRange(variant?0:1,variant?1:3)];
+    if(!texture)return 1;
+    id<MTLSamplerState> samplers[2];
+    for(unsigned i=0;i<2;i++) {
+        MTLSamplerDescriptor *sampler=[MTLSamplerDescriptor new];sampler.supportArgumentBuffers=YES;
+        sampler.sAddressMode=sampler.tAddressMode=sampler.rAddressMode=i?MTLSamplerAddressModeRepeat:MTLSamplerAddressModeClampToEdge;
+        sampler.minFilter=MTLSamplerMinMagFilterNearest;
+        sampler.magFilter=MTLSamplerMinMagFilterNearest;
+        sampler.mipFilter=MTLSamplerMipFilterNearest;
+        sampler.lodMinClamp=0;sampler.lodMaxClamp=3;
+        samplers[i]=[device newSamplerStateWithDescriptor:sampler];if(!samplers[i])return 1;
+    }
+    NSData *data=[NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:[key stringByAppendingString:@".reflection.json"]]];if(!data)return 1;
+    NSDictionary *reflection=[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];if(!reflection)return 1;
+    unsigned seen=0;NSUInteger samplerIndex=0;
+    for(NSDictionary *binding in reflection[@"bindings"]) {
+        NSString *kind=binding[@"kind"];NSUInteger index=[binding[@"arg_id"] unsignedIntegerValue];
+        if([kind isEqualToString:@"cbuf"]) { [arguments setBuffer:uniform offset:0 atIndex:index];seen|=1; }
+        else if([kind isEqualToString:@"sbuf_ubo"]) { [arguments setBuffer:output offset:256 atIndex:index];seen|=2; }
+        else if([kind isEqualToString:@"support"]) [arguments setBuffer:support offset:0 atIndex:index];
+        else if([kind isEqualToString:@"tex"]) { [arguments setTexture:texture atIndex:index];seen|=4; }
+        else if([kind isEqualToString:@"samp"]) { samplerIndex=index;seen|=8; }
+        else return 1;
+    }
+    if((seen&7)!=7)return 1;
+    id<MTLCommandQueue> queue=[device newCommandQueue];if(!queue)return 1;
+    for(unsigned index=0;index<td_count(variant);index++) { @autoreleasepool {
+        uint32_t expected[4];td_inputs(variant,mode,index,uniform.contents,expected);if(getenv("TD_WRONG_LOD"))((uint32_t*)uniform.contents)[3]=td_bits(3);memset(output.contents,0xcc,1024);
+        if(seen&8)[arguments setSamplerState:samplers[td_wrap(index)] atIndex:samplerIndex];
+        id<MTLCommandBuffer> command=[queue commandBuffer];id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];if(!command || !encoder)return 1;
+        [encoder setComputePipelineState:pipeline];[encoder setBuffer:argumentBuffer offset:0 atIndex:0];
+        [encoder useResource:uniform usage:MTLResourceUsageRead];[encoder useResource:output usage:MTLResourceUsageWrite];
+        [encoder useResource:support usage:MTLResourceUsageRead];[encoder useResource:texture usage:MTLResourceUsageRead];
+        [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];[encoder endEncoding];[command commit];[command waitUntilCompleted];
+        if(command.status!=MTLCommandBufferStatusCompleted) { fprintf(stderr,"%s\n",command.error.description.UTF8String);return 1; }
+        if(td_check(variant,mode,index,output.contents,expected))return 1;
+    } }
+    fprintf(stderr,"Metal texture dimensions volume%u base%u: %u cases passed\n",variant,mode,td_count(variant));return 0;
+} }
