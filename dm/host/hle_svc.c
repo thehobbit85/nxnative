@@ -227,7 +227,11 @@ static void mem_init_once(void) {
     g_stack = g_heap + g_heap_cap; g_stack_cap = DM_GAME_MEM_STACK;
     g_alias = g_stack + g_stack_cap; g_alias_cap = alias;
 #ifdef __ANDROID__
-    if (dm_android_watch_heap_reserved) dm_android_watch_heap_reserved(g_heap, g_heap_cap);
+    if (dm_android_watch_region) {
+        dm_android_watch_region(DM_WATCH_HEAP, g_heap, g_heap_cap);
+        dm_android_watch_region(DM_WATCH_ALIAS, g_alias, g_alias_cap);
+        dm_android_watch_region(DM_WATCH_STACK, g_stack, g_stack_cap);
+    }
 #endif
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
@@ -278,6 +282,32 @@ static uint8_t g_seen[256];
 static struct { uint64_t base, size, src; uint32_t state; } g_map[MAX_MAP];
 static int g_nmap;
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static int guest_open(void *address, size_t size) {
+#ifdef __ANDROID__
+    if (dm_android_watch_open) return dm_android_watch_open(address, size);
+#endif
+    return mprotect(address, size, PROT_READ | PROT_WRITE);
+}
+// These callers immediately copy with CPU instructions into the guest view;
+// kernel reads into guest memory keep using dm_guest_write_prepare directly.
+static void guest_prepare_copy(void *address, size_t size) {
+#ifdef __ANDROID__
+    if (dm_android_watch_cpu_prepare) { dm_android_watch_cpu_prepare(address, size); return; }
+#endif
+    dm_guest_write_prepare(address, size);
+}
+static void guest_copy(void *dst, const void *src, size_t size) {
+#ifdef __ANDROID__
+    if (dm_android_watch_copy) { dm_android_watch_copy(dst, src, size); return; }
+#endif
+    memcpy(dst, src, size);
+}
+static void guest_zero_write(void *dst, size_t size) {
+#ifdef __ANDROID__
+    if (dm_android_watch_zero) { dm_android_watch_zero(dst, size); return; }
+#endif
+    memset(dst, 0, size);
+}
 // A hole-free read / write of guest heap bytes for the cheat VM (hle_cheats.c): under g_map_lock no concurrent SetHeapSize
 // can mprotect the span away between the bounds check and the copy (both hold this same lock), so a live heap address cannot
 // turn into a fault while the cheat VM touches it. Both return 0 when every byte was inside the currently opened (readable
@@ -285,7 +315,7 @@ static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len) {
     pthread_mutex_lock(&g_map_lock);
     int out = !dm_guest_heap_readable(addr, len);
-    if (!out) { dm_guest_write_prepare((void *)(uintptr_t)addr, len); memcpy((void *)(uintptr_t)addr, src, len); }
+    if (!out) { guest_prepare_copy((void *)(uintptr_t)addr, len); guest_copy((void *)(uintptr_t)addr, src, len); }
     pthread_mutex_unlock(&g_map_lock);
     return out;
 }
@@ -380,12 +410,12 @@ static void guest_zero(uint8_t *a, uint64_t n) {
     for (uint8_t *e = a + n; a < e; a += 4096) {
         uint64_t w[8], any = 0;
         for (size_t i = 0; !any && i < 4096; i += sizeof w) { memcpy(w, a + i, sizeof w); any = w[0] | w[1] | w[2] | w[3] | w[4] | w[5] | w[6] | w[7]; }
-        if (any) memset(a, 0, 4096);
+        if (any) guest_zero_write(a, 4096);
     }
 }
 static void alias_zero(uint64_t p, uint64_t q) {
     if (g_gf_n) guest_zero(g_alias + (p << 12), (q - p) << 12);
-    else memset(g_alias + (p << 12), 0, (q - p) << 12);
+    else guest_zero_write(g_alias + (p << 12), (q - p) << 12);
 }
 // Initialize holes using the OLD commit bitmap. Fresh anonymous host pages stay
 // lazy; after any exposure, even an untouched 4 KiB sibling may hold stale bytes.
@@ -707,13 +737,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
         }
         int rc = 0;
-        if (size > g_heap_cur) {
-#ifdef __ANDROID__
-            if (dm_android_watch_open) rc = dm_android_watch_open(g_heap + g_heap_cur, size - g_heap_cur);
-            else
-#endif
-            rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
-        }
+        if (size > g_heap_cur) rc = guest_open(g_heap + g_heap_cur, size - g_heap_cur);
         else if (size < g_heap_cur) (void)guest_release((uintptr_t)g_heap + size, (uintptr_t)g_heap + g_heap_cur);
         if (rc) die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, errno);
         // With the guest in files a heap given back kept its old bytes (guest_release): one that grows back over them reads 0 there, as the fresh mapping reads without the files
@@ -743,9 +767,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // Apple pages are 16K, Horizon pages 4K: the accessible region is extended to a 16K boundary (the extra pages opened are unused pages of the same region, semantics unaffected)
         uint64_t mask = (size_t)getpagesize() - 1;
         uint64_t lo = dst & ~mask, hi = (dst + size + mask) & ~mask;
-        if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE)) die("MapMemory mprotect errno=%d", errno);
-        dm_guest_write_prepare((void *)lo, hi - lo);
-        memcpy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
+        if (guest_open((void *)lo, hi - lo)) die("MapMemory mprotect errno=%d", errno);
+        guest_prepare_copy((void *)lo, hi - lo);
+        guest_copy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
         map_add(dst, size, src, 0x0B /*MappedMemory*/);
         pthread_mutex_unlock(&g_map_lock);
         if (g_flag.svc) LOG("MapMemory %#" PRIx64 " <- %#" PRIx64 " +%#" PRIx64, dst, src, size);
@@ -759,8 +783,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int k = map_find(dst, size);
         if (!k || g_map[k - 1].base != dst || g_map[k - 1].size != size || g_map[k - 1].src != src) {
             pthread_mutex_unlock(&g_map_lock); LOG("UnmapMemory does not match a mapping %#" PRIx64 "+%#" PRIx64, dst, size); regs[0] = 0xD401; return 0; }
-        dm_guest_write_prepare((void *)src, size);
-        memcpy((void *)src, (void *)dst, size);
+        guest_prepare_copy((void *)src, size);
+        guest_copy((void *)src, (void *)dst, size);
         map_del(k - 1);
         pthread_mutex_unlock(&g_map_lock);
         regs[0] = 0; return 0;
@@ -877,9 +901,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         }
         if (changed && mhi > mlo) {
             if (commit) {
-                if (mprotect((void *)mlo, mhi - mlo, PROT_READ | PROT_WRITE))
+                if (guest_open((void *)mlo, mhi - mlo))
                     die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
-                dm_guest_write_prepare((void *)mlo, mhi - mlo);
+                guest_prepare_copy((void *)mlo, mhi - mlo);
             } else if (guest_release(mlo, mhi)) {   // fresh zero pages: alias_initialize has nothing to clear when they are mapped again
                 for (uint64_t h = (mlo - (uintptr_t)g_alias) / pg, last = (mhi - 1 - (uintptr_t)g_alias) / pg; h <= last; ++h)
                     g_alias_exposed[h >> 6] &= ~(UINT64_C(1) << (h & 63));

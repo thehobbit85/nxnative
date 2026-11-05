@@ -5,8 +5,10 @@
 #include "../watch_android.c"
 
 static int (*loader_fault)(void *, int, void *);
+static void (*loader_prepare)(void *, size_t);
 void dm_fault_hook_register(int (*fn)(void *, int, void *)) { loader_fault = fn; }
-void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { (void)fn; }
+void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { loader_prepare = fn; }
+void dm_guest_write_prepare(void *p, size_t n) { if (loader_prepare) loader_prepare(p, n); }
 uint32_t thr_cur_handle(void) { return 0x1001; }
 static void fault(int sig, siginfo_t *info, void *uc) {
     if (loader_fault && loader_fault(info->si_addr, (uc_esr(uc) >> 6) & 1, uc)) return;
@@ -30,14 +32,20 @@ int main(int argc, char **argv) {
     allocate_modules(1, NULL); g_nmod = 1; module_t *m = g_mod;
     *m = (module_t){.name="main", .text_end=0x4000, .ro_off=0x4000, .data_off=0x4000,
         .key_page_off=far ? 0xc000 : 0x8000, .key_page_size=0x4000, .patch_off=far ? -0x4000 : 0xc000,
-        .image_size=0x10000, .file_image_len=0x5000, .nro=1, .pristine_len=0x1000};
+        .image_size=0x10000, .file_image_len=0x5000, .nro=1, .pristine_len=0x2000};
     for (unsigned i = 0; i < 4; i++) m->key_idx[i] = i;
     uintptr_t at = (uintptr_t)g_jit_base + pre + 0x4080;
+    int bss = !strcmp(argv[1], "bss");
+    if (bss) at += 0x2000;
     if (!strcmp(argv[1], "code")) at -= 0x4000;
     if (!strcmp(argv[1], "key")) at = (uintptr_t)g_jit_base + pre + m->key_page_off;
     if (!strcmp(argv[1], "patch")) at = (uintptr_t)g_jit_base + pre + m->patch_off;
     if (!strcmp(argv[1], "back")) { m->back_off = 0x8000; m->back_len = 0x4000; at = (uintptr_t)g_jit_base + pre + m->back_off; }
-    char config[64]; snprintf(config, sizeof config, "%llx+8", (unsigned long long)at);
+    char config[64];
+    if (!strcmp(argv[1], "relative")) snprintf(config, sizeof config, "main:4080+8");
+    else if (!strcmp(argv[1], "missing")) snprintf(config, sizeof config, "absent:80+8");
+    else if (!strcmp(argv[1], "overflow")) snprintf(config, sizeof config, "main:fffffffffffffff0+8");
+    else snprintf(config, sizeof config, "%llx+8", (unsigned long long)at);
     assert(!setenv("DM_PROBE_WATCH", config, 1));
     char dir[512], path[640]; snprintf(dir, sizeof dir, "%s/watch-loader-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/data/local/tmp");
     assert(mkdtemp(dir)); snprintf(path, sizeof path, "%s/main.patched.bin", dir);
@@ -55,7 +63,7 @@ int main(int argc, char **argv) {
     dm_android_watch_install(); protection(at, "r--");
     m->dyn = (const Elf64_Dyn *)(m->base + 0x4000); // an empty, real mapped DT_NULL table
     for (unsigned i = 0; i < 32; i++) {
-        nro_load(m); assert(*(uint64_t *)at == initial && *(uint64_t *)(m->base + 0x6000) == 0);
+        nro_load(m); assert(*(uint64_t *)at == (bss ? 0 : initial) && *(uint64_t *)(m->base + 0x6000) == 0);
         uint64_t v = i + 1; __asm__ volatile("str %1, [%0]" :: "r"(at), "r"(v) : "memory");
         *(uint64_t *)(m->base + 0x6000) = 0xbeef;
         assert(*(uint64_t *)at == v); protection(at, "r--"); nro_unload(m);
