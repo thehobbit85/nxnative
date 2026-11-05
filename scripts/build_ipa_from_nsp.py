@@ -2536,6 +2536,14 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
     """Reuse only an exact, complete Vulkan export; publish replacements atomically."""
     PROG.stage('Android Vulkan shaders')
     keys = sorted(shader_keys(g))
+    products = set(keys)
+    for line in g.table('shader_map.tsv').read_text(errors='replace').splitlines():
+        columns = line.split('\t')
+        if len(columns) > 4 and columns[0].endswith('.bin') and columns[2] == 'geometry' and columns[3] in products:
+            products.update(columns[3] + f'.g{topology}' for topology in range(5))
+    expected = {k + suffix for k in products for suffix in ('.spv', '.vk.txt')}
+    def inventory(directory):
+        return {p.name for p in directory.iterdir() if p.is_file() and (p.suffix == '.spv' or p.name.endswith('.vk.txt'))}
     exporter = repo / 'dm/android/tools/spv_android.py'
     contract_tool = repo / 'dm/android/tools/target_contract.py'
     def identity():
@@ -2546,8 +2554,7 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
     out = sh / 'vk'; manifest = out / 'manifest.json'
     try:
         saved = json.loads(manifest.read_text())
-        expected = {k + suffix for k in keys for suffix in ('.spv', '.vk.txt')}
-        if saved['provenance'] == hashlib.sha256((out / 'export-contract.json').read_bytes()).hexdigest() and saved['inputs'] == key and set(saved['files']) == expected and all(
+        if saved['provenance'] == hashlib.sha256((out / 'export-contract.json').read_bytes()).hexdigest() and saved['inputs'] == key and set(saved['files']) == expected == inventory(out) and all(
                 hashlib.sha256((out / name).read_bytes()).hexdigest() == digest for name, digest in saved['files'].items()):
             PROG.end(f'{len(keys)} shader stages, reused (inputs and products unchanged)')
             return out
@@ -2557,8 +2564,9 @@ def android_shaders(py, repo, sh, env, logs, g, pkg_key):
     wanted = sh / 'android-keys.txt'; wanted.write_text('\n'.join(keys) + '\n')
     tmp = sh / 'vk.partial'; rmtree(tmp)
     run([py, exporter, sh / 'pkg', tmp, '--keys-file', wanted], logs / 'android_shaders.log', env=env)
-    files = {k + suffix: hashlib.sha256((tmp / (k + suffix)).read_bytes()).hexdigest()
-             for k in keys for suffix in ('.spv', '.vk.txt')}
+    if inventory(tmp) != expected:
+        raise BuildError('Android shader product inventory differs from the selected programs; previous products preserved')
+    files = {name: hashlib.sha256((tmp / name).read_bytes()).hexdigest() for name in sorted(expected)}
     if identity() != key:
         raise BuildError('Android shader inputs changed during export; previous products preserved')
     (tmp / 'manifest.json').write_text(json.dumps({'inputs': key, 'files': files, 'provenance': hashlib.sha256((tmp / 'export-contract.json').read_bytes()).hexdigest()}, indent=2) + '\n')

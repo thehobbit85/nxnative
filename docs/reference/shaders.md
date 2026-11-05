@@ -2180,6 +2180,20 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Fix:** preserve validated SPIR-V and the actual stage (`gs`, `hs`, `ds`) in its sidecar, and report the runtime limitation explicitly. Executing those stages remains open; successful export does not establish that a game using them will render correctly.
 - **Found on:** [Hollow Knight 1.5.12620](../../dm/games/0100633007D48000/README.md), whose 1,812-stage package contains one geometry shader.
 
+### Portable Vulkan geometry passthrough
+
+- **Symptom:** a translated passthrough geometry stage requires `SPV_NV_geometry_shader_passthrough`, emits no ordinary vertices, and loses high-numbered forwarded attributes when translated without a linked next stage.
+- **Cause:** the offline accessor advertised NVIDIA passthrough support for every native stage and always selected triangle input. The translator therefore left forwarding to the extension and had no next-stage attribute map.
+- **Fix:** `host_target=vulkan` disables that capability and marks geometry input fixed, reusing the translator's explicit position/attribute forwarding. `input_topology` selects one of the five native input topologies independently of the existing `geometry_topology` compute conversion. Export includes `<key>.g0` through `<key>.g4` SPIR-V/sidecar pairs alongside the base stage. Prepared capture, subset export, provenance and builder reuse cover the complete family and reject mislabeled or missing variants. Native sidecars do not inherit Metal's compute threadgroup size. Apple native and compute routes retain their previous behavior. Executing geometry on Android remains open, including the compute fallback for devices without native geometry support.
+- **Found on:** the Android shader parity audit's synthetic Maxwell geometry programs, covering points, lines, adjacency lines, triangles and adjacency triangles, including location 31. All five emitted modules pass Vulkan 1.1 SPIR-V validation.
+
+### Vulkan export retains feedback control layouts
+
+- **Symptom:** a shader's interleaved feedback outputs or repeated capture into multiple buffers disappear from Android shader assets.
+- **Cause:** the exporter kept raw SPIR-V and Metal binding reflection, while the full layout existed only in the shared translation job. Metal's feedback reflection retained strides but not each buffer's ordered attribute/component list.
+- **Fix:** capture retains the shared `tf_layout` decoder's four-buffer layout, carries it through prepared inputs and emits `tf <buffer> <stride> <location> <components> ...` sidecar records. Offsets are the running sum of the preceding component counts times four. The Python writer and bounded C reader reject malformed counts, locations, strides, duplicate buffer declarations and invalid stages. Repeated attributes within or across buffers remain valid. The schema producer includes this reader and exporter, so assets and native hosts must be rebuilt together. This preserves the control interface; Vulkan feedback execution and capture shader generation remain open.
+- **Found on:** synthetic Android export tests using interleaved outputs and one attribute captured into two independent buffers; portable export and the actual C consumer are covered.
+
 ### Vulkan export removes unused descriptor declarations
 
 - **Symptom:** Android export stops with `no guest resource for descriptor 1 ('fp_t_tcb_3A')`.

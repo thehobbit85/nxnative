@@ -148,17 +148,21 @@ static class SwshXlate
         public int QueryComputeLocalSizeZ() => Local(2);
         public int QueryComputeSharedMemorySize() => _job["shared"] is JsonNode n ? (int)n : 0;   // the shared memory size in the compute shader's control section (shader_split.py)
         static AttributeType Attr(string s) => s switch { "sint" => AttributeType.Sint, "uint" => AttributeType.Uint, _ => AttributeType.Float };
-        public bool QueryGeometryInputFixed() => _job["geometry_topology"] != null;
-        // Compute lowering must emit passthrough vertices explicitly: Metal
-        // cannot supply the native NV geometry-passthrough stage afterwards.
-        public bool QueryHostSupportsGeometryShaderPassthrough() => _job["geometry_topology"] == null;
+        public bool QueryGeometryInputFixed() => _job["geometry_topology"] != null ||
+            ((string)_job["host_target"] == "vulkan" && (string)_job["stage"] == "gs");
+        // Both compute lowering and portable Vulkan emit passthrough vertices
+        // explicitly. Offline export has no linked next stage, so retain the
+        // complete input attribute map through QueryGeometryInputFixed.
+        public bool QueryHostSupportsGeometryShaderPassthrough() => _job["geometry_topology"] == null && (string)_job["host_target"] != "vulkan";
         public GpuGraphicsState QueryGraphicsState()
         {
             Array32<AttributeType> attr = default; Array8<AttributeType> fout = default;
             if (_job["attr"] is JsonObject a) foreach (var kv in a) attr[int.Parse(kv.Key)] = Attr((string)kv.Value);
             if (_job["fout"] is JsonObject f) foreach (var kv in f) fout[int.Parse(kv.Key)] = Attr((string)kv.Value);
             bool earlyZ = _job["early_fragment_tests"] is JsonNode ez && (bool)ez;   // control +0x718 (dmsh_build.py job_for): [[early_fragment_tests]] in the MSL
-            return new GpuGraphicsState(earlyZ, _job["geometry_topology"] is JsonNode gt ? (InputTopology)(int)gt : InputTopology.Triangles, false, TessPatchType.Triangles, TessSpacing.EqualSpacing,
+            JsonNode topology = _job["geometry_topology"] ?? _job["input_topology"];
+            if (topology != null && ((int)topology < 0 || (int)topology > 4)) throw new ArgumentException("invalid geometry input topology");
+            return new GpuGraphicsState(earlyZ, topology != null ? (InputTopology)(int)topology : InputTopology.Triangles, false, TessPatchType.Triangles, TessSpacing.EqualSpacing,
                 false, false, false, false /* depth not rewritten: dmsh_build.py adds the GL entry point (see the file header) */, false, 1f, AlphaTestOp.Always, 0f, attr, false, fout, false,
                 false /* no Y flip */, true /* origin upper-left */, false);
         }

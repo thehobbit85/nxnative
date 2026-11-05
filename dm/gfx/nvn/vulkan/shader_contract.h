@@ -6,6 +6,44 @@
 #include <stddef.h>
 #include <string.h>
 
+// Four NVN capture buffers, each an ordered list of generic attribute slices.
+// Duplicate locations (including duplicates in different buffers) are valid.
+typedef struct {
+    uint16_t stride[4];
+    uint8_t count[4], location[4][128], components[4][128];
+} dm_vk_feedback;
+
+static const char *dm_vk_feedback_line(const char *line, size_t n, dm_vk_feedback *layout) {
+    uint32_t fields[258]; unsigned count = 0;
+    if (n < 3 || memcmp(line, "tf ", 3)) return "invalid feedback record";
+    for (size_t at = 3; at < n;) {
+        if (count == 258 || line[at] < '0' || line[at] > '9') return "invalid feedback field";
+        uint32_t value = 0;
+        do {
+            if (value > (UINT32_MAX - (uint32_t)(line[at] - '0')) / 10) return "invalid feedback field";
+            value = value * 10 + (uint32_t)(line[at++] - '0');
+        } while (at < n && line[at] >= '0' && line[at] <= '9');
+        fields[count++] = value;
+        if (at < n && (line[at++] != ' ' || at == n)) return "invalid feedback separator";
+    }
+    if (count < 4 || count % 2 || fields[0] >= 4) return "invalid feedback layout";
+    unsigned buffer = fields[0], outputs = (count - 2) / 2, stride = 0;
+    if (layout->count[buffer]) return "duplicate feedback buffer";
+    for (unsigned i = 0; i < outputs; i++) {
+        uint32_t loc = fields[2 + i * 2], components = fields[3 + i * 2];
+        if (loc >= 32 || !components || components > 4) return "invalid feedback output";
+        stride += components * 4;
+    }
+    if (fields[1] != stride) return "feedback stride differs from outputs";
+    layout->stride[buffer] = (uint16_t)stride;
+    layout->count[buffer] = (uint8_t)outputs;
+    for (unsigned i = 0; i < outputs; i++) {
+        layout->location[buffer][i] = (uint8_t)fields[2 + i * 2];
+        layout->components[buffer][i] = (uint8_t)fields[3 + i * 2];
+    }
+    return NULL;
+}
+
 static int dm_vk_line_is(const char *line, size_t length, const char *value) {
     return strlen(value) == length && !memcmp(line, value, length);
 }
@@ -43,6 +81,7 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
     }
     if (entries != 1 || functions) return "incomplete SPIR-V module";
     int schema = 0, target = 0, stage = 0;
+    dm_vk_feedback feedback = {0};
     for (size_t at = 0; at < length;) {
         const char *line = text + at, *end = memchr(line, '\n', length - at);
         size_t n = end ? (size_t)(end - line) : length - at;
@@ -68,6 +107,10 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
             unsigned i = 0;
             while (i < ne && (extension_lengths[i] != n - 4 || memcmp(extensions[i], line + 4, n - 4))) i++;
             if (i == ne || ext_seen[i]++) return "incompatible or duplicate shader extension";
+        } else if (n >= 3 && !memcmp(line, "tf ", 3)) {
+            if (model != 0 && model != 3) return "invalid feedback stage";
+            const char *error = dm_vk_feedback_line(line, n, &feedback);
+            if (error) return error;
         } else if (!((n >= 3 && !memcmp(line, "tg ", 3)) || (n >= 3 && !memcmp(line, "c1 ", 3)) ||
                      (n >= 4 && !memcmp(line, "vin ", 4)) || (n >= 2 && !memcmp(line, "b ", 2)))) {
             return "unknown shader sidecar record";
