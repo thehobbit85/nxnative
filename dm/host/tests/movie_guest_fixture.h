@@ -19,6 +19,9 @@ void *guest_sym(const char *name) {
     static uint64_t vt[4]; assert(!strcmp(name, "_ZTVN5movie7DecoderE")); return vt;
 }
 void dm_host_lock(pthread_mutex_t *m) { assert(!pthread_mutex_lock(m)); }
+#ifdef __APPLE__
+void dm_host_helper_qos(qos_class_t q) { (void)q; }
+#endif
 static void *deferred(void *arg) { md_defer_body(arg); return NULL; }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int priority, size_t stack_size) {
     assert(fn == md_defer_body && !arg && priority == 16 && stack_size == (64 << 10));
