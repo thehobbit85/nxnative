@@ -1160,6 +1160,47 @@ static void origin_facing(void) {
     puts("Vulkan queue/device origins preserve facing and every cull mode (128 cases)");
 }
 
+static void texture_copy_regions(void) {
+    for (int mode = 0; mode < 6; mode++) {
+        int volume = mode == 0, convert = mode >= 2;
+        int flags = (mode == 2 || mode == 4 ? NVN_COPY_FLAGS_MIRROR_X_BIT : 0) |
+                    (mode == 3 || mode == 4 ? NVN_COPY_FLAGS_MIRROR_Y_BIT : 0);
+        tex_t src = {.serial=0x8150+2*mode, .d={.width=8,.height=8,.depth=8,.levels=2,
+                     .target=volume ? NVN_TEXTURE_TARGET_3D : NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA8}};
+        tex_t dst = src; dst.serial++; if (convert) dst.d.format=NVN_FORMAT_RG8;
+        nvn_tex_layout(&src.d,&src.L); nvn_tex_layout(&dst.d,&dst.L);
+        int slices = volume ? 4 : 8, channels = convert ? 2 : 4;
+        uint8_t source[8][4][4][4], result[sizeof source];
+        for (int z=0;z<slices;z++) for (int y=0;y<4;y++) for (int x=0;x<4;x++)
+            for (int ch=0;ch<4;ch++) source[z][y][x][ch]=1+25*z+4*y+x+ch;
+        view_t mip = {.set_levels=1,.base_level=1,.nlevels=1};
+        view_t sv = mip, dv = mip;
+        if (!volume) { sv.set_layers=dv.set_layers=1; sv.min_layer=2; dv.min_layer=1; sv.nlayers=dv.nlayers=4; }
+        list_t list={0};
+        NVNcopyRegion whole={.width=4,.height=4,.depth=slices};
+        RECORD(OP_COPY_B2T,p_copy_b2t,.src=(uintptr_t)source,.tex=&src,.view=mip,.has_view=1,.r=whole);
+        RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&dst,.view=mip,.has_view=1,.r=whole,.mask=15,.c.f={1,1,1,1});
+        RECORD(OP_COPY_T2T,p_copy_t2t,.src=&src,.dst=&dst,.has_sv=1,.sv=sv,.has_dv=1,.dv=dv,.flags=flags,
+               .sr={.xoffset=1,.zoffset=1,.width=2,.height=2,.depth=2},
+               .dr={.xoffset=1,.yoffset=1,.zoffset=1,.width=2,.height=2,.depth=2});
+        RECORD(OP_COPY_T2B,p_copy_b2t,.src=(uintptr_t)result,.tex=&dst,.view=mip,.has_view=1,.r=whole);
+        put(&list,OP_END,NULL,0); mtl_queue_activate(0x8150);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (int z=0;z<slices;z++) for (int y=0;y<4;y++) for (int x=0;x<4;x++) for (int ch=0;ch<channels;ch++) {
+            int dz=z-(volume ? 1 : 2), want=255;
+            if (dz>=0 && dz<2 && x>=1 && x<3 && y>=1 && y<3) {
+                int sx=(flags & NVN_COPY_FLAGS_MIRROR_X_BIT) ? 3-x : x;
+                int sy=(flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) ? 2-y : y-1;
+                want=source[(volume ? 1 : 3)+dz][sy][sx][ch];
+            }
+            int got=result[((z*4+y)*4+x)*channels+ch];
+            if (got!=want) die("texture copy mode %d slice %d at %d,%d channel %d: %d, expected %d",mode,z,x,y,ch,got,want);
+        }
+        mtl_tex_release(&src); mtl_tex_release(&dst); mtl_queue_forget(0x8150);
+    }
+    puts("Vulkan texture copies preserve 3D slices and array layers, convert RGBA to RG and mirror both axes");
+}
+
 static void depth_copies(void) {
     const NVNformat formats[] = {NVN_FORMAT_DEPTH32F, NVN_FORMAT_DEPTH16, NVN_FORMAT_DEPTH24_STENCIL8, NVN_FORMAT_DEPTH32F_STENCIL8};
     for (unsigned k=0;k<sizeof formats/sizeof *formats;k++) for (int scale=0;scale<2;scale++) {
@@ -1814,6 +1855,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
@@ -1850,7 +1892,7 @@ int main(void) {
     buffer_range_lifetime();
     ordered_buffers();
     draw_parameters();
-    depth_copies();
+    texture_copy_regions(); depth_copies();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);
