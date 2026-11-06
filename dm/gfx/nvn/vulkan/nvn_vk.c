@@ -830,6 +830,7 @@ struct vtex {
     int dirty;   // the CPU wrote its storage since the last upload (WriteTexels, a movie frame, a flushed pool range): uploaded again at its next use, unless the GPU renders into it
     const uint8_t *mem; uint64_t len;   // its storage in guest memory
     uint64_t stamp; const void *span;   // uploaded from a dirty-tracked pool (nvn_dirty.c): the write generation then and the tracked range, re-uploaded when the game writes it
+    int sparse; uint64_t sparse_submission, uploaded_mappings, seen_mappings, seen_writes;
     vview *views; int nviews;
     struct vtex *next;
     uint64_t dead;   // released by the game: freed once the GPU has finished the submission that was being recorded then (fence dead)
@@ -880,6 +881,7 @@ static int storage_compatible(const VkImageCreateInfo *ii) {
            ii->arrayLayers <= limits.maxArrayLayers && (limits.sampleCounts & ii->samples);
 }
 #include "public_texels.inc"
+#include "sparse_upload.inc"
 
 // Caller holds g_rmu through initial upload: pool finalization uses the same
 // lock before guest storage can disappear. A registry lookup must stay locked
@@ -888,7 +890,7 @@ static vtex *tex_get_locked(const tex_t *t, int for_rt) {
     vtex *v = tex_find(t->serial);
     if (v) {
         if (for_rt) v->gpu = 1;
-        else if (!v->gpu && t->mem && (v->dirty || (v->span && nvn_dirty_since_span(v->span, t->mem, t->L.size, v->stamp)))) { v->dirty = 0; tex_upload(v, t); }   // never over what the GPU drew: a flush of the pool range around a render target is not new content
+        else if (!v->gpu && t->mem && (v->dirty || sparse_changed(v,t) || (v->span && nvn_dirty_since_span(v->span, t->mem, t->L.size, v->stamp)))) { v->dirty = 0; tex_upload(v, t); }   // never over what the GPU drew: a flush of the pool range around a render target is not new content
         return v;
     }
     fmt_t f = fmt_of(t->d.format);
@@ -934,7 +936,12 @@ static vtex *tex_get_locked(const tex_t *t, int for_rt) {
     to_general(C->up, v->img, v->aspect); C->up_used = 1;
     v->gpu = for_rt;
     v->next = g_tex[v->serial % NHASH]; g_tex[v->serial % NHASH] = v;
-    int packaged = (t->has_layout || cpu_written(t->serial) || init_fill(t, &f)) && t->mem && !for_rt;
+    v->sparse=t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && nvn_sparse_pool(t->pool);
+    // Match Metal's tex_from_storage: ordinary sampled textures in a sparse
+    // virtual pool also have CPU data without an explicit packaged layout.
+    int sparse_sampled=v->sparse && !(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET |
+                                                    NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE));
+    int packaged = (t->has_layout || cpu_written(t->serial) || sparse_sampled || init_fill(t, &f)) && t->mem && !for_rt;
     if (packaged) tex_upload(v, t);
     else if (!for_rt) {   // contents come from the GPU (copies, render passes): start cleared, as a new texture's storage would read on hardware after a clear
         VkClearColorValue z = {{0}}; VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
@@ -954,6 +961,12 @@ static void tex_upload(vtex *v, const tex_t *t) {
     if (g_plog) LOG("plog:  upload %llu fmt %#x %ux%ux%u levels %u layers %u target %d", (unsigned long long)t->serial, t->d.format, v->w, v->h, v->d, v->levels, v->layers, t->d.target);
     int bw = 1, bh = 1, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { RED_ONCE(4, "texture format %#x: block size unknown, not uploaded", t->d.format); return; }
+    if (v->sparse) {
+        v->sparse_submission=g_fence+1;
+        v->uploaded_mappings=v->seen_mappings=nvn_sparse_gen();
+        v->stamp=v->seen_writes=nvn_dirty_now();
+        nvn_sparse_protect(t->pool,(uintptr_t)t->mem,t->L.size);
+    }
     for (unsigned lv = 0; lv < v->levels; lv++) {
         uint32_t w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1, d = v->d >> lv ? v->d >> lv : 1;
         if (t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY) h = 1;
@@ -972,6 +985,7 @@ static void tex_upload(vtex *v, const tex_t *t) {
             int rc;
             if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))
                 rc = !storage_texels(t, lv, tmp, pitch, pitch * by, ext, 0);
+            else if (v->sparse) rc = sparse_deswizzle(t,lv,ly,tmp,pitch);
             else rc = nvn_deswizzle(&t->d, lv, ly, t->mem, tmp, pitch);
             if (rc) { RED_ONCE(5, "texture format %#x target %d: deswizzle failed", t->d.format, t->d.target); if (tmp != dst) free(tmp); continue; }
             if (v->f.dec) for (uint32_t z = 0; z < d; z++)
@@ -996,7 +1010,7 @@ static void tex_upload(vtex *v, const tex_t *t) {
     C->up_used = 1; v->uploaded = 1;
     // As nvn_mtl.m does for packaged textures: the storage is write-protected after the upload, and a game write to it (streamed texture data arriving after the texture was
     // made, as Super Mario Odyssey's normal maps do; noise until then) brings a new upload at the texture's next use (tex_get)
-    if (t->mem && !v->gpu && nvn_dirty_tracked(t->mem, t->L.size)) { nvn_dirty_protect(t->mem, t->L.size); v->stamp = nvn_dirty_now(); v->span = nvn_dirty_span(t->mem, t->L.size); }
+    if (t->mem && !v->sparse && !v->gpu && nvn_dirty_tracked(t->mem, t->L.size)) { nvn_dirty_protect(t->mem, t->L.size); v->stamp = nvn_dirty_now(); v->span = nvn_dirty_span(t->mem, t->L.size); }
 }
 static void tex_free(vtex *v) {   // released by the game: draws already recorded (and the one being recorded) may still use it
     pthread_mutex_lock(&g_gbmu);
