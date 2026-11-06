@@ -359,6 +359,7 @@ static void *completion_thread(void *a) {
 
 // ---------- Device ----------
 static int g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
+static int g_logic_op;
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -471,6 +472,8 @@ static void vk_init_(void) {
     g_depth_clamp = f2.features.depthClamp && !getenv("DM_VK_NO_DEPTH_CLAMP");
     if (getenv("DM_VK_NO_DEPTH_BIAS_CLAMP")) f2.features.depthBiasClamp = VK_FALSE;
     g_depth_bias_clamp = f2.features.depthBiasClamp;
+    if (getenv("DM_VK_NO_LOGIC_OP")) f2.features.logicOp = VK_FALSE;
+    g_logic_op = f2.features.logicOp;
     f13.robustImageAccess = VK_FALSE;
     const char *ext[7]; uint32_t next = 0;
     g_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
@@ -709,6 +712,20 @@ static fmt_t fmt_of(int nvn) {
         case 0x98: r.f = VK_FORMAT_A1R5G5B5_UNORM_PACK16; break;
     }
     return r;
+}
+enum clear_type { CLEAR_FLOAT, CLEAR_UINT, CLEAR_SINT };
+static enum clear_type clear_color_type(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_R8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R32_UINT:
+        case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R32G32_UINT:
+        case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R32G32B32A32_UINT:
+        case VK_FORMAT_A2B10G10R10_UINT_PACK32: return CLEAR_UINT;
+        case VK_FORMAT_R8_SINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R32_SINT:
+        case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R32G32_SINT:
+        case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32G32B32A32_SINT:
+            return CLEAR_SINT;
+        default: return CLEAR_FLOAT;
+    }
 }
 // Vertex attribute formats (NVN format → Vulkan, *_UI2F / *_I2F → SCALED), 0 = none
 // Maxwell fetches by the NVN format, then shaders read the resulting register bits.
@@ -1813,7 +1830,7 @@ static void set_rt(const p_set_rt *r) {
 typedef struct {
     shader_t *vs, *fs; int prim;
     va_st attr[32]; int nattr; vs_st stream[16]; int nstream, split_instances;
-    blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples;
+    blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples, logic;
     VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll, rasterizer_discard, depth_clamp;
 } pso_key;
 typedef struct { pso_key k; uint64_t h; VkPipeline p; } pso_ent;
@@ -1927,7 +1944,8 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
         const blend_st *b = &k->blend[i]; int en = k->color.blend_en >> i & 1;
         ba[i] = (VkPipelineColorBlendAttachmentState){en, bfac(b->src_rgb), bfac(b->dst_rgb), bop(b->eq_rgb), bfac(b->src_a), bfac(b->dst_a), bop(b->eq_a), (k->chmask.mask >> (4 * i)) & 15};
     }
-    VkPipelineColorBlendStateCreateInfo cb = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, NULL, 0, VK_FALSE, VK_LOGIC_OP_COPY, (uint32_t)k->nc, ba, {0}};
+    VkPipelineColorBlendStateCreateInfo cb = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, NULL, 0,
+        k->logic, k->logic ? (VkLogicOp)k->color.logic_op : VK_LOGIC_OP_COPY, (uint32_t)k->nc, ba, {0}};
     VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
                             VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE};
     VkPipelineDynamicStateCreateInfo dy = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0, sizeof dyn / sizeof *dyn, dyn};
@@ -2532,8 +2550,34 @@ static VkRect2D render_scissor(void) {
 }
 
 #include "primitive_replay.h"
-enum clear_type { CLEAR_FLOAT, CLEAR_UINT, CLEAR_SINT };
-static enum clear_type clear_color_type(VkFormat format);
+// Like Metal's unorm_chan_masks, operate on the stored, unsigned bits. Vulkan
+// encodes the sixteen truth tables in the same order as NVN.
+static int logic_format(VkFormat f) {
+    if (clear_color_type(f)==CLEAR_UINT) return 1;
+    switch (f) {
+        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16G16_UNORM:
+        case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+        case VK_FORMAT_R5G6B5_UNORM_PACK16: case VK_FORMAT_B5G6R5_UNORM_PACK16:
+        case VK_FORMAT_B5G5R5A1_UNORM_PACK16: case VK_FORMAT_A1R5G5B5_UNORM_PACK16: return 1;
+        default: return 0;
+    }
+}
+static void color_operations(pso_key *k) {
+    int eligible=0, other=0;
+    for (int i=0; i<k->nc; ++i) {
+        if (clear_color_type(k->cf[i])!=CLEAR_FLOAT) k->color.blend_en &= ~(1u<<i);
+        if (!k->cf[i] || !(k->chmask.mask>>(4*i)&15)) continue;
+        if (logic_format(k->cf[i])) eligible=1; else other=1;
+    }
+    if (!k->fs || !eligible || k->color.logic_op==NVN_LOGIC_OP_COPY) return;
+    if (other || k->color.alpha_func) {
+        RED_ONCE(115,"logic operation on mixed formats or with alpha testing uses COPY"); return;
+    }
+    k->color.blend_en=0; // NVN logic replaces every blend equation.
+    k->logic=g_logic_op;
+    if (!k->logic) RED_ONCE(115,"device lacks logicOp; drawing color with COPY");
+}
 
 static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_index) {
     g_nwb = 0;
@@ -2577,6 +2621,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     // Integer color 0 bypasses the test; a depth-only pass may still discard.
     k.color.alpha_func = fs && S.color.alpha_func && S.color.alpha_func!=NVN_ALPHA_FUNC_ALWAYS &&
         clear_color_type(P.cf[0])==CLEAR_FLOAT && alpha_module(fs);
+    color_operations(&k);
     if (P.dt) { k.df = P.dt->f.f; k.stencil = P.dt->f.stencil; k.ds = S.ds; }
     if (g_plog) LOG("plog:  draw vs %s fs %s n %u depth t%d w%d f%d stencil %d f%d ops %d/%d/%d ref %u vm %#x wm %#x blend %#x mask %#x cull %d", vs->key, fs ? fs->key : "-", dw ? dw->count : di->count,
                     S.ds.dt, S.ds.dw, S.ds.df, S.ds.st, S.ds.sf_f, S.ds.fail_f, S.ds.zfail_f, S.ds.zpass_f, S.st_ref[0], S.st_vmask[0], S.st_wmask[0], S.color.blend_en, S.chmask.mask, S.poly.cull);
@@ -2864,19 +2909,6 @@ static void clear_draw_state(VkPipeline pipeline, VkRect2D rect, VkExtent2D size
     vkCmdSetScissor(cb, 0, 1, &rect);
     vkCmdSetDepthBias(cb, 0, 0, 0);
     vkCmdSetBlendConstants(cb, (const float[4]){0});
-}
-static enum clear_type clear_color_type(VkFormat format) {
-    switch (format) {
-        case VK_FORMAT_R8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R32_UINT:
-        case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R32G32_UINT:
-        case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R32G32B32A32_UINT:
-        case VK_FORMAT_A2B10G10R10_UINT_PACK32: return CLEAR_UINT;
-        case VK_FORMAT_R8_SINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R32_SINT:
-        case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R32G32_SINT:
-        case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32G32B32A32_SINT:
-            return CLEAR_SINT;
-        default: return CLEAR_FLOAT;
-    }
 }
 // NVN records numeric clear values as floats. Convert them according to the
 // attachment view, saturating an integer conversion as in the Metal renderer.
