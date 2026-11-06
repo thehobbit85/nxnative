@@ -94,8 +94,57 @@ class ComputeWarp(unittest.TestCase):
     def test_subgroup_mask_and_shuffle_keep_a_consistent_width(self):
         for mask in ('SubgroupEqMask', 'SubgroupGeMask', 'SubgroupGtMask', 'SubgroupLeMask', 'SubgroupLtMask'):
             with self.subTest(mask=mask):
-                raw = self.module(mask=mask)
+                source = assembly(mask=mask).replace('%value =', '%whole = OpLoad %vec %mask\n%value =')
+                portable = spv_warp.lower(self.assemble(source))
+                subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=portable, check=True)
+                _, code = decode(portable)
+                self.assertIn(80, [opcode(i) for i in code])  # vec4(low mask,0,0,0)
+                self.assertNotIn(345, [opcode(i) for i in code])
+                self.assertFalse(any(opcode(i) == 71 and i[2] == 11 and i[3] in range(4416,4421) for i in code))
+
+    def test_dynamic_component_or_escaped_mask_preserves_the_native_shader(self):
+        base = assembly(mask='SubgroupLtMask')
+        for address in ('%addr = OpAccessChain %input %mask %id', '%copy = OpCopyObject %mptr %mask'):
+            with self.subTest(address=address):
+                raw = self.assemble(base.replace('%value =', address + '\n%value ='))
                 self.assertEqual(spv_warp.lower(raw), raw)
+
+    def test_signed_whole_mask_and_component_loads_validate(self):
+        source = assembly(mask='SubgroupLtMask').replace('%vec = OpTypeVector %uint 4', '%s = OpTypeInt 32 1\n%vec = OpTypeVector %s 4\n%sp = OpTypePointer Input %s')
+        source = source.replace('%value =', '%v = OpLoad %vec %mask\n%a = OpAccessChain %sp %mask %one\n%h = OpLoad %s %a\n%value =')
+        result = spv_warp.lower(self.assemble(source))
+        subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=result, check=True)
+        self.assertNotIn(345, [opcode(i) for i in decode(result)[1]])
+
+    def test_group_decorations_and_duplicate_builtin_variables(self):
+        source = assembly(mask='SubgroupLtMask')
+        additions = ('%g = OpDecorationGroup\nOpDecorate %g RelaxedPrecision\nOpGroupDecorate %g %mask\n',
+                     'OpDecorate %other BuiltIn SubgroupLtMask\n')
+        for addition in additions:
+            text = source.replace('%void = OpTypeVoid', addition + '%void = OpTypeVoid')
+            if '%other' in addition:
+                text = text.replace('%main = OpFunction', '%other = OpVariable %mptr Input\n%main = OpFunction')
+            raw = self.assemble(text)
+            self.assertEqual(spv_warp.lower(raw), raw)
+
+        with_semantic = source.replace('OpMemoryModel', 'OpExtension "SPV_GOOGLE_decorate_string"\nOpExtension "SPV_GOOGLE_hlsl_functionality1"\nOpMemoryModel')
+        raw = self.assemble(with_semantic.replace('%void =', 'OpDecorateString %mask UserSemantic "SV_Custom"\n%void ='))
+        self.assertEqual(spv_warp.lower(raw), raw)
+
+    def test_mask_read_alone_needs_no_scratch_or_barrier(self):
+        source = assembly(shared=True, branch=True, mask='SubgroupEqMask')
+        source = source.replace('%value = OpGroupNonUniformShuffle %uint %scope %id %one', '%value = OpLoad %vec %mask')
+        raw = self.assemble(source)
+        result = spv_warp.lower(raw)
+        self.assertNotEqual(result, raw)
+        subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=result, check=True)
+        self.assertNotIn(224, [opcode(i) for i in decode(result)[1]])
+
+    def test_physical_subgroup_barrier_in_either_scope_keeps_native_path(self):
+        source = assembly().replace('%input =', '%wg = OpConstant %uint 2\n%sem = OpConstant %uint 72\n%input =')
+        for barrier in ('OpControlBarrier %wg %scope %sem', 'OpControlBarrier %scope %scope %sem', 'OpMemoryBarrier %scope %sem'):
+            raw = self.assemble(source.replace('%value =', barrier + '\n%value ='))
+            self.assertEqual(spv_warp.lower(raw), raw)
 
 
 if __name__ == '__main__':
