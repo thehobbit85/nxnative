@@ -587,7 +587,8 @@ static void vk_init_(void) {
         g_selectable_subgroup_stages = g_subgroup_sizes.requiredSubgroupSizeStages;
         if (dv < VK_API_VERSION_1_3) ext[next++] = VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
     }
-    if (has_sc && g_has_surface) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    g_has_surface = g_has_surface && has_sc;
+    if (g_has_surface) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     if (has_u8 && u8.indexTypeUint8 && !getenv("DM_VK_NO_INDEX_UINT8")) { ext[next++] = VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME; g_has_u8 = 1; }
     g_dynrend = dv >= VK_API_VERSION_1_3 ? f13.dynamicRendering : has_dr && dr.dynamicRendering;
     if (getenv("DM_VK_NO_DYNREND")) g_dynrend = 0;   // diagnostics: the render pass path of GPUs without dynamic rendering, on one that has it
@@ -4265,10 +4266,14 @@ void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, 
 #ifdef __ANDROID__
 __attribute__((weak)) void *front_native_window(int *gen);   // app/front_android.c; absent in the headless front end
 __attribute__((weak)) void front_window_lock(int on) { (void)on; }
-static struct { VkSurfaceKHR surf; VkSwapchainKHR sc; VkImage img[8]; VkImageView view[8]; uint32_t n; VkFormat fmt; VkExtent2D ext; int gen; VkPipeline pipeline; } W;
+typedef struct { VkImage image; VkImageView view; VkSemaphore ready; } window_image;
+static struct {
+    VkSurfaceKHR surf; VkSwapchainKHR sc; window_image *images; uint32_t n;
+    VkFormat fmt; VkExtent2D ext; int gen; VkPipeline pipeline;
+} W;
 #define NPRES 3
 typedef struct {
-    VkCommandPool pool; VkCommandBuffer cb; VkFence fence; VkSemaphore acq, done;
+    VkCommandPool pool; VkCommandBuffer cb; VkFence fence; VkSemaphore acq;
     VkFramebuffer fb; VkDescriptorSet set; vtex *source;
 } present_slot;
 static present_slot g_pres[NPRES]; static int g_pi;
@@ -4278,7 +4283,11 @@ static void win_drop(void) {
         pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu);
         for (int i = 0; i < NPRES; i++) window_slot_retire(&g_pres[i]);
         vkDestroyPipeline(g_dev, W.pipeline, NULL); W.pipeline = VK_NULL_HANDLE;
-        for (uint32_t i = 0; i < W.n; i++) vkDestroyImageView(g_dev, W.view[i], NULL);
+        for (uint32_t i = 0; i < W.n; i++) {
+            vkDestroyImageView(g_dev, W.images[i].view, NULL);
+            vkDestroySemaphore(g_dev, W.images[i].ready, NULL);
+        }
+        free(W.images); W.images = NULL; W.n = 0;
         vkDestroySwapchainKHR(g_dev, W.sc, NULL); W.sc = VK_NULL_HANDLE;
     }
     if (W.surf) { vkDestroySurfaceKHR(g_inst, W.surf, NULL); W.surf = VK_NULL_HANDLE; }
@@ -4286,12 +4295,34 @@ static void win_drop(void) {
 static int win_make(ANativeWindow *aw) {
     VkAndroidSurfaceCreateInfoKHR si = {VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, NULL, 0, aw};
     if (vkCreateAndroidSurfaceKHR(g_inst, &si, NULL, &W.surf) != VK_SUCCESS) { RED_ONCE(90, "no Vulkan surface for the window"); return 0; }
-    VkBool32 ok = 0; vkGetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qf, W.surf, &ok); if (!ok) { RED_ONCE(91, "the queue cannot present to the window"); return 0; }
-    VkSurfaceCapabilitiesKHR cap; vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, W.surf, &cap);
-    uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, W.surf, &nf, NULL); VkSurfaceFormatKHR sf[32]; if (nf > 32) nf = 32; vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, W.surf, &nf, sf);
-    VkSurfaceFormatKHR pick = sf[0]; for (uint32_t i = 0; i < nf; i++) if (sf[i].format == VK_FORMAT_R8G8B8A8_UNORM || sf[i].format == VK_FORMAT_B8G8R8A8_UNORM) { pick = sf[i]; break; }
-    uint32_t npm = 0; vkGetPhysicalDeviceSurfacePresentModesKHR(g_pd, W.surf, &npm, NULL); VkPresentModeKHR pm[8]; if (npm > 8) npm = 8; vkGetPhysicalDeviceSurfacePresentModesKHR(g_pd, W.surf, &npm, pm);
-    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR; for (uint32_t i = 0; i < npm; i++) if (pm[i] == VK_PRESENT_MODE_MAILBOX_KHR) mode = pm[i];   // the host paces presents itself; mailbox never blocks it
+    VkBool32 ok = 0;
+    if (vkGetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qf, W.surf, &ok) != VK_SUCCESS || !ok) {
+        RED_ONCE(91, "the queue cannot present to the window"); return 0;
+    }
+    VkSurfaceCapabilitiesKHR cap;
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, W.surf, &cap) != VK_SUCCESS ||
+        !(cap.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || !cap.supportedCompositeAlpha) return 0;
+    uint32_t nf = 0;
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, W.surf, &nf, NULL) != VK_SUCCESS || !nf) return 0;
+    VkSurfaceFormatKHR *formats = calloc(nf, sizeof *formats);
+    if (!formats) return 0;
+    VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(g_pd, W.surf, &nf, formats);
+    if (result != VK_SUCCESS || !nf) { free(formats); return 0; }
+    VkSurfaceFormatKHR pick = formats[0];
+    for (uint32_t i = 0; i < nf; i++) {
+        if (formats[i].format == VK_FORMAT_R8G8B8A8_UNORM || formats[i].format == VK_FORMAT_B8G8R8A8_UNORM) { pick = formats[i]; break; }
+    }
+    free(formats);
+    if (pick.format == VK_FORMAT_UNDEFINED) pick.format = VK_FORMAT_R8G8B8A8_UNORM;
+    uint32_t npm = 0;
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR(g_pd, W.surf, &npm, NULL) != VK_SUCCESS || !npm) return 0;
+    VkPresentModeKHR *modes = calloc(npm, sizeof *modes);
+    if (!modes) return 0;
+    result = vkGetPhysicalDeviceSurfacePresentModesKHR(g_pd, W.surf, &npm, modes);
+    if (result != VK_SUCCESS || !npm) { free(modes); return 0; }
+    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
+    for (uint32_t i = 0; i < npm; i++) if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) mode = modes[i];
+    free(modes);
     // The swapchain is made the window's way up and Android's compositor turns it (a phone whose screen is portrait by nature, playing in landscape, reports its
     // current extent and transform rotated); the window's own size is that way up
     VkSurfaceTransformFlagBitsKHR pre = cap.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : cap.currentTransform;
@@ -4300,18 +4331,37 @@ static int win_make(ANativeWindow *aw) {
     if (W.ext.width < cap.minImageExtent.width) W.ext.width = cap.minImageExtent.width; if (W.ext.width > cap.maxImageExtent.width) W.ext.width = cap.maxImageExtent.width;
     if (W.ext.height < cap.minImageExtent.height) W.ext.height = cap.minImageExtent.height; if (W.ext.height > cap.maxImageExtent.height) W.ext.height = cap.maxImageExtent.height;
     uint32_t nimg = cap.minImageCount + 1; if (cap.maxImageCount && nimg > cap.maxImageCount) nimg = cap.maxImageCount;
-    VkCompositeAlphaFlagBitsKHR ca = cap.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    VkCompositeAlphaFlagBitsKHR ca = cap.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR :
+                                      cap.supportedCompositeAlpha & -cap.supportedCompositeAlpha;
     VkSwapchainCreateInfoKHR ci = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, NULL, 0, W.surf, nimg, pick.format, pick.colorSpace, W.ext, 1,
-                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, pre, ca, mode, VK_TRUE, VK_NULL_HANDLE};
+                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, pre, ca, mode, VK_TRUE, VK_NULL_HANDLE};
     if (vkCreateSwapchainKHR(g_dev, &ci, NULL, &W.sc) != VK_SUCCESS) { RED_ONCE(92, "no swapchain for the window"); return 0; }
-    W.fmt = pick.format; W.n = 8; vkGetSwapchainImagesKHR(g_dev, W.sc, &W.n, W.img);
-    for (uint32_t i = 0; i < W.n; i++) { VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, W.img[i], VK_IMAGE_VIEW_TYPE_2D, W.fmt, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-                                         VKCHECK(vkCreateImageView(g_dev, &vi, NULL, &W.view[i])); }
+    W.fmt = pick.format;
+    uint32_t count = 0;
+    if (vkGetSwapchainImagesKHR(g_dev, W.sc, &count, NULL) != VK_SUCCESS || !count) return 0;
+    VkImage *handles = calloc(count, sizeof *handles);
+    if (!handles) return 0;
+    result = vkGetSwapchainImagesKHR(g_dev, W.sc, &count, handles);
+    if (result != VK_SUCCESS || !count) { free(handles); return 0; }
+    W.images = calloc(count, sizeof *W.images);
+    if (!W.images) { free(handles); return 0; }
+    W.n = count;
+    for (uint32_t i = 0; i < count; i++) W.images[i].image = handles[i];
+    free(handles);
+    for (uint32_t i = 0; i < count; i++) {
+        VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, W.images[i].image, VK_IMAGE_VIEW_TYPE_2D,
+                                    W.fmt, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkSemaphoreCreateInfo sem = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        // A graphics fence can signal before the presentation engine consumes
+        // its semaphore. Acquiring this same image again orders that reuse.
+        if (vkCreateImageView(g_dev, &vi, NULL, &W.images[i].view) != VK_SUCCESS ||
+            vkCreateSemaphore(g_dev, &sem, NULL, &W.images[i].ready) != VK_SUCCESS) return 0;
+    }
     if (!g_pres[0].pool) for (int i = 0; i < NPRES; i++) {
         VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, g_qf}; VKCHECK(vkCreateCommandPool(g_dev, &pi, NULL, &g_pres[i].pool));
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, g_pres[i].pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1}; VKCHECK(vkAllocateCommandBuffers(g_dev, &ai, &g_pres[i].cb));
         VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, NULL, VK_FENCE_CREATE_SIGNALED_BIT}; VKCHECK(vkCreateFence(g_dev, &fi, NULL, &g_pres[i].fence));
-        VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VKCHECK(vkCreateSemaphore(g_dev, &sci, NULL, &g_pres[i].acq)); VKCHECK(vkCreateSemaphore(g_dev, &sci, NULL, &g_pres[i].done));
+        VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VKCHECK(vkCreateSemaphore(g_dev, &sci, NULL, &g_pres[i].acq));
     }
     LOG("vk: swapchain %ux%u, %u images, format %d, %s", W.ext.width, W.ext.height, W.n, W.fmt, mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo");
     return 1;
@@ -4370,7 +4420,10 @@ static int win_present(const tex_t *t, const int crop[4]) {
     int gen;
     front_window_lock(1);
     ANativeWindow *aw = front_native_window(&gen);
-    if (!aw || gen != W.gen) { win_drop(); W.gen = gen; if (aw && !win_make(aw)) W.gen = -1; }
+    if (!aw || !W.sc || gen != W.gen) {
+        win_drop(); W.gen = gen;
+        if (aw && !win_make(aw)) win_drop();  // Retire partial setup and retry on the next frame.
+    }
     if (!aw || !W.sc) { front_window_lock(0); return 0; }
     present_slot *P_ = &g_pres[g_pi]; g_pi = (g_pi + 1) % NPRES;
     { uint64_t w0 = now_ns(); vkWaitForFences(g_dev, 1, &P_->fence, VK_TRUE, UINT64_MAX); atomic_fetch_add(&g_pwait_ns, now_ns() - w0); }
@@ -4378,14 +4431,14 @@ static int win_present(const tex_t *t, const int crop[4]) {
     copy_draw_params region = {.linear = 2};  // Clamp the linear footprint to the VI crop.
     if (!window_pipeline() || !window_prepare(P_, t, crop, &region)) { front_window_lock(0); return 0; }
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, 1000000000ull, P_->acq, VK_NULL_HANDLE, &idx);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR || r == VK_SUBOPTIMAL_KHR) W.gen = -1;
+    if (r != VK_SUCCESS && r != VK_TIMEOUT && r != VK_NOT_READY) W.gen = -1;
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { window_slot_retire(P_); front_window_lock(0); return 0; }
     vkResetFences(g_dev, 1, &P_->fence);
     VkCommandBuffer cb = P_->cb; vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL}; vkBeginCommandBuffer(cb, &bi);
     barrier_all(cb);   // the game's submissions before this one wrote the image
-    img_barrier(cb, W.img[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    rp_desc pass = {.n = 1, .cv = {W.view[idx]}, .cf = {W.fmt}, .cl = {VK_ATTACHMENT_LOAD_OP_CLEAR},
+    img_barrier(cb, W.images[idx].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rp_desc pass = {.n = 1, .cv = {W.images[idx].view}, .cf = {W.fmt}, .cl = {VK_ATTACHMENT_LOAD_OP_CLEAR},
                     .cc[0].float32 = {0, 0, 0, 1}, .w = W.ext.width, .h = W.ext.height, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     P_->fb = rp_begin(cb, &pass);
     VkRect2D rect = {{region.dst[0], region.dst[1]}, {region.dst[2], region.dst[3]}};
@@ -4397,17 +4450,17 @@ static int win_present(const tex_t *t, const int crop[4]) {
     static dm_ovl ov[32]; int nov = front_overlay(ov, 32);
     if (show || nov) overlay_draw(cb, show, ov, nov);
     rp_end(cb);
-    img_barrier(cb, W.img[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    img_barrier(cb, W.images[idx].image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     vkEndCommandBuffer(cb);
     VkPipelineStageFlags ws[2] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
-    VkSemaphore wsem[2] = {P_->acq, g_tl}, ssem[2] = {P_->done, g_tl}; uint64_t wv[2] = {0, 0}, sv[2] = {0, 0};
+    VkSemaphore wsem[2] = {P_->acq, g_tl}, ssem[2] = {W.images[idx].ready, g_tl}; uint64_t wv[2] = {0, 0}, sv[2] = {0, 0};
     VkTimelineSemaphoreSubmitInfo ts = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, NULL, 2, wv, 2, sv};
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, g_tl ? &ts : NULL, g_tl ? 2 : 1, wsem, ws, 1, &cb, g_tl ? 2 : 1, ssem};
-    VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, NULL, 1, &P_->done, 1, &W.sc, &idx, NULL};
+    VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, NULL, 1, &W.images[idx].ready, 1, &W.sc, &idx, NULL};
     pthread_mutex_lock(&g_qmu);
     if (g_tl) { wv[1] = g_tlv; sv[1] = ++g_tlv; }
     VKCHECK(vkQueueSubmit(g_q, 1, &si, P_->fence)); r = vkQueuePresentKHR(g_q, &pi); pthread_mutex_unlock(&g_qmu);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR || r == VK_SUBOPTIMAL_KHR) W.gen = -1;
+    if (r != VK_SUCCESS) W.gen = -1;
     front_window_lock(0);
     return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
 }
@@ -4469,7 +4522,18 @@ double mtl_presented_time(uint64_t n) {
     // VI supplies the first-observed completion tick when WSI has no display timestamp.
     return n && atomic_load(&g_dropped_ticket[n % 64]) == n ? -1 : 0;
 }
-int mtl_has_window(void) { return 0; }
+int mtl_has_window(void) {
+#ifdef __ANDROID__
+    if (front_native_window) {
+        int generation;
+        front_window_lock(1);
+        int live = front_native_window(&generation) != NULL;
+        front_window_lock(0);
+        return live;
+    }
+#endif
+    return 0;
+}
 int mtl_display_hz(void) { return 0; }
 int mtl_fps_target(void) { static int f = -1; if (f < 0) { const char *e = getenv("DM_FPS"); f = e && atoi(e) == 30 ? 30 : 60; } return f; }
 int mtl_link_active(void) { return 0; }

@@ -1684,7 +1684,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Symptom:** LLVM reports an uninitialized window-generation value when the Android CLI presents without a NativeActivity window.
 - **Cause:** the weak windowless `front_native_window` implementation returned no window without assigning its generation output, which the Vulkan presenter retained.
 - **Fix:** the windowless implementation returns generation zero; the NativeActivity still supplies its actual window generation.
-- **Check:** LLVM's uninitialized-value analysis passes for the presenter; both Android binaries link, and the synthetic APK still presents and recreates its swapchain.
+- **Check:** LLVM's uninitialized-value analysis passes for the presenter; both Android binaries link, and the synthetic APK still presents and recreates its swapchain. The Android ImageReader test injects timeout, not-ready, suboptimal, out-of-date and surface-lost results. It checks the VI ticket, subsequent displayed pixels, swapchain recreation and picture shape after each result. A present semaphore belongs to its swapchain image so reacquisition orders its reuse. A submit fence alone can signal before the compositor has waited on that semaphore.
 - **Found on:** the synthetic Android integration in [Android parity](../android-parity.md#integration-milestone-checks).
 
 

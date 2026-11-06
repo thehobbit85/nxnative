@@ -16,6 +16,56 @@ void front_window_lock(int on) {
     pthread_mutex_unlock(&fixture_lock);
 }
 
+// Return WSI failures before ownership changes. For SUBOPTIMAL the real call
+// still hands the caller an image or queues it for display.
+static VkResult next_acquire=VK_SUCCESS, next_present=VK_SUCCESS, next_caps=VK_SUCCESS;
+static unsigned swapchains;
+static int incomplete_images;
+static VkSemaphore *image_ready;
+static uint32_t image_count;
+VkResult __real_vkGetSwapchainImagesKHR(VkDevice,VkSwapchainKHR,uint32_t *,VkImage *);
+VkResult __wrap_vkGetSwapchainImagesKHR(VkDevice dev,VkSwapchainKHR sc,uint32_t *count,VkImage *images) {
+    VkResult real=__real_vkGetSwapchainImagesKHR(dev,sc,count,images);
+    if (images && incomplete_images && real==VK_SUCCESS) { incomplete_images=0; return VK_INCOMPLETE; }
+    return real;
+}
+VkResult __real_vkAcquireNextImageKHR(VkDevice,VkSwapchainKHR,uint64_t,VkSemaphore,VkFence,uint32_t *);
+VkResult __wrap_vkAcquireNextImageKHR(VkDevice device,VkSwapchainKHR chain,uint64_t timeout,
+                                      VkSemaphore sem,VkFence fence,uint32_t *index) {
+    VkResult injected=next_acquire; next_acquire=VK_SUCCESS;
+    if (injected!=VK_SUCCESS && injected!=VK_SUBOPTIMAL_KHR) return injected;
+    VkResult real=__real_vkAcquireNextImageKHR(device,chain,timeout,sem,fence,index);
+    return real==VK_SUCCESS ? injected : real;
+}
+VkResult __real_vkQueuePresentKHR(VkQueue,const VkPresentInfoKHR *);
+VkResult __wrap_vkQueuePresentKHR(VkQueue q,const VkPresentInfoKHR *p) {
+    assert(p->swapchainCount==1 && p->waitSemaphoreCount==1 && p->pImageIndices[0]<image_count);
+    uint32_t index=p->pImageIndices[0];
+    for (uint32_t i=0;i<image_count;i++) if (i!=index) assert(image_ready[i]!=p->pWaitSemaphores[0]);
+    if (image_ready[index]) assert(image_ready[index]==p->pWaitSemaphores[0]);
+    image_ready[index]=p->pWaitSemaphores[0];
+    VkResult injected=next_present; next_present=VK_SUCCESS;
+    if (injected!=VK_SUCCESS && injected!=VK_SUBOPTIMAL_KHR) return injected;
+    VkResult real=__real_vkQueuePresentKHR(q,p);
+    return real==VK_SUCCESS ? injected : real;
+}
+VkResult __real_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice,VkSurfaceKHR,VkSurfaceCapabilitiesKHR *);
+VkResult __wrap_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice pd,VkSurfaceKHR s,VkSurfaceCapabilitiesKHR *out) {
+    VkResult injected=next_caps; next_caps=VK_SUCCESS;
+    if (injected!=VK_SUCCESS) return injected;
+    return __real_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd,s,out);
+}
+VkResult __real_vkCreateSwapchainKHR(VkDevice,const VkSwapchainCreateInfoKHR *,const VkAllocationCallbacks *,VkSwapchainKHR *);
+VkResult __wrap_vkCreateSwapchainKHR(VkDevice dev,const VkSwapchainCreateInfoKHR *ci,const VkAllocationCallbacks *a,VkSwapchainKHR *out) {
+    VkResult real=__real_vkCreateSwapchainKHR(dev,ci,a,out);
+    if (real==VK_SUCCESS) {
+        swapchains++;
+        assert(__real_vkGetSwapchainImagesKHR(dev,*out,&image_count,NULL)==VK_SUCCESS && image_count);
+        free(image_ready); image_ready=calloc(image_count,sizeof *image_ready); assert(image_ready);
+    }
+    return real;
+}
+
 static void surface_ticket(const tex_t *texture,uint64_t expected,int dropped,const int crop[4]) {
     assert(mtl_present(texture,0,crop)==expected);
     uint64_t queued,done;
@@ -29,7 +79,7 @@ static const uint8_t window_colors[4][4]={{251,13,37,255},{16,196,65,255},{41,77
 
 // Expected linear interpolation for a square VI layer and an 8x8 quadrant
 // image. Clamp to the requested rectangle before interpolating at its edges.
-static void surface_pixels(AImageReader *reader,int width,int height,const int crop[4],int flipped) {
+static void surface_pixels(AImageReader *reader,int width,int height,const int crop[4],int flipped,int wide_layer) {
     AImage *image=NULL;
     uint64_t start=now_ns();
     while (AImageReader_acquireNextImage(reader,&image)==AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE &&
@@ -41,15 +91,21 @@ static void surface_pixels(AImageReader *reader,int width,int height,const int c
     assert(AImage_getPlaneRowStride(image,0,&row)==AMEDIA_OK);
     assert(AImage_getPlanePixelStride(image,0,&pixel)==AMEDIA_OK && pixel>=4);
     assert(AImage_getPlaneData(image,0,&bytes,&length)==AMEDIA_OK && length>=(h-1)*row+(w-1)*pixel+4);
-    int side=height,x0=(width-side)/2;
+    int rw=width,rh=height;
+    const char *fit=getenv("DM_SCREEN_FIT");
+    if (!fit || strcmp(fit,"stretch")) {
+        int aspect=wide_layer ? 2 : 1;
+        if (width>height*aspect) rw=height*aspect; else rh=width/aspect;
+    }
+    int x0=(width-rw)/2,y0=(height-rh)/2;
     int cx=crop && crop[2] ? crop[0] : 0, cy=crop && crop[3] ? crop[1] : 0;
     int cw=crop && crop[2] ? crop[2] : 8, ch=crop && crop[3] ? crop[3] : 8;
     for (int y=0;y<h;y++) for (int x=0;x<w;x++) {
         const uint8_t *got=bytes+y*row+x*pixel;
-        if (x<x0 || x>=x0+side) {
+        if (x<x0 || x>=x0+rw || y<y0 || y>=y0+rh) {
             assert(!memcmp(got,(uint8_t[]){0,0,0,255},4)); continue;
         }
-        double u=(x-x0+.5)/side, v=(y+.5)/side;
+        double u=(x-x0+.5)/rw, v=(y-y0+.5)/rh;
         double sx=fmin(cx+cw-1,fmax(cx,cx+u*cw-.5));
         double sy=fmin(cy+ch-1,fmax(cy,cy+(flipped ? 1-v : v)*ch-.5));
         int ix=(int)sx,iy=(int)sy;
@@ -63,6 +119,24 @@ static void surface_pixels(AImageReader *reader,int width,int height,const int c
         }
     }
     AImage_delete(image);
+}
+
+static void surface_failures(AImageReader *reader,tex_t *texture,int width,int height,uint64_t *ticket) {
+    struct { VkResult acquire,present; int dropped,recreate; } cases[]={
+        {VK_TIMEOUT,VK_SUCCESS,1,0},{VK_NOT_READY,VK_SUCCESS,1,0},
+        {VK_SUBOPTIMAL_KHR,VK_SUCCESS,0,1},{VK_SUCCESS,VK_SUBOPTIMAL_KHR,0,1},
+        {VK_ERROR_OUT_OF_DATE_KHR,VK_SUCCESS,1,1},{VK_SUCCESS,VK_ERROR_OUT_OF_DATE_KHR,1,1},
+        {VK_ERROR_SURFACE_LOST_KHR,VK_SUCCESS,1,1},{VK_SUCCESS,VK_ERROR_SURFACE_LOST_KHR,1,1}
+    };
+    for (size_t i=0;i<sizeof cases/sizeof *cases;i++) {
+        unsigned before=swapchains;
+        next_acquire=cases[i].acquire; next_present=cases[i].present;
+        surface_ticket(texture,(*ticket)++,cases[i].dropped,NULL);
+        if (!cases[i].dropped) surface_pixels(reader,width,height,NULL,0,0);
+        surface_ticket(texture,(*ticket)++,0,NULL);
+        surface_pixels(reader,width,height,NULL,0,0);
+        assert(swapchains==before+cases[i].recreate);
+    }
 }
 
 static void surface_history(void) {
@@ -90,32 +164,54 @@ static void surface_history(void) {
     uint64_t queued,done; mtl_present_progress(&queued,&done); assert(queued==1 && done==0);
     hold_first=0; pthread_cond_broadcast(&fixture_ready); pthread_mutex_unlock(&fixture_lock);
     assert(!pthread_join(producer,NULL));
+    assert(!mtl_has_window());
     uint64_t ticket=2;
-    for (int pass=0;pass<2;pass++) {
-        int width=pass ? 40 : 32,height=pass ? 24 : 32;
+    const int sizes[][2]={{32,32},{40,24},{24,40}};
+    for (int pass=0;pass<3;pass++) {
+        int width=sizes[pass][0],height=sizes[pass][1];
         AImageReader *reader=NULL;
         assert(AImageReader_new(width,height,AIMAGE_FORMAT_RGBA_8888,4,&reader)==AMEDIA_OK);
         assert(AImageReader_getWindow(reader,&surface_window)==AMEDIA_OK && surface_window);
         surface_generation++;
+        assert(mtl_has_window());
+        if (pass) {
+            next_caps=VK_ERROR_SURFACE_LOST_KHR;
+            surface_ticket(textures,ticket++,1,NULL);
+            incomplete_images=1;
+            surface_ticket(textures,ticket++,1,NULL);
+            assert(!incomplete_images);
+        }
         const int crops[][4]={{7,5,0,0},{4,0,4,4},{0,4,4,4},{3,3,1,1},{1,1,4,4}};
         for (int flip=0;flip<2;flip++) {
             mtl_set_origin_lower_left(flip);
             for (size_t i=0;i<sizeof crops/sizeof *crops;i++) {
                 for (int f=0;f<3;f++) {
                     surface_ticket(&textures[f],ticket++,0,crops[i]);
-                    surface_pixels(reader,width,height,crops[i],flip);
+                    surface_pixels(reader,width,height,crops[i],flip,0);
                 }
             }
         }
+        mtl_set_origin_lower_left(0);
+        mtl_present_layer(2,1);
+        mtl_present_screen(16,9);  // Source and requested screen differ: use the VI layer.
+        surface_ticket(textures,ticket++,0,crops[1]);
+        surface_pixels(reader,width,height,crops[1],0,1);
+        mtl_present_screen(1,1);   // Matching source aspect takes precedence over the VI layer.
+        surface_ticket(textures,ticket++,0,crops[1]);
+        surface_pixels(reader,width,height,crops[1],0,0);
+        mtl_present_layer(1,1); mtl_present_screen(0,0);
+        surface_failures(reader,textures,width,height,&ticket);
         const uint64_t last_valid=ticket-1;
         const int bad[][4]={{0,0,0,1},{-1,0,2,2},{7,6,2,2},{1,1,INT32_MAX,INT32_MAX}};
         for (size_t i=0;i<sizeof bad/sizeof *bad;i++) surface_ticket(textures,ticket++,1,bad[i]);
         surface_window=NULL; surface_generation++;
+        assert(!mtl_has_window());
         surface_ticket(textures,ticket++,1,NULL);
         assert(mtl_presented_time(last_valid)==0);
         AImageReader_delete(reader);
     }
     for (int i=0;i<3;i++) mtl_tex_release(&textures[i]);
+    free(image_ready);
     alarm(0);
-    puts("VI tickets, RGBA/BGRA sRGB scanout and cropped pixels passed across resize and window loss");
+    puts("VI tickets, crop pixels, acquire/present failure recovery and real resized scanout passed");
 }
