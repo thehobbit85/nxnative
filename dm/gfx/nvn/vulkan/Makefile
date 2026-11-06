@@ -11,7 +11,7 @@ CFLAGS += -O1 -Wall -Werror -Wno-unused-function
 REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h ../../tests/recorded_sampler_reduction.h ../../tests/recorded_sparse_texture.h ../../tests/recorded_query_lifetime.h ../../tests/recorded_feedback_control.h
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sampler_pairs.inc ../nvn_border.h spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_storage_texels.inc spv_sampler_pairs.inc ../nvn_border.h spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
 $(B)/t_replay: ../../tests/dlss_spatial_corpus.h ../../tests/dlss_temporal_corpus.h ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/logic.inc tests/feedback_capture.inc
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
@@ -220,7 +220,11 @@ $(B)/shaders/000000000000ad72.spv: tests/typed_format.comp tests/typed_format.vk
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/typed_format.vk.txt $(@:.spv=.vk.txt)
-fixture: $(B)/shaders/000000000000ad72.spv $(B)/shaders/000000000000ad70.spv $(B)/shaders/000000000000ad71.spv
+$(B)/shaders/000000000000ad73.spv: tests/empty_texels.comp tests/empty_texels.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/empty_texels.vk.txt $(@:.spv=.vk.txt)
+fixture: $(B)/shaders/000000000000ad73.spv $(B)/shaders/000000000000ad72.spv $(B)/shaders/000000000000ad70.spv $(B)/shaders/000000000000ad71.spv
 $(B)/shaders/000000000000ad71.spv: $(B)/texel-dynamic.spv tests/texel_alias.vk.txt
 	mkdir -p $(B)/shaders
 	cp $< $@

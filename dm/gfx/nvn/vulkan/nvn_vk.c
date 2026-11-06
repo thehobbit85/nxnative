@@ -407,6 +407,7 @@ static int g_vertex_stores, g_has_u8, g_storage_ms, g_precise_visibility, g_dept
 static int g_logic_op, g_non_solid_fill;
 static uint32_t g_custom_border_limit, g_custom_border_count;
 static int g_border_from_image, g_border_without_format;
+enum { ZERO_BUFFER_BYTES=64<<10 };
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -676,7 +677,7 @@ static void dummies(void) {
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, g_dummy_img, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     VKCHECK(vkCreateImageView(g_dev, &vi, NULL, &g_dummy_view));
     void *zp, *sp;
-    g_zero_buf = buf_new(65536, ALL_BUF_USAGE, &g_zero_mem, &zp); memset(zp, 0, 65536);
+    g_zero_buf = buf_new(ZERO_BUFFER_BYTES, ALL_BUF_USAGE, &g_zero_mem, &zp); memset(zp, 0, ZERO_BUFFER_BYTES);
     // Ryujinx's support buffer: alpha test 0, is_bgra[8] at 16, viewport inverse 144, viewport size 160, render scale count 176, render scale float4[73] at 192 (all 1.0)
     g_support_buf = buf_new(4096, ALL_BUF_USAGE, &g_support_mem, &sp); memset(sp, 0, 4096);
     for (int i = 0; i < 73; i++) *(float *)((uint8_t *)sp + 192 + 16 * i) = 1.0f;
@@ -1324,8 +1325,9 @@ enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
 static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
 }
-typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only, table; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
+typedef struct { uint32_t binding, count, storage_image; uint8_t type, kind, skind, read_only, table, texel_atomic; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 #include "spv_sampler_pairs.inc"
+#include "spv_storage_texels.inc"
 typedef struct vin_module {
     vertex_classes classes;
     VkShaderModule module;
@@ -1779,6 +1781,7 @@ static shader_t *shader_by_key(const char *key) {
         s->pack_locations=1;
     }
     if (s->stage==1) s->outputs=spv_fragment_outputs(spv,ns/4);
+    reflect_storage_texels(spv,ns/4,s->b,s->nb);
     s->sampler_images=reflect_sampler_pairs(spv,ns/4,s->b,s->nb);
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
@@ -2467,7 +2470,22 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         }
     }
     pthread_mutex_unlock(&g_rmu);
-    if (!out->range.addr && b->type == BT_STB) ok = 0; // unbound writable images require a format-aware private dummy
+    if (!out->range.addr && b->type==BT_STB && ok) {
+        uint32_t code=b->storage_image ? b->storage_image-1 : UINT32_MAX;
+        if (!code) { // formatless shader: pick the declared numeric class
+            if (b->texel_atomic) code=b->num==1 ? 24 : 33;
+            else code=b->num==1 ? 21 : b->num==2 ? 30 : 1;
+        }
+        storage_texel_format f=spirv_texel_format(code);
+        VkFormatProperties props={0};
+        if (f.bytes) vkGetPhysicalDeviceFormatProperties(g_pd,f.format,&props);
+        VkFormatFeatureFlags need=VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+        if (b->texel_atomic) need|=VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
+        if ((props.bufferFeatures & need)!=need) ok=0;
+        out->format=f.format; out->bytes=f.bytes;
+        if (!(props.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT))
+            out->single_usage=VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
+    }
     if (!ok) RED_ONCE(21, "unsupported typed buffer range, format, view or storage binding");
     return ok;
 }
@@ -2646,7 +2664,7 @@ static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
     VkBufferView views[32];
     for (uint32_t element = 0; element < b->count; element++) {
         texel_range t; if (!texel_binding(b, stage, element, &t)) return 0;
-        VkBuffer buffer = g_zero_buf; VkDeviceSize offset = 0, size = 256; uint8_t *mapped = NULL;
+        VkBuffer buffer = g_zero_buf; VkDeviceSize offset = 0, size = ZERO_BUFFER_BYTES; uint8_t *mapped = NULL;
         VkDeviceSize prefix=0;
         if (t.range.addr) {
             const storage_range *group=prepared_storage(t.range.addr,t.range.size,&buffer,&offset,&mapped);
@@ -2662,6 +2680,15 @@ static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
                 if (offset==VK_WHOLE_SIZE) return 0;
                 buffer=C->ring;
             }
+        } else if (b->type==BT_STB) {
+            // The Metal atomic sink exposes 16 texels. Other missing storage
+            // images have one. Give every empty descriptor private zeroed
+            // scratch so a store cannot corrupt another slot or a later draw.
+            size=(b->texel_atomic ? 16u : 1u)*t.bytes;
+            offset=ring_alloc(size,texel_alignment(t.bytes));
+            if (offset==VK_WHOLE_SIZE) return 0;
+            buffer=C->ring;
+            memset(C->ringp+offset,0,size);
         } else t.format = b->num == 1 ? VK_FORMAT_R32G32B32A32_SINT : b->num == 2 ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT;
         VkBuffer view_buffer=t.single_usage ? single_usage_buffer(buffer,t.single_usage) : buffer;
         if (!view_buffer) { RED_ONCE(21,"cannot share Vulkan ring memory with a single-usage typed view"); return 0; }
