@@ -12,7 +12,7 @@ REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
-$(B)/t_replay: ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/logic.inc
+$(B)/t_replay: ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/logic.inc
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
 include clear_shaders.mk
@@ -80,7 +80,7 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/98076dcbe001b8d9.spv $(B)/shaders/0f505d6a0231e82b.spv $(B)/shaders/ea957dc56076e186.spv $(B)/shaders/000000000000005c.spv $(B)/shaders/000000000000005d.spv \
          $(B)/shaders/000000000000005e.spv $(B)/shaders/000000000000005f.spv $(B)/shaders/c7bfdf71f80f7dd4.spv $(B)/shaders/0000000000000060.spv \
          $(B)/shaders/0000000000000061.spv $(B)/shaders/0000000000000062.spv $(B)/shaders/0000000000000063.spv \
-         $(B)/shaders/0000000000000064.spv $(B)/shaders/0000000000000065.spv $(B)/shaders/0000000000000066.spv $(B)/shaders/0000000000000067.spv
+         $(B)/shaders/0000000000000064.spv $(B)/shaders/0000000000000065.spv $(B)/shaders/0000000000000066.spv $(B)/shaders/0000000000000067.spv $(B)/shaders/0000000000000068.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
 # Public recorder keys hash a 0x880-byte guest control section and one code byte per fixture stage.
 $(B)/shaders/be5c489b134ec370.spv: $(B)/shaders/0000000000000035.spv
@@ -162,6 +162,10 @@ $(B)/shaders/000000000000005c.spv: tests/depth_clamp.vert tests/origin.vert.vk.t
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/origin.vert.vk.txt $(@:.spv=.vk.txt)
 $(B)/shaders/0000000000000052.spv: tests/depth_range.vert
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	echo 'stage vs' > $(@:.spv=.vk.txt)
+$(B)/shaders/0000000000000068.spv: tests/polygon_fill.vert
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	echo 'stage vs' > $(@:.spv=.vk.txt)
