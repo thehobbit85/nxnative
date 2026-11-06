@@ -2474,6 +2474,20 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         int original_bw, original_bh, original_bytes = nvn_fmt_bpb(tr.t.d.format, &original_bw, &original_bh);
         int format = tr.has_v && tr.v.set_format ? tr.v.format : tr.t.d.format;
         fmt_t f = fmt_of(format);
+        int swap_rb=0;
+        if (b->type!=BT_STB) {
+            // These views read guest bytes directly. NVN's RGB family puts
+            // red in the low bits, and the BGR family puts blue there.
+            switch (format) {
+                case NVN_FORMAT_RGB565: f.f=VK_FORMAT_B5G6R5_UNORM_PACK16; break;
+                case NVN_FORMAT_BGR565: f.f=VK_FORMAT_R5G6B5_UNORM_PACK16; break;
+                case NVN_FORMAT_RGB5: case NVN_FORMAT_RGB5A1:
+                    swap_rb=1; f.f=VK_FORMAT_A1R5G5B5_UNORM_PACK16; break;
+                case NVN_FORMAT_BGR5: case NVN_FORMAT_BGR5A1:
+                    f.f=VK_FORMAT_A1R5G5B5_UNORM_PACK16; break;
+                case NVN_FORMAT_A1BGR5: f.f=VK_FORMAT_R5G5B5A1_UNORM_PACK16; break;
+            }
+        }
         uint32_t scaled=0;
         if (!f.f && b->type!=BT_STB && b->num==0) f.f=scaled_texel_format(format,&scaled);
         int bw, bh, bytes = nvn_fmt_bpb(format, &bw, &bh);
@@ -2499,6 +2513,9 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
                 uint8_t sw[4]={2,3,4,5};
                 sampled_swizzle(sw,f,&tr.t,&tr.v,tr.has_v);
                 for (unsigned c=0;c<4;c++) if (sw[c]>5) sw[c]=2+c;
+                if (swap_rb) for (unsigned c=0;c<4;c++) {
+                    if (sw[c]==2) sw[c]=4; else if (sw[c]==4) sw[c]=2;
+                }
                 uint32_t map=sw[0]|(sw[1]<<3)|(sw[2]<<6)|(sw[3]<<9);
                 if (map!=(2|3<<3|4<<6|5<<9)) out->swizzle=map+1;
             }

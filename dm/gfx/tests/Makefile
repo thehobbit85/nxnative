@@ -460,6 +460,9 @@ t_dlss_mfx: t_dlss_mfx.m recorded_list.h dlss_spatial_corpus.h dlss_temporal_cor
 check_t_dlss_mfx: t_dlss_mfx
 	DM_NVN_ENC_THREAD=0 ./t_dlss_mfx
 	DM_NVN_ENC_THREAD=1 ./t_dlss_mfx
+t_packed_texels: t_packed_texels.m packed_texel_corpus.h $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_packed_texels.m $(MTL_T_SRC) $(FW)
+check_t_packed_texels: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
