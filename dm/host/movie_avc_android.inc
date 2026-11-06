@@ -82,7 +82,8 @@ static int copy_picture(void *owner, AMediaFormat *f, const uint8_t *src, size_t
     if ((size_t)b * stride + r >= bytes || vbase + (uvh-1)*cs + (uvw-1)*step >= bytes) return 0;
     avc_frame *fr = malloc(sizeof *fr + (size_t)w*h + (size_t)uvw*2*uvh);
     if (!fr) return 0;
-    *fr = (avc_frame){.w=w,.h=h,.pts=pts,.standard=media_format_int(f,"color-standard",h >= 720 ? 1 : 4),.full=media_format_int(f,"color-range",2)==1};
+    int standard = media_format_int(f,"color-standard",0);
+    *fr = (avc_frame){.w=w,.h=h,.pts=pts,.standard=standard ? standard : (h >= 720 ? 1 : 4),.full=media_format_int(f,"color-range",2)==1};
     for (int y = 0; y < h; y++) memcpy(fr->nv12 + (size_t)y*w, src + (size_t)(t+y)*stride + l, w);
     uint8_t *uv = fr->nv12 + (size_t)w*h;
     for (int y = 0; y < uvh; y++) for (int x = 0; x < uvw; x++) {
@@ -142,7 +143,7 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts) {
             dst[0]=color8((yy+r*v+128)>>8); dst[1]=color8((yy-gu*u-gv*v+128)>>8); dst[2]=color8((yy+b*u+128)>>8); dst[3]=255;
         }
     } else {
-        memset(dst, 16, (size_t)w*h); memset(dst+(size_t)w*h,128,(size_t)w*h/2);
+        memset(dst, f->full ? 0 : 16, (size_t)w*h); memset(dst+(size_t)w*h,128,(size_t)w*h/2);
         for (int y=0; y<ch; y++) memcpy(dst+(size_t)y*w,f->nv12+(size_t)y*f->w,cw);
         for (int y=0; y<(ch+1)/2 && y<h/2; y++) memcpy(dst+(size_t)w*h+(size_t)y*w,uv+(size_t)y*cs,((cw+1)&~1) > w ? w : ((cw+1)&~1));
     }

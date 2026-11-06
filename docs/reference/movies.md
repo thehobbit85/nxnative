@@ -43,7 +43,7 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 
 - **Symptom:** a movie changes colour when the player reads an older output buffer, or full-range video appears washed out on the Android emulator.
 - **Cause:** the guest's buffer-format query read the latest decoder matrix and range for every output index. Separately, the Goldfish H.264 decoder returned limited-range samples labelled full range.
-- **Fix:** keep the matrix and range with each decoded guest slot for both buffer-format getters. For full-range streams on Goldfish, select the AOSP software decoder using the SPS range flag.
+- **Fix:** keep the matrix and range with each decoded guest slot for both buffer-format getters. For full-range streams on Goldfish, select the AOSP software decoder using the SPS range flag. Fill NV12 padding with black at the output range (Y=0 for full, Y=16 for limited). An unspecified matrix uses the same height-based default for RGB conversion and the guest's format query.
 - **Found on:** the ARM64 API 35 emulator. `t_android_movie_avc` holds two consecutive synthetic BT.601 limited and BT.709 full sequences, reads the buffers in reverse and checks their metadata and NV12 planes.
 
 ### SDK 4's `movie::Decoder` constructor without a priority
