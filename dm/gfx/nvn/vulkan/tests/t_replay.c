@@ -1201,6 +1201,60 @@ static void texture_copy_regions(void) {
     puts("Vulkan texture copies preserve 3D slices and array layers, convert RGBA to RG and mirror both axes");
 }
 
+static void stencil_faces(void) {
+    tex_t packed={.serial=0x8170,.d={.width=4,.height=2,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_DEPTH32F_STENCIL8}};
+    tex_t color=packed; color.serial++; color.d.format=NVN_FORMAT_R32F;
+    nvn_tex_layout(&packed.d,&packed.L); nvn_tex_layout(&color.d,&color.L);
+    float vertices[][2]={{-1,-1},{3,-1},{-1,3},{-1,-1},{-1,3},{3,-1}};
+    list_t list={0};
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&color},.depth=&packed);
+    RECORD(OP_CLEAR_DS,p_clear_ds,.stencil=0xa5,.stencil_mask=255);
+    RECORD(OP_SCISSOR,p_scissor,.x=1,.w=2,.h=2);
+    RECORD(OP_CLEAR_DS,p_clear_ds,.stencil=0x99,.stencil_mask=255);
+    p_bind_state polygon={.kind=4}, state={.kind=5};
+    poly_st poly={.front=NVN_FRONT_FACE_CCW};
+    memcpy(polygon.bytes,&poly,sizeof poly); put(&list,OP_BIND_STATE,&polygon,sizeof polygon);
+    ds_st ds={.st=1,.sf_f=NVN_COMPARE_FUNC_EQUAL,.sf_b=NVN_COMPARE_FUNC_EQUAL,.fail_f=NVN_STENCIL_OP_KEEP,
+              .fail_b=NVN_STENCIL_OP_KEEP,.zfail_f=NVN_STENCIL_OP_KEEP,.zfail_b=NVN_STENCIL_OP_KEEP,
+              .zpass_f=NVN_STENCIL_OP_REPLACE,.zpass_b=NVN_STENCIL_OP_REPLACE};
+    memcpy(state.bytes,&ds,sizeof ds); put(&list,OP_BIND_STATE,&state,sizeof state);
+    RECORD(OP_STENCIL,p_stencil,.face=NVN_FACE_FRONT,.which=0,.value_mask=0xa0);
+    RECORD(OP_STENCIL,p_stencil,.face=NVN_FACE_BACK,.which=0,.value_mask=0x05);
+    RECORD(OP_STENCIL,p_stencil,.face=NVN_FACE_FRONT,.which=1,.mask=0x0f);
+    RECORD(OP_STENCIL,p_stencil,.face=NVN_FACE_BACK,.which=1,.mask=0xf0);
+    RECORD(OP_STENCIL,p_stencil,.face=NVN_FACE_FRONT,.which=2,.ref=0xec);
+    RECORD(OP_STENCIL,p_stencil,.face=NVN_FACE_BACK,.which=2,.ref=0x37);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&origin_program,.stages=3);
+    va_st va={.fmt=NVN_FORMAT_RG32F}; p_bind_vattr attr={.n=1}; memcpy(attr.st,&va,sizeof va); put(&list,OP_BIND_VATTR,&attr,sizeof attr);
+    RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=1,.st={{.stride=8}});
+    RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sizeof vertices,.addr=(uintptr_t)vertices);
+    for (int face=0;face<2;face++) {
+        RECORD(OP_SCISSOR,p_scissor,.x=2*face,.w=2,.h=2);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.first=3*face,.count=3,.instances=1);
+    }
+    const int want[]={0xac,0x99,0x99,0x35};
+    float pixels[2][2][4];
+    RECORD(OP_STENCIL,p_stencil,.face=3,.which=0,.value_mask=255);
+    RECORD(OP_STENCIL,p_stencil,.face=3,.which=1,.mask=0);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_range_program,.stages=3);
+    for (int mismatch=0;mismatch<2;mismatch++) {
+        RECORD(OP_SCISSOR,p_scissor,.w=4,.h=2);
+        RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={0});
+        for (int x=0;x<4;x++) {
+            RECORD(OP_SCISSOR,p_scissor,.x=x,.w=1,.h=2);
+            RECORD(OP_STENCIL,p_stencil,.face=3,.which=2,.ref=want[x]^(mismatch ? 0x40 : 0));
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        }
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&color,.src=(uintptr_t)pixels[mismatch],.r={.width=4,.height=2,.depth=1});
+    }
+    put(&list,OP_END,NULL,0); mtl_set_origin_lower_left(0); mtl_queue_activate(0x8170); mtl_set_queue_origin_lower_left(0);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for (int y=0;y<2;y++) for (int x=0;x<4;x++)
+        if (pixels[0][y][x]!=.25f || pixels[1][y][x]!=0) die("stencil face/mask mismatch at %d,%d",x,y);
+    mtl_tex_release(&packed); mtl_tex_release(&color); mtl_queue_forget(0x8170);
+    puts("Vulkan front and back stencil comparisons, write masks and references preserve all four canaries");
+}
+
 static void downsample_view(void) {
     tex_t src = {.serial=0x8160,.d={.width=8,.height=8,.depth=2,.levels=2,.target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA8}};
     tex_t dst = src; dst.serial++; dst.d.width=dst.d.height=4; dst.d.format=NVN_FORMAT_RG8;
@@ -1935,6 +1989,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_STENCIL_FACES")) { stencil_faces(); return 0; }
     if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
@@ -1972,7 +2027,7 @@ int main(void) {
     buffer_range_lifetime();
     ordered_buffers();
     draw_parameters();
-    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies();
+    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies(); stencil_faces();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);
