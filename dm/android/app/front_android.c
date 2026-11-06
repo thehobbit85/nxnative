@@ -225,7 +225,7 @@ static void back_to_menu(void) {
 
 // ---------- Boot: environment from the menu's settings, log, then the host on its own thread ----------
 static char *g_argv[4];
-static void boot_env(const char *files, const char *ext, int handoff, int previous) {
+static void boot_env(const char *files, const char *ext, const char *assets, int handoff, int previous) {
     char p[1024];
     snprintf(p, sizeof p, "%s/log.txt", ext);
     char prev[1024]; snprintf(prev, sizeof prev, "%s/log.prev.txt", ext); rename(p, prev);
@@ -243,7 +243,7 @@ static void boot_env(const char *files, const char *ext, int handoff, int previo
     const int have[] = {0};
 #endif
     char root[1024];
-    g_program = dm_android_program_boot(files, ext, handoff, previous, have, sizeof have / sizeof *have, root, sizeof root);
+    g_program = dm_android_program_boot(files, assets, handoff, previous, have, sizeof have / sizeof *have, root, sizeof root);
     if (g_program < 0) die("preparing Android program resources");
     snprintf(p, sizeof p, "%s/save", files); mkdir(p, 0755); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", files); mkdir(p, 0755); setenv("DM_TEMP", p, 0);
@@ -317,10 +317,17 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     jstring hk = (*env)->NewStringUTF(env, "handoff"), pk = (*env)->NewStringUTF(env, "previous");
     int handoff = (*env)->CallBooleanMethod(env, intent, (*env)->GetMethodID(env, ic, "getBooleanExtra", "(Ljava/lang/String;Z)Z"), hk, JNI_FALSE);
     int previous = (*env)->CallIntMethod(env, intent, (*env)->GetMethodID(env, ic, "getIntExtra", "(Ljava/lang/String;I)I"), pk, -1);
+    jstring rk = (*env)->NewStringUTF(env, "gameRoot");
+    jstring selected = (*env)->CallObjectMethod(env, intent, (*env)->GetMethodID(env, ic, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;"), rk);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); die("reading Android program launch context"); }
     (*env)->DeleteLocalRef(env, hk); (*env)->DeleteLocalRef(env, pk); (*env)->DeleteLocalRef(env, ic);
     (*env)->DeleteLocalRef(env, intent); (*env)->DeleteLocalRef(env, cls);
-    boot_env(a->internalDataPath, a->externalDataPath, handoff, previous);
+    const char *diagnostics = a->externalDataPath ? a->externalDataPath : a->internalDataPath;
+    const char *assets = selected ? (*env)->GetStringUTFChars(env, selected, NULL) : diagnostics;
+    if (!assets) die("reading Android game data location");
+    boot_env(a->internalDataPath, diagnostics, assets, handoff, previous);
+    if (selected) { (*env)->ReleaseStringUTFChars(env, selected, assets); (*env)->DeleteLocalRef(env, selected); }
+    (*env)->DeleteLocalRef(env, rk);
     rumble_open(a);
     pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 16 << 20);
     pthread_t th; if (pthread_create(&th, &at, boot_thread, NULL)) die("front end: cannot start the host");

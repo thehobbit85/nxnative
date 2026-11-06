@@ -108,6 +108,7 @@ public final class GameActivity extends NativeActivity {
                 Bundle extras = new Bundle();
                 extras.putBinder("process", processLifetime);
                 extras.putInt("previous", previous); extras.putString("name", name);
+                extras.putString("gameRoot", getIntent().getStringExtra("gameRoot"));
                 startActivity(new Intent(this, ProgramActivity.class).putExtras(extras));
                 finish(); // Back must never expose/recreate this host with its old launch intent.
             } catch (RuntimeException e) { error.set(e); }

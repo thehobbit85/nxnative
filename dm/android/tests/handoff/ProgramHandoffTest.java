@@ -7,7 +7,7 @@ import android.content.Intent;
 public final class ProgramHandoffTest {
     private static void check(boolean c,String why){if(!c)throw new AssertionError(why);}
     private static GameActivity source(){
-        GameActivity s=new GameActivity(); s.programHandoff(1,"Program 2");
+        GameActivity s=new GameActivity(); s.intent.putExtra("gameRoot","/private/game-data"); s.programHandoff(1,"Program 2");
         check(s.finished && s.started.size()==1,"source must leave the back stack after delivery");
         check(s.started.get(0).target==ProgramActivity.class,"handoff goes to the coordinator"); return s;
     }
@@ -18,6 +18,7 @@ public final class ProgramHandoffTest {
     private static void target(ProgramActivity p){
         check(p.finished && p.started.size()==1,"one target launch then coordinator finishes");
         Intent i=p.started.get(0);check(i.target==GameActivity.class && i.getIntExtra("previous",-1)==1,"previous index survives transition");
+        check("/private/game-data".equals(i.getStringExtra("gameRoot")),"handoff retains the chosen storage");
         check(Boolean.TRUE.equals(i.getExtras().values.get("handoff")) && (i.flags&Intent.FLAG_ACTIVITY_CLEAR_TOP)!=0,"fresh handoff intent");
     }
     public static void main(String[] args){
