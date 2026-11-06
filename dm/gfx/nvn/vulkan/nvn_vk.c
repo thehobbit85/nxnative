@@ -22,7 +22,7 @@
 #include "spv_integer_outputs.h"
 #include "spv_draw_parameters.h"
 #include "spv_buffer_bias.h"
-#include "shader_contract.h"
+#include "feedback_gather.h"
 #include "uniform_address.h"
 #include "present_rect.h"
 #include "split_handle.h"
@@ -376,7 +376,7 @@ static void *completion_thread(void *a) {
 }
 
 // ---------- Device ----------
-static int g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
+static int g_vertex_stores, g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
 static int g_logic_op, g_non_solid_fill;
 static uint32_t g_custom_border_limit, g_custom_border_count;
 static int g_border_from_image, g_border_without_format;
@@ -496,6 +496,7 @@ static void vk_init_(void) {
     VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, chain};
     vkGetPhysicalDeviceFeatures2(g_pd, &f2);
     g_draw_parameters = dv >= VK_API_VERSION_1_2 ? f11.shaderDrawParameters : sdp.shaderDrawParameters;
+    g_vertex_stores = f2.features.vertexPipelineStoresAndAtomics;
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     g_precise_visibility = f2.features.occlusionQueryPrecise;
     g_depth_clamp = f2.features.depthClamp && !getenv("DM_VK_NO_DEPTH_CLAMP");
@@ -1274,7 +1275,7 @@ static VkSampler samp_get(int sid, border_view view) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
 static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
@@ -1298,7 +1299,10 @@ struct shader {
     sampler_pairs *sampler_images;
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
-    char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
+    shader_t *capture_variant;
+    dm_vk_feedback *feedback_layout;
+    int capture_entry;
+    char key[20]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
     VkShaderModule mod; fragment_variant *fragment_variants; fragment_outputs outputs; VkDescriptorSetLayout dsl;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
     sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask; int pack_locations;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
@@ -1592,8 +1596,7 @@ static VkDescriptorSetLayout shader_layout(const shader_t *s) {
     }
     return vkCreateDescriptorSetLayout(g_dev, &info, NULL, &layout) == VK_SUCCESS ? layout : VK_NULL_HANDLE;
 }
-static shader_t *shader_get(const uint8_t md[8]) {
-    char key[17]; for (int i = 0; i < 8; i++) sprintf(key + 2 * i, "%02x", md[i]);
+static shader_t *shader_by_key(const char *key) {
     for (int i = 0; i < g_nsh; i++) if (!strcmp(g_sh[i]->key, key)) return g_sh[i];
     if (!g_vkdir && !(g_vkdir = getenv("DM_VK_DIR"))) die("vk: DM_VK_DIR is not set (the folder of <key>.spv / <key>.vk.txt from dm/android/tools/spv_android.py)");
     char path[1024]; size_t ns, nt;
@@ -1609,9 +1612,18 @@ static shader_t *shader_get(const uint8_t md[8]) {
         LOG("[RED] vk: shader %s rejected: %s; export shaders again", key, contract_error);
         free(spv); free(txt); return s;
     }
+    dm_vk_capture capture = {0};
     for (char *ln = strtok(txt, "\n"); ln; ln = strtok(NULL, "\n")) {
         char a[16], ty[8], kind[16], sk[16], access[4] = ""; int b, cnt, reg, off, sreg, l, t;
         if (sscanf(ln, "stage %15s", a) == 1) s->stage = !strcmp(a, "vs") ? 0 : !strcmp(a, "ps") ? 1 : !strcmp(a, "cs") ? 5 : -1;
+        else if (!strncmp(ln,"tf ",3)) {
+            if (!s->feedback_layout) s->feedback_layout = calloc(1, sizeof *s->feedback_layout);
+            if (!s->feedback_layout) die("Vulkan: cannot allocate feedback layout");
+            if (dm_vk_feedback_line(ln,strlen(ln),s->feedback_layout)) goto bad_capture;
+        } else if (!strncmp(ln,"capture ",8)) {
+            if (dm_vk_capture_line(ln,strlen(ln),&capture)) goto bad_capture;
+            s->capture_entry=1;
+        }
         else if (sscanf(ln, "tg %u %u %u", &s->tg[0], &s->tg[1], &s->tg[2]) == 3) {}
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
         else if (sscanf(ln, "vin %d %d", &l, &t) == 2 && l >= 0 && l < 32) { s->vin[l] = (uint8_t)t; s->vin_mask |= 1u << l; }
@@ -1643,6 +1655,8 @@ static shader_t *shader_get(const uint8_t md[8]) {
                       !strcmp(ty, "stb") ? BT_STB : !strcmp(ty, "simg") ? BT_SIMG : !strcmp(ty, "tex") ? BT_TEX : BT_SAMP;
             e->kind = !strcmp(kind, "cbuf") ? K_CBUF : !strcmp(kind, "c1") ? K_C1 : !strcmp(kind, "support") ? K_SUPPORT : !strcmp(kind, "drvcb") ? K_DRVCB : !strcmp(kind, "tex") ? K_TEX :
                       !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "sbuf_ubo") ? K_SBUFU : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : !strcmp(kind, "tex_ubo") ? K_TEXU : K_UNK;
+            if (!strcmp(kind,"geometry") && reg == 0 && e->type == BT_SSBO) e->kind=K_CAPTURE_RECORDS;
+            if (!strcmp(kind,"geometry") && reg == 5 && e->type == BT_UBO) e->kind=K_CAPTURE_CONTROL;
             e->skind = sampler_source(sk);
             if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
             if (!strcmp(kind, "htab_map")) {
@@ -1668,6 +1682,15 @@ static shader_t *shader_get(const uint8_t md[8]) {
             }
             if (e->kind == K_UNK) LOG("[RED] vk: shader %s binding %d has kind %s, not implemented (reads zero)", key, b, kind);
         }
+    }
+    if (s->capture_entry) {
+        unsigned seen = 0;
+        for (int i = 0; i < s->nb; ++i) {
+            const sbind *b = &s->b[i];
+            if (b->kind == K_CAPTURE_RECORDS && b->binding == capture.output_binding && b->count == 1) seen |= 1;
+            if (b->kind == K_CAPTURE_CONTROL && b->binding == capture.control_binding && b->count == 1) seen |= 2;
+        }
+        if (seen != 3) goto bad_capture;
     }
     for (int i = 0; i < s->nb; ++i) {
         const sbind *b = &s->b[i];
@@ -1715,9 +1738,17 @@ static shader_t *shader_get(const uint8_t md[8]) {
     s->dsl = shader_layout(s);
     if (!s->dsl) { LOG("[RED] vk: shader %s descriptor layout exceeds device support", key); s->mod=VK_NULL_HANDLE; }
     return s;
+bad_capture:
+    LOG("[RED] vk: shader %s has an invalid feedback capture interface",key);
+    free(txt); free(spv); return s;
 bad_table:
     LOG("[RED] vk: shader %s has an invalid uniform handle table interface", key);
     free(txt); free(spv); return s;
+}
+static shader_t *shader_get(const uint8_t md[8]) {
+    char key[17];
+    for (int i=0; i<8; i++) sprintf(key+2*i,"%02x",md[i]);
+    return shader_by_key(key);
 }
 static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BINDINGS]) {
     int any=0;for(int i=0;i<base->nb;i++) any|=bias[i]!=0;
@@ -1856,6 +1887,7 @@ static struct {
     visibility_counter *visibility;
     feedback_control *feedback;
     int feedback_active;
+    p_tf_bind feedback_streams[4];
     p_prim_restart restart; p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; p_scissor sc; int has_sc, rasterizer_discard;
     uint8_t vp_sw[16][4];   // component selectors XOR the identity, as recorded by NVN
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
@@ -1917,7 +1949,7 @@ static int pass_begin(void) {
     if (P.open) return 1;
     if (P.incompatible_samples) return 0;
     if (!P.n && !P.dt) {
-        if (!S.rasterizer_discard) return 0;
+        if (!S.rasterizer_discard && !S.feedback_active) return 0;
         P.w = P.h = 1; // Vertex-only work still needs a valid render area.
     }
     rp_desc d = {.n = P.n, .w = P.w, .h = P.h, .samples = P.samples, .layout = VK_IMAGE_LAYOUT_GENERAL};
@@ -2572,7 +2604,12 @@ static int write_sampled_binding(VkDescriptorSet ds, const sbind *b, int stage, 
     return 1;
 }
 
-static VkDescriptorSet write_set(shader_t *s, int stage) {
+typedef struct {
+    VkDescriptorBufferInfo records, control;
+    const dm_vk_feedback *layout;
+    uint32_t capacity, primitive;
+} capture_draw;
+static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *capture) {
     int has_separate = 0;
     // Every statically used descriptor must be populated before submitting this pipeline.
     for (int i = 0; i < s->nb; ++i) {
@@ -2608,7 +2645,10 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
         }
         if (b->type == BT_UBO || b->type == BT_SSBO) {
             VkDescriptorBufferInfo *d = &bi[nw]; *d = (VkDescriptorBufferInfo){g_zero_buf, 0, 65536};
-            if (b->kind == K_TABLE_MAP) {
+            if (b->kind == K_CAPTURE_RECORDS || b->kind == K_CAPTURE_CONTROL) {
+                if (!capture) return VK_NULL_HANDLE;
+                *d = b->kind == K_CAPTURE_RECORDS ? capture->records : capture->control;
+            } else if (b->kind == K_TABLE_MAP) {
                 const handle_table *table = table_cache[stage][b->slot];
                 VkDeviceSize bytes = (table->map[0]+2u) * sizeof(uint32_t);
                 VkDeviceSize offset = ring_put(table->map, bytes, g_props.limits.minStorageBufferOffsetAlignment);
@@ -2771,8 +2811,16 @@ static void color_operations(pso_key *k) {
     if (!k->logic) RED_ONCE(115,"device lacks logicOp; drawing color with COPY");
 }
 
+static void feedback_hold(feedback_control *control) {
+    if (control->last_submission != g_fence + 1) {
+        control->last_submission = g_fence + 1;
+        atomic_fetch_add(&control->refs, 1);
+        post_add((post_t){.kind=POST_FEEDBACK_RELEASE, .dst=control});
+    }
+}
+#include "transform_feedback.inc"
+
 static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_index) {
-    if (S.feedback_active) RED_ONCE(101, "transform feedback varying capture is unavailable");
     g_nwb = 0;
     if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
     if (!S.bst[0]) SKIP(0);
@@ -2792,6 +2840,9 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     if (!vs || !vs->mod || (fs && !fs->mod)) SKIP(1);
     if (di && di->count) cpu_ready(di->ibuf, (uint64_t)(uint32_t)di->count * (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4));
     shader_cpu_ready(vs, 0); shader_cpu_ready(fs, 1);
+    capture_draw capture = {0};
+    if (S.feedback_active && vs->feedback_layout)
+        vs = feedback_vertex(vs, dw, &capture);
     if (!pass_begin()) SKIP(2);
     int prim = dw ? dw->prim : di->prim;
     if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP || prim == NVN_DRAW_PRIMITIVE_PATCHES) { RED_ONCE(31, "primitive %d not implemented yet", prim); SKIP(4); }
@@ -2839,7 +2890,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     if (!pp) SKIP(5);
     if (fs && P.n) fb_prepare(fs); else g_fb_mask = 0;
     g_draw_base_instance = (uint32_t)(dw ? dw->base_instance : di->base_instance);
-    VkDescriptorSet sets[2] = {write_set(vs, 0), fs ? write_set(fs, 1) : VK_NULL_HANDLE};
+    VkDescriptorSet sets[2] = {write_set(vs, 0, &capture), fs ? write_set(fs, 1, NULL) : VK_NULL_HANDLE};
     g_fb_mask = 0;
     if (!sets[0] || (fs && !sets[1])) SKIP(6);
     VkCommandBuffer cb = C->cb;
@@ -2946,6 +2997,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     g_pass_shader_writes |= g_nwb != 0;
     g_pass_shader_writes |= mark_image_writes(0);
     if (fs) g_pass_shader_writes |= mark_image_writes(1);
+    if (capture.layout) feedback_finish(&capture);
     g_stat_draws++;
 }
 // CPU range staging and primitive conversion need the actual vertex/index
@@ -3080,7 +3132,7 @@ static void dispatch(const p_dispatch *d) {
         if (g_dispatch_offset == VK_WHOLE_SIZE) return;
     }
     g_nwb = 0;
-    VkDescriptorSet ds = write_set(cs, 5); if (!ds) return;
+    VkDescriptorSet ds = write_set(cs, 5, NULL); if (!ds) return;
     if (g_plog) LOG("plog:  dispatch cs %s %dx%dx%d, %d storage buffers", cs->key, d->x, d->y, d->z, g_nwb);
     vkCmdBindPipeline(C->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cs->cpp);
     vkCmdBindDescriptorSets(C->cb, VK_PIPELINE_BIND_POINT_COMPUTE, cs->cpl, 0, 1, &ds, 0, NULL);
@@ -3556,11 +3608,7 @@ static void feedback_state(const p_tf_state *op) {
             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &S.feedback->memory, NULL);
     }
     feedback_control *control = S.feedback;
-    if (control->last_submission != g_fence + 1) {
-        control->last_submission = g_fence + 1;
-        atomic_fetch_add(&control->refs, 1);
-        post_add((post_t){.kind=POST_FEEDBACK_RELEASE, .dst=control});
-    }
+    feedback_hold(control);
     pass_end();
     barrier_all(C->cb);
     if (op->what == 0) {
@@ -3672,6 +3720,11 @@ static void mtl_exec_(const uint8_t *p) {
                     report_insert(timestamp ? &pending_timestamps : &gpu_reports, addr);
                 }
                 mtl_sub_counter(addr, (uint32_t)type);
+                break;
+            }
+            case OP_TF_BIND: {
+                const p_tf_bind *b = (const p_tf_bind *)a;
+                if ((unsigned)b->index < 4) S.feedback_streams[b->index] = *b;
                 break;
             }
             case OP_TF_STATE: feedback_state((const p_tf_state *)a); break;

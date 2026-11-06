@@ -1,0 +1,27 @@
+#version 450
+// One invocation reserves a common whole-primitive prefix for all streams.
+// The gather jobs then consume their offsets and count without a CPU readback.
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) buffer Control { uint offsets[4]; uint args[4]; } state;
+layout(set=0,binding=1,std430) buffer Jobs { uint words[]; } jobs;
+layout(push_constant) uniform Draw {
+    uvec4 stride;
+    uvec4 capacity;
+    uint requested, primitive, job_words;
+} draw;
+void main() {
+    uint n = draw.requested;
+    for (uint b=0; b<4; b++) if (draw.stride[b] != 0) {
+        uint available = draw.capacity[b] - min(draw.capacity[b], state.offsets[b]);
+        n = min(n, available / draw.stride[b]);
+    }
+    n -= n % draw.primitive;
+    for (uint b=0; b<4; b++) if (draw.stride[b] != 0) {
+        jobs.words[b * draw.job_words + 3] = n;
+        jobs.words[b * draw.job_words + 4] = state.offsets[b] / 4;
+        state.offsets[b] += n * draw.stride[b];
+    }
+    state.args[0] += n;
+    state.args[1] = 1;
+    state.args[2] = state.args[3] = 0;
+}
