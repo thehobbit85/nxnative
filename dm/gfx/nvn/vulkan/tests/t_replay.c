@@ -868,6 +868,35 @@ static void depth_copies(void) {
                 int copied=x>=1&&x<3&&y>=1&&y<3;
                 assert(pixels[4*(y*8+x)+1]==(copied?255:0)); assert(pixels[4*(y*8+x)+2]==(copied?0:255));
             }
+            // The untouched high nibble participates in the compare. Alternate
+            // depth writes on the same packed mip/layer and sample the result.
+            list = (list_t){0};
+            RECORD(OP_CLEAR_DS, p_clear_ds, .depth = .75f, .depth_mask = 1, .stencil = 0xaa, .stencil_mask = 0xff);
+            RECORD(OP_SCISSOR, p_scissor, .x = 2, .y = 1, .w = 3, .h = 4);
+            RECORD(OP_CLEAR_DS, p_clear_ds, .depth = .25f, .depth_mask = scale, .stencil = 0x35, .stencil_mask = 0x0f);
+            RECORD(OP_SCISSOR, p_scissor, .w = 8, .h = 8);
+            uint8_t observed[3][256];
+            for (int i = 0; i < 2; i++) {
+                RECORD(OP_CLEAR_COLOR, p_clear_color, .mask = 15, .rgba = {0,0,1,1});
+                RECORD(OP_STENCIL, p_stencil, .face = 3, .which = 2, .ref = i ? 0xaa : 0xa5);
+                RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+                RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)observed[i],
+                       .r = {.width=8,.height=8,.depth=1});
+            }
+            RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
+            RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &depth_copy_program, .stages = 3);
+            RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+            RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &output, .src = (uintptr_t)observed[2],
+                   .r = {.width=8,.height=8,.depth=1});
+            put(&list, OP_END, NULL, 0);
+            mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+                int inside = x >= 2 && x < 5 && y >= 1 && y < 5, at = 4*(8*y+x);
+                if (observed[0][at+1] != (inside ? 255 : 0) || observed[1][at+1] != (inside ? 0 : 255)
+                    || abs(observed[2][at] - (inside && scale ? 64 : 191)) > 1)
+                    die("masked DS format %#x depth write %d at %d,%d: stencil passes %u/%u, depth %u",
+                        formats[k], scale, x, y, observed[0][at+1], observed[1][at+1], observed[2][at]);
+            }
         }
         mtl_queue_forget(901); mtl_reg_tex(900,NULL,NULL); mtl_tex_release(&source);mtl_tex_release(&target);mtl_tex_release(&output);
     }
@@ -1441,7 +1470,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
-    if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); return 0; }
+    if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
