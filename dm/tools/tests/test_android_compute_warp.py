@@ -53,11 +53,26 @@ OpFunctionEnd
 
 @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val'), 'requires SPIR-V tools')
 class ComputeWarp(unittest.TestCase):
-    def module(self, **parameters):
+    def assemble(self, source):
         raw = subprocess.run(['spirv-as', '--target-env', 'vulkan1.1', '-', '-o', '-'],
-                             input=assembly(**parameters).encode(), capture_output=True, check=True).stdout
+                             input=source.encode(), capture_output=True, check=True).stdout
         subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=raw, check=True)
         return raw
+
+    def module(self, **parameters):
+        return self.assemble(assembly(**parameters))
+
+    def test_vote_equal_requires_boolean_operand(self):
+        source = assembly().replace('GroupNonUniformShuffle\n', 'GroupNonUniformVote\n')
+        source = source.replace('OpGroupNonUniformShuffle %uint %scope %id %one', 'OpGroupNonUniformAllEqual %bool %scope %id')
+        raw = self.assemble(source)
+        self.assertEqual(spv_warp.lower(raw), raw)
+        raw = self.assemble(source.replace('%value =', '%p = OpIEqual %bool %id %one\n%value =').replace('%scope %id\n', '%scope %p\n'))
+        portable = spv_warp.lower(raw)
+        subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=portable, check=True)
+        ops = [opcode(i) for i in decode(portable)[1]]
+        self.assertIn(241, ops)  # one 32-bit warp ballot
+        self.assertNotIn(336, ops)
 
     def test_straight_line_uses_workgroup_exchange_and_one_linear_index(self):
         for existing_index, declared_only in ((False, False), (True, False), (True, True)):
