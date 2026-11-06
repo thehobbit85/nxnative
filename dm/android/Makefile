@@ -16,7 +16,7 @@ OUT := $(BUILD_ROOT)/$(GAME)
 # The game profile header comes from the host Makefile (game.py, DM_GAMES_DIR), which also links an outside profile at host/gen/<id>/profile
 GAME_GEN := $(HOST)/gen/$(GAME)
 GAME_DIR := $(if $(wildcard ../games/$(GAME)/game.tsv),../games/$(GAME),$(GAME_GEN)/profile)
-CFLAGS := -MMD -MP -O1 -g -fPIC -fvisibility=hidden -D_GNU_SOURCE -Wall -Wno-unused-function -Wno-format -Wno-deprecated-declarations -Wno-incompatible-pointer-types-discards-qualifiers \
+CFLAGS := -MMD -MP -O1 -g -fPIC -fvisibility=hidden -D_GNU_SOURCE -DDM_NVN_VULKAN -Wall -Wno-unused-function -Wno-format -Wno-deprecated-declarations -Wno-incompatible-pointer-types-discards-qualifiers \
           -Icompat -I$(HOST) -I../gfx/nvn -I../gfx/nvn/include -I../third_party/vulkan-headers/include -I$(GAME_GEN) -I$(GAME_DIR) \
           -I../third_party/libvpx -I../third_party/dav1d/include -I../third_party/stb_vorbis -I../third_party/lzfse
 CONFIG_FLAGS := $(CFLAGS)
