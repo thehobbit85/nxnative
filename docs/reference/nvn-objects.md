@@ -2,6 +2,13 @@
 
 NVN object layouts, memory pools, command memory, queues, syncs and entry points (`dm/gfx/nvn/hle_nvn.c`). Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Deferred textures in multiple descriptor pools
+
+- **Symptom:** a reused command list samples the first pool's texture after the game updates a deferred handle for another pool.
+- **Cause:** the guest handle indexes the command buffer's texture and sampler pools. Reading the handle again at submission discarded the pool bases saved for immediate bindings.
+- **Fix:** the recorder retains both bases for deferred binds that need them. Metal and Vulkan translate the current guest handle into the saved pools in a local copy during replay. Capture relocates the handle-array address and retains the bases.
+- **Found on:** the public NVN recorder fixture samples six face colors through two deferred cube slots, swaps the handles between submissions and repeats with the same IDs in another pool.
+
 ## Object sizes
 
 ### Host records must fit the game's SDK object sizes
