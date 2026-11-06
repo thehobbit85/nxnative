@@ -351,6 +351,12 @@ $(B)/shaders/000000000000003a.spv: tests/draw_parameters.frag tests/draw_paramet
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/draw_parameters.frag.vk.txt $(@:.spv=.vk.txt)
 
+fixture: $(B)/shaders/000000000000006c.spv
+$(B)/shaders/000000000000006c.spv: tests/storage.vert tests/storage.vert.vk.txt
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DCHECK_DISCARD_IMAGE $< -o $@
+	cat tests/storage.vert.vk.txt > $(@:.spv=.vk.txt)
+	echo 'b 1 simg 1 img 2 -1 - -1 view=1 num=1' >> $(@:.spv=.vk.txt)
 $(B)/shaders/0000000000000041.spv: tests/storage.vert tests/storage.vert.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
