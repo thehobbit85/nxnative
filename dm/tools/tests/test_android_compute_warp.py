@@ -91,6 +91,42 @@ class ComputeWarp(unittest.TestCase):
                 raw = self.module(**{option: True})
                 self.assertEqual(spv_warp.lower(raw), raw)
 
+    def test_workgroup_size_literal_must_match_each_dimension(self):
+        source = assembly(specialize_size=True).replace('OpDecorate %count SpecId 0\n', '')
+        for width in (64, 32):
+            raw = self.assemble(source.replace('OpSpecConstant %uint 64', f'OpConstant %uint {width}')
+                                .replace('OpSpecConstantComposite', 'OpConstantComposite'))
+            with self.subTest(width=width):
+                self.assertEqual(spv_warp.lower(raw) != raw, width == 64)
+
+    @unittest.skipUnless(shutil.which('glslc') and shutil.which('spirv-opt'), 'requires GLSL compiler and optimizer')
+    def test_predicated_shuffle_may_move_only_with_register_operations(self):
+        shader = """#version 450
+#extension GL_KHR_shader_subgroup_shuffle : require
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) buffer Data { uint words[]; };
+void main() {
+    uint id = gl_LocalInvocationIndex;
+    uint v = id + 9;
+    if (id < 32) {
+        BODY
+    }
+    words[id] = v;
+}
+"""
+        for body, portable in (('v = subgroupShuffle(v, 31);', True),
+                               ('v = subgroupShuffle(atomicAdd(words[id + 64], 1), 31);', False),
+                               ('v = subgroupShuffle(words[id + 64], 31);', False)):
+            raw = subprocess.run(['glslc', '--target-env=vulkan1.1', '-fshader-stage=comp', '-', '-o', '-'],
+                                 input=shader.replace('BODY', body).encode(), capture_output=True, check=True).stdout
+            with self.subTest(body=body):
+                result = spv_warp.lower(raw, shutil.which('spirv-opt'))
+                subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=result, check=True)
+                ops = [opcode(inst) for inst in decode(result)[1]]
+                self.assertEqual(345 not in ops and 224 in ops, portable)
+                if not portable:
+                    self.assertEqual(result, raw)
+
     def test_collective_after_merge_or_before_return_is_converged(self):
         branch = assembly(branch=True)
         exchange = '%value = OpGroupNonUniformShuffle %uint %scope %id %one\n'
