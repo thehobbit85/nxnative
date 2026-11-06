@@ -1351,7 +1351,7 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Cause:** bit 86 of HFMA2 rotates B: the name gives the lanes high first, so the high lane reads B's low half and the low lane B's high half negated. The decoder ignored the bit.
 - **Fix:** `AHfma2` in `InstEmitAmpereAlu.cs`. The lane order comes from Eden-NS2's fix (checked there against Switch 2 footage), not from a shader that proves it here.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`. `ampere_half_fixture.py` checks the raw result words from HADD2, HMUL2 and HFMA2 on Metal and Vulkan, including rotation, immediates, swizzles, saturation, ReLU and the scalar FP32 result. Both translation targets reject the unsupported BF16 pair.
 
 ### Global memory: descriptors, ATOMG.CAS, INC / DEC
 
