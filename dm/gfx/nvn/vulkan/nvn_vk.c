@@ -41,6 +41,9 @@
 
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceMemoryProperties g_memp; static VkPhysicalDeviceProperties g_props;
+static uint64_t g_timestamp_mask;
+static int g_segment_timestamps;
+static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
 static int g_draw_parameters;
 static VkPhysicalDeviceSubgroupProperties g_subgroup;
 static VkPhysicalDeviceSubgroupSizeControlProperties g_subgroup_sizes;
@@ -153,6 +156,7 @@ typedef struct {
     post_t *post; int npost, cpost;
     uint64_t fence_val; int up_used;
     VkQueryPool qp;   // GPU timestamps at the start and the end of the submission
+    int timed_reports; uint64_t submitted_ns;
     visibility_queries visibility;
     VkFramebuffer *fb; int nfb, cfb;   // render passes' framebuffers (no dynamic rendering), destroyed when the submission is done
     VkBuffer ring0; VkDeviceMemory ringm0; uint8_t *ringp0;   // the context's own ring; ring / ringp move to extra rings when a submission outgrows it (loading screens upload hundreds of MB)
@@ -185,9 +189,34 @@ static VkDeviceSize ring_put(const void *src, VkDeviceSize n, VkDeviceSize align
     return o;
 }
 static void post_add(post_t p) { if (C->npost == C->cpost) { C->cpost = C->cpost ? 2 * C->cpost : 256; C->post = realloc(C->post, C->cpost * sizeof *C->post); } C->post[C->npost++] = p; }
-static uint64_t gpu_ticks(void) {
+static uint64_t guest_time_ns(void) {
     uint64_t ns = guest_ns();
-    return nvn_timestamp_from_ns(ns ? ns : now_ns());
+    return ns ? ns : now_ns();
+}
+static uint64_t elapsed_gpu_ns(uint64_t from, uint64_t to) {
+    double ns = (double)((to - from) & g_timestamp_mask) * g_props.limits.timestampPeriod;
+    return ns >= (double)UINT64_MAX ? UINT64_MAX : (uint64_t)ns;
+}
+// Match Metal's segment mode: TIMESTAMP_TOP names the segment's start;
+// TIMESTAMP names its end. Only the elapsed time is in the device time domain.
+static void segment_ticks(const ctx_t *c, const uint64_t gpu[2], uint64_t duration, uint64_t ticks[2]) {
+    uint64_t before = guest_time_ns(), end = before;
+    if (p_calibrated_timestamps && c->qp) {
+        VkCalibratedTimestampInfoEXT info = {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, NULL, VK_TIME_DOMAIN_DEVICE_EXT};
+        uint64_t sampled, deviation;
+        if (p_calibrated_timestamps(g_dev, 1, &info, &sampled, &deviation) == VK_SUCCESS) {
+            uint64_t after = guest_time_ns();
+            uint64_t mid = before + (after >= before ? (after-before)/2 : 0);
+            uint64_t ago = elapsed_gpu_ns(gpu[1], sampled);
+            if (mid >= ago && mid-ago >= c->submitted_ns) end = mid-ago;
+        }
+    }
+    // Without clock calibration, anchor the measured duration at completion.
+    // Bound both times to the guest submission interval, including a freeze.
+    uint64_t earliest = c->submitted_ns < end ? c->submitted_ns : end;
+    uint64_t begin = c->qp && duration < end-earliest ? end-duration : earliest;
+    ticks[0] = nvn_timestamp_from_ns(begin);
+    ticks[1] = nvn_timestamp_from_ns(end);
 }
 // ---------- What the GPU writes: storage buffers of compute dispatches ----------
 // Draws and dispatches read guest memory through copies made when they are recorded, so what a dispatch writes into its storage buffers (particles simulated on the GPU,
@@ -260,15 +289,20 @@ static void gw_expire(uint64_t fence) {   // completion: the submission's writes
     pthread_mutex_unlock(&g_gwmu);
 }
 static void ctx_complete(ctx_t *c) {
-    uint64_t ts[2];
+    uint64_t ts[2] = {0}, ticks[2] = {0}, duration = 0;
     visibility_read(&c->visibility);
-    if (vkGetQueryPoolResults(g_dev, c->qp, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] > ts[0])
-        atomic_fetch_add(&g_gpu_ns, (uint64_t)((double)(ts[1] - ts[0]) * g_props.limits.timestampPeriod));
+    if (c->qp) {
+        VKCHECK(vkGetQueryPoolResults(g_dev, c->qp, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT));
+        duration = elapsed_gpu_ns(ts[0], ts[1]);
+        atomic_fetch_add(&g_gpu_ns, duration);
+    }
+    if (c->timed_reports) segment_ticks(c, ts, duration, ticks);
+    else if (c->npost) ticks[0] = ticks[1] = nvn_timestamp_from_ns(guest_time_ns());
     for (int i = 0; i < c->npost; i++) {
         post_t *p = &c->post[i];
         if (p->kind == 1) { volatile uint32_t *v = p->dst; if (p->mode == 1) *v += p->v; else *v = p->v; }
         else if (p->kind == 2) {
-            uint64_t t = gpu_ticks();
+            uint64_t t = ticks[p->type != NVN_COUNTER_TYPE_TIMESTAMP_TOP];
             int timestamp = p->type == NVN_COUNTER_TYPE_TIMESTAMP || p->type == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
             uint64_t rec[2] = {timestamp && !DM_GAME_RENDER_COND ? t : 0, t};
             if (p->visibility) rec[0] = p->visibility->samples;
@@ -280,6 +314,7 @@ static void ctx_complete(ctx_t *c) {
         visibility_release(p->visibility);
     }
     c->npost = 0;
+    c->timed_reports = 0;
     gw_expire(c->fence_val);
     for (size_t i = 0; i < c->nbv; i++) vkDestroyBufferView(g_dev, c->bv[i], NULL);
     c->nbv = 0;
@@ -365,16 +400,21 @@ static void vk_init_(void) {
     VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, qp);
     for (g_qf = 0; g_qf < nq && !(qp[g_qf].queueFlags & VK_QUEUE_GRAPHICS_BIT); g_qf++) {}
     if (g_qf == nq) die("Vulkan: no graphics queue");
+    uint32_t bits = qp[g_qf].timestampValidBits;
+    g_timestamp_mask = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    const char *timer = getenv("DM_NVN_GPU_TS");
+    g_segment_timestamps = timer && *timer ? !strcmp(timer,"segment") : DM_GAME_GPU_TS_SEGMENT;
     // Every feature the GPU has is enabled (the translated shaders may use any of them), except the costly robustness beyond robustBufferAccess. The feature structures
     // chained are only those of the GPU's Vulkan version and extensions (1.1 phones have neither the 1.2 / 1.3 structures nor dynamic rendering)
     uint32_t dv = g_props.apiVersion;
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
-    int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0;
+    int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0, has_calibrated = 0;
     for (uint32_t i = 0; i < ne; i++) {
         has_sc |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME); has_u8 |= !strcmp(ep[i].extensionName, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
         has_dr |= !strcmp(ep[i].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
         has_subgroup_sizes |= !strcmp(ep[i].extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+        has_calibrated |= !strcmp(ep[i].extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
     }
     free(ep);
     g_subgroup_sizes = (VkPhysicalDeviceSubgroupSizeControlProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
@@ -403,6 +443,7 @@ static void vk_init_(void) {
     g_precise_visibility = f2.features.occlusionQueryPrecise;
     f13.robustImageAccess = VK_FALSE;
     const char *ext[5]; uint32_t next = 0;
+    if (g_segment_timestamps && has_calibrated) ext[next++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
     g_selectable_subgroup_stages = 0;
     if (f13.subgroupSizeControl || size_features.subgroupSizeControl) {
         g_selectable_subgroup_stages = g_subgroup_sizes.requiredSubgroupSizeStages;
@@ -417,6 +458,8 @@ static void vk_init_(void) {
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, g_qf, 1, &prio};
     VkDeviceCreateInfo di = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &f2, 0, 1, &qi, 0, NULL, next, ext, NULL};
     VKCHECK(vkCreateDevice(g_pd, &di, NULL, &g_dev));
+    if (g_segment_timestamps && has_calibrated)
+        p_calibrated_timestamps = (PFN_vkGetCalibratedTimestampsEXT)vkGetDeviceProcAddr(g_dev, "vkGetCalibratedTimestampsEXT");
     vkGetDeviceQueue(g_dev, g_qf, 0, &g_q);
     pcache_load();
     if (dv >= VK_API_VERSION_1_2 && f12.timelineSemaphore && !getenv("DM_VK_NO_TIMELINE")) {
@@ -440,7 +483,7 @@ static void vk_init_(void) {
         c->ring = c->ring0 = buf_new(RING, ALL_BUF_USAGE, &c->ringm, (void **)&c->ringp); c->ringm0 = c->ringm; c->ringp0 = c->ringp;
         c->dp = c->dp0 = descriptor_pool_new(NULL);
         VkQueryPoolCreateInfo qi2 = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, 2};
-        VKCHECK(vkCreateQueryPool(g_dev, &qi2, NULL, &c->qp));
+        if (g_timestamp_mask) VKCHECK(vkCreateQueryPool(g_dev, &qi2, NULL, &c->qp));
     }
     dummies();
     pthread_t th; if (pthread_create(&th, NULL, completion_thread, NULL)) die("Vulkan: cannot start the completion thread"); pthread_detach(th);
@@ -2927,7 +2970,7 @@ static void begin_segment(void) {
     C->dp = C->dp0; VKCHECK(vkResetDescriptorPool(g_dev, C->dp, 0));
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     VKCHECK(vkBeginCommandBuffer(C->cb, &bi)); VKCHECK(vkBeginCommandBuffer(C->up, &bi));
-    vkCmdResetQueryPool(C->up, C->qp, 0, 2); vkCmdWriteTimestamp(C->up, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->qp, 0);
+    if (C->qp) { vkCmdResetQueryPool(C->up, C->qp, 0, 2); vkCmdWriteTimestamp(C->up, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->qp, 0); }
 }
 void mtl_sub_begin(void) {
     condition_begin();
@@ -2963,6 +3006,7 @@ static void buffer_clear(const p_clear_buf *clear) {
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post_add((post_t){1, (void *)val, mode, v}); }
 void mtl_sub_counter(uint64_t addr, uint32_t type) {
     visibility_counter *counter = NULL;
+    C->timed_reports = g_segment_timestamps;
     if (type == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
         visibility_end(&C->visibility, C->cb);
         counter = visibility_retain(S.visibility);
@@ -3124,7 +3168,7 @@ static void mtl_exec_(const uint8_t *p) {
 }
 uint64_t mtl_sub_commit(void) {
     pass_end();
-    vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->qp, 1);
+    if (C->qp) vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->qp, 1);
     VKCHECK(vkEndCommandBuffer(C->cb)); VKCHECK(vkEndCommandBuffer(C->up));
     uint64_t fence = ++g_fence; C->fence_val = fence;
     VkCommandBuffer cbs[2] = {C->up, C->cb};
@@ -3134,6 +3178,7 @@ uint64_t mtl_sub_commit(void) {
     pthread_mutex_lock(&g_qmu);
     if (g_tl) { wv = g_tlv; sv = ++g_tlv; ts.waitSemaphoreValueCount = 1; ts.pWaitSemaphoreValues = &wv; ts.signalSemaphoreValueCount = 1; ts.pSignalSemaphoreValues = &sv;
                 si.pNext = &ts; si.waitSemaphoreCount = 1; si.pWaitSemaphores = &g_tl; si.pWaitDstStageMask = &wst; si.signalSemaphoreCount = 1; si.pSignalSemaphores = &g_tl; }
+    if (C->timed_reports) C->submitted_ns = guest_time_ns();
     VkResult r = vkQueueSubmit(g_q, 1, &si, C->fence); pthread_mutex_unlock(&g_qmu);
     if (r != VK_SUCCESS) die("Vulkan: submission failed (%d)", (int)r);
     pthread_mutex_lock(&g_mu); g_pend[g_npend++] = g_ci; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
