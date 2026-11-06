@@ -697,6 +697,94 @@ static void nested_depth_ranges(void) {
     puts("Vulkan nested program binding, reversed depth and zero far depth passed");
 }
 
+static void conditional_rendering(void) {
+    if (!DM_GAME_RENDER_COND) return;  // The recorder emits these commands for opt-in profiles.
+    static uint64_t same[4] = {7,0,7,0}, different[4] = {9,0,2,0}, timestamp[4] = {1}, query[4];
+    tex_t color = {.serial = 0x8115, .d = {.width = 8, .height = 2, .depth = 1, .levels = 1,
+        .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_R32F}};
+    nvn_tex_layout(&color.d, &color.L);
+    tex_t depth = color, sampled = color;
+    depth.serial++; sampled.serial += 2; depth.d.height = 8; depth.d.format = NVN_FORMAT_DEPTH32F;
+    nvn_tex_layout(&depth.d, &depth.L);
+    float pixels[2][8] = {{0}};
+    mtl_queue_activate(0x8115);
+    list_t list = {0};
+    RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&color}, .depth = &depth);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .mask = 15, .rgba = {1});
+    RECORD(OP_CLEAR_DS, p_clear_ds, .depth = 1, .depth_mask = 1);
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &depth_range_program, .stages = 3);
+    uint64_t report[][2] = {{NVN_COUNTER_TYPE_TIMESTAMP_TOP, (uintptr_t)timestamp},
+                            {NVN_COUNTER_TYPE_SAMPLES_PASSED, (uintptr_t)query}};
+    list_t seed = {0};
+    for (unsigned i = 0; i < 2; i++) put(&seed, OP_REPORT_COUNTER, report[i], sizeof report[i]);
+    put(&seed, OP_END, NULL, 0);
+    const p_render_cond conditions[] = {{3}, {2}, {.mode=0,.addr=(uintptr_t)same},
+        {.mode=0,.addr=(uintptr_t)different}, {.mode=1,.addr=(uintptr_t)different}, {.mode=1,.addr=(uintptr_t)same},
+        {.mode=1,.addr=(uintptr_t)timestamp}, {.mode=1,.addr=(uintptr_t)query}};
+    const int enabled[] = {0,1,1,0,1,0,0,1};
+    uint16_t indices[] = {0,1,2};
+    for (int x = 0; x < 8; x++) {
+        put(&list, OP_RENDER_COND, &conditions[x], sizeof conditions[x]);
+        RECORD(OP_SCISSOR, p_scissor, .x=x, .y=0, .w=1, .h=1);
+        RECORD(OP_CLEAR_COLOR, p_clear_color, .mask=1, .rgba={.5f});
+        RECORD(OP_CLEAR_DS, p_clear_ds, .depth=.25f, .depth_mask=1);
+        RECORD(OP_SCISSOR, p_scissor, .x=x, .y=1, .w=1, .h=1);
+        if (x & 1) {
+            RECORD(OP_DRAW_IDX, p_draw_idx, .prim=NVN_DRAW_PRIMITIVE_TRIANGLES, .itype=1, .count=3,
+                   .instances=1, .ibuf=(uintptr_t)indices);
+        } else {
+            RECORD(OP_DRAW, p_draw, .prim=NVN_DRAW_PRIMITIVE_TRIANGLES, .count=3, .instances=1);
+        }
+    }
+    RECORD(OP_RENDER_COND, p_render_cond, .mode=3);
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&color, .src=(uintptr_t)pixels, .r={.width=8,.height=2,.depth=1});
+    put(&list, OP_END, NULL, 0);
+    mtl_sub_begin();
+    mtl_exec(seed.bytes);
+    uint64_t additional[600][2];
+    for (unsigned i = 0; i < 600; i++) {
+        list_t another = {0};
+        uint64_t entry[] = {report[i % 2][0], (uintptr_t)additional[i]};
+        put(&another, OP_REPORT_COUNTER, entry, sizeof entry); put(&another, OP_END, NULL, 0);
+        mtl_exec(another.bytes);
+    }
+    mtl_exec(list.bytes);
+    assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    for (int x=0; x<8; x++) {
+        if (pixels[0][x] != (enabled[x] ? .5f : 1) || pixels[1][x] != (enabled[x] ? .25f : 1))
+            die("conditional clear/draw column %d: %g / %g", x, pixels[0][x], pixels[1][x]);
+    }
+    // Enable is reset per submission. Timestamp comparisons return to guest
+    // memory, and a samples-passed address remains unknown during replay.
+    timestamp[0] = 4;
+    list = (list_t){0};
+    RECORD(OP_SCISSOR, p_scissor, .w=8, .h=2);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .mask=15, .rgba={0});
+    RECORD(OP_RENDER_COND, p_render_cond, .mode=1, .addr=(uintptr_t)timestamp);
+    RECORD(OP_SCISSOR, p_scissor, .w=1, .h=2);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .mask=1, .rgba={.75f});
+    RECORD(OP_RENDER_COND, p_render_cond, .mode=1, .addr=(uintptr_t)query);
+    RECORD(OP_SCISSOR, p_scissor, .x=1, .w=1, .h=2);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .mask=1, .rgba={.5f});
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&color, .src=(uintptr_t)pixels, .r={.width=8,.height=2,.depth=1});
+    put(&list, OP_END, NULL, 0); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    for (int y=0; y<2; y++) for (int x=0; x<8; x++) assert(pixels[y][x] == (x==0 ? .75f : x==1 ? .5f : 0));
+    list = (list_t){0};
+    samp_par nearest = {0};
+    mtl_reg_tex(908, &depth, NULL); mtl_reg_samp(908, &nearest);
+    RECORD(OP_SET_RT, p_set_rt, .n=1, .color={&sampled});
+    RECORD(OP_SCISSOR, p_scissor, .w=8, .h=2);
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&depth_copy_program, .stages=3);
+    RECORD(OP_BIND_TEX1, p_bind_tex1, .stage=1|BIND_TEX1_NOBASE, .slot=0, .h=908|(908ull<<20));
+    RECORD(OP_DRAW, p_draw, .prim=NVN_DRAW_PRIMITIVE_TRIANGLES, .count=3, .instances=1);
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&sampled, .src=(uintptr_t)pixels, .r={.width=8,.height=2,.depth=1});
+    put(&list, OP_END, NULL, 0); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    for (int x=0; x<8; x++) assert(pixels[0][x] == (enabled[x] ? .25f : 1) && pixels[1][x] == 1);
+    mtl_reg_tex(908, NULL, NULL);
+    mtl_tex_release(&sampled); mtl_tex_release(&depth); mtl_tex_release(&color); mtl_queue_forget(0x8115);
+    puts("Vulkan conditional clears and draws matched all four modes, pending timestamps and unknown reports");
+}
+
 static void integer_attachment_clears(void) {
     tex_t target = {.serial = 0x8114, .d = {.width = 4, .height = 2, .depth = 1, .levels = 1,
         .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA32F}};
@@ -1508,6 +1596,7 @@ static void native_warp_width(unsigned available) {
 
 int main(void) {
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); depth_copies(); return 0; }
+    if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
@@ -1562,6 +1651,7 @@ int main(void) {
     queue_viewport_origin();
     nested_depth_ranges();
     scissored_attachment_clears();
+    conditional_rendering();
     integer_attachment_clears();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }

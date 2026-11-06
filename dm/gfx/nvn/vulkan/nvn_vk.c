@@ -14,6 +14,7 @@
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
 #include "nvn_timestamp.h"
+#include "render_condition.h"
 #include "dmsh_abi.h"
 #include "spv_vertex_fetch.h"
 #include "spv_output_defaults.h"
@@ -2790,6 +2791,7 @@ void mtl_sub_begin(void) {
     pthread_mutex_lock(&g_mu); while (c->fence_val > g_done) pthread_cond_wait(&g_cv, &g_mu); pthread_mutex_unlock(&g_mu);
     atomic_fetch_add(&g_wait_ns, now_ns() - w0);
     C = c; C->used = 0; C->capacity = RING; C->up_used = 0; g_ndc = 0; g_wgen++; C->ring = C->ring0; C->ringp = C->ringp0;
+    condition_begin();
     C->dp = C->dp0; VKCHECK(vkResetDescriptorPool(g_dev, C->dp, 0));
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     VKCHECK(vkBeginCommandBuffer(C->cb, &bi)); VKCHECK(vkBeginCommandBuffer(C->up, &bi));
@@ -2881,7 +2883,16 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_CALL: { const uint8_t *t; memcpy(&t, a, 8); mtl_exec_(t); break; }
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, a + 8, 4); memcpy(&v, a + 12, 4); mtl_sub_event(val, m, v); break; }
-            case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8); mtl_sub_counter(ad, (uint32_t)t); break; }
+            case OP_REPORT_COUNTER: {
+                uint64_t type, addr; memcpy(&type, a, 8); memcpy(&addr, a + 8, 8);
+                if (DM_GAME_RENDER_COND) {
+                    int timestamp = type == NVN_COUNTER_TYPE_TIMESTAMP || type == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
+                    report_insert(timestamp ? &pending_timestamps : &gpu_reports, addr);
+                }
+                mtl_sub_counter(addr, (uint32_t)type);
+                break;
+            }
+            case OP_RENDER_COND: condition_set((const p_render_cond *)a); break;
             case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_fence + 1; s->fenced = 1; break; }
             case OP_CLEAR_BUF: buffer_clear((const p_clear_buf *)a); break;
             case OP_COPY_B2B: { uint64_t s, d, n; memcpy(&s, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); mtl_sub_copy(s, d, n); break; }
@@ -2889,10 +2900,10 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_SET_RT: set_rt((const p_set_rt *)a); break;
             case OP_SET_TEX_POOL: S.tex_base = nvn_dpool_base(((const p_set_pool *)a)->pool, 1); break;
             case OP_SET_SAMP_POOL: S.samp_base = nvn_dpool_base(((const p_set_pool *)a)->pool, 0); break;
-            case OP_CLEAR_COLOR: clear_color((const p_clear_color *)a); break;
-            case OP_CLEAR_DS: clear_ds((const p_clear_ds *)a); break;
-            case OP_DRAW: { p_draw t; draw(draw_rec(a, h.size, &t), NULL); break; }
-            case OP_DRAW_IDX: { p_draw_idx t; draw(NULL, draw_idx_rec(a, h.size, &t)); break; }
+            case OP_CLEAR_COLOR: if (!conditional_skip) clear_color((const p_clear_color *)a); break;
+            case OP_CLEAR_DS: if (!conditional_skip) clear_ds((const p_clear_ds *)a); break;
+            case OP_DRAW: { p_draw t; if (!conditional_skip) draw(draw_rec(a, h.size, &t), NULL); break; }
+            case OP_DRAW_IDX: { p_draw_idx t; if (!conditional_skip) draw(NULL, draw_idx_rec(a, h.size, &t)); break; }
             case OP_DISPATCH: dispatch((const p_dispatch *)a); break;
             case OP_COPY_B2T: copy_b2t((const p_copy_b2t *)a); break;
             case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
