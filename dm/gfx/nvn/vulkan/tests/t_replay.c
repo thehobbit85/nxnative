@@ -32,6 +32,7 @@ static prog_t uniform_storage_program = {.nstage = 2};
 static prog_t split_program[3] = {{.nstage = 2}, {.nstage = 2}, {.nstage = 2}};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
+static prog_t feedback_program = {.nstage = 2};
 static prog_t depth_clamp_program = {.nstage = 2};
 static prog_t depth_range_program = {.nstage = 2};
 static prog_t one_sample_program = {.nstage = 2};
@@ -54,6 +55,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
     if (p == &blend_mrt_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x55 : 0x52; return 1; }
     if (p == &divisor_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x56+stage; return 1; }
+    if (p == &feedback_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x5d : 0x35; return 1; }
     if (p == &depth_clamp_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x53 : 0x5c; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
@@ -1886,6 +1888,46 @@ static void buffer_range_lifetime(void) {
     free(large);
     puts("600 live GPU buffer ranges and ring rollover retain their data through completion");
 }
+// Each output reads both attachments as they stood before this draw. The
+// attachments deliberately share their format and dimensions.
+static void attachment_feedback(void) {
+    tex_t target[2];
+    uint8_t pixels[2][16], initial[][4] = {{16,32,48,255},{64,80,96,255}};
+    list_t list = {0};
+    for (int i=0; i<2; ++i) {
+        target[i] = (tex_t){.serial=0xb190+i, .d={.width=2,.height=2,.depth=1,.levels=1,
+            .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+        nvn_tex_layout(&target[i].d,&target[i].L);
+        mtl_reg_tex(981+i, &target[i], NULL);
+        p_clear_tex clear = {.tex=&target[i], .r={.width=2,.height=2,.depth=1},.mask=15};
+        for (int c=0; c<4; ++c) clear.c.f[c] = initial[i][c] / 255.0f;
+        put(&list, OP_CLEAR_TEX, &clear, sizeof clear);
+        RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1,.slot=i,.h=981+i);
+    }
+    RECORD(OP_SET_RT,p_set_rt,.n=3,.color={[0]=&target[0],[2]=&target[1]});
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&feedback_program,.stages=3);
+    RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_BARRIER,uint32_t,NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    for (int i=0; i<2; ++i)
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target[i],.src=(uintptr_t)pixels[i],.r={.width=2,.height=2,.depth=1});
+    put(&list, OP_END, NULL, 0);
+    mtl_queue_activate(0xb190);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    const uint8_t want[][4] = {{32,64,16,255},{16,32,64,255}};
+    for (int i=0; i<2; ++i) {
+        for (int p=0; p<4; ++p) {
+            uint8_t *got = pixels[i]+4*p;
+            if (memcmp(got,want[i],4)) die("feedback slot %d pixel %d: %u/%u/%u expected %u/%u/%u",
+                2*i,p,got[0],got[1],got[2],want[i][0],want[i][1],want[i][2]);
+        }
+        mtl_reg_tex(981+i, NULL, NULL);
+        mtl_tex_release(&target[i]);
+    }
+    mtl_queue_forget(0xb190);
+    puts("Vulkan sparse MRT feedback preserved both attachments across the guest barrier");
+}
+
 static void graphics_storage(void) {
     tex_t target={.serial=0xb100,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&target.d,&target.L);
@@ -2328,6 +2370,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
     if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); segment_timestamps(); return 0; }
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
+    if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_CLAMP")) { depth_clamp(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
@@ -2359,6 +2402,7 @@ int main(void) {
     gpu_indices();
     graphics_storage_alias();
     simultaneous_aliases();
+    attachment_feedback();
     graphics_storage();
     readback_gpu_consumer();
     buffer_range_lifetime();

@@ -2089,18 +2089,28 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int *ok, vtex **vo) {
 // Same-pass feedback: a draw that samples a colour attachment of its own pass. On the Switch it reads what was there before the draw; Vulkan leaves it undefined, and the Mali-G57
 // returned garbage (Super Mario Odyssey's final pass, agl's post-effect program sampling the image it writes, drew yellow, green and red blotches over the picture; the Metal host
 // needs the same for 3D World and Captain Toad, profile key feedback_snap). Here it holds for every game: the pass is split before such a draw, the attachment's level and layer
-// copied into a snapshot image (one per format and size, reused), and the draw samples the snapshot. Not done when the draw's colour mask leaves that attachment alone, nor again
+// copied into a snapshot image (reused between draws of the same format and size), and the draw samples the snapshot. Not done when the draw's colour mask leaves that attachment alone, nor again
 // while no draw has written the attachment since its last snapshot. A 3D attachment is left as it was
-typedef struct { VkFormat f; uint32_t w, h; VkImage img; VkDeviceMemory m; VkImageView view; vtex *src; uint32_t lv, ly; } fbsnap_t;
+typedef struct { VkFormat f; uint32_t w, h; VkImage img; VkDeviceMemory m; VkImageView view; uint64_t serial; uint32_t lv, ly; } fbsnap_t;
 static fbsnap_t g_fbs[16]; static int g_nfbs;
 static vtex *g_fb_src[8]; static VkImageView g_fb_view[8]; static int g_fb_n;
 static uint64_t g_fb_copies;
-static fbsnap_t *fb_snap_for(vtex *v, int i) {   // the snapshot image for attachment i of the current pass, taken now unless the one it holds is still current
+static fbsnap_t *fb_cached(int slot) {
+    for (int k = 0; k < g_nfbs; ++k) {
+        fbsnap_t *e = &g_fbs[k];
+        if (e->serial == P.ct[slot]->serial && e->lv == P.clv[slot] && e->ly == P.cly[slot]) return e;
+    }
+    return NULL;
+}
+static fbsnap_t *fb_snap_for(vtex *v, int i, fbsnap_t *e, unsigned reserved) {
     uint32_t lv = P.clv[i], ly = P.cly[i], w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
-    fbsnap_t *e = NULL;
-    for (int k = 0; k < g_nfbs; k++) if (g_fbs[k].src == v && g_fbs[k].lv == lv && g_fbs[k].ly == ly && g_fbs[k].f == v->f.f && g_fbs[k].w == w && g_fbs[k].h == h) { e = &g_fbs[k]; break; }
     if (e && !P.cwr[i]) return e;
-    if (!e) for (int k = 0; k < g_nfbs; k++) if (g_fbs[k].f == v->f.f && g_fbs[k].w == w && g_fbs[k].h == h) { e = &g_fbs[k]; break; }   // same shape: reuse its image
+    // Equal-shaped sources sampled by the same draw need distinct images.
+    if (!e) for (int k = 0; k < g_nfbs; ++k) {
+        if (!(reserved & (1u << k)) && g_fbs[k].f == v->f.f && g_fbs[k].w == w && g_fbs[k].h == h) {
+            e = &g_fbs[k]; break;
+        }
+    }
     if (!e) {
         if (g_nfbs == 16) { RED_ONCE(40, "same-pass feedback: more than 16 snapshot shapes; the draw samples its attachment directly"); return NULL; }
         e = &g_fbs[g_nfbs]; memset(e, 0, sizeof *e); e->f = v->f.f; e->w = w; e->h = h;
@@ -2115,7 +2125,7 @@ static fbsnap_t *fb_snap_for(vtex *v, int i) {   // the snapshot image for attac
     }
     VkImageCopy c = {{VK_IMAGE_ASPECT_COLOR_BIT, lv, ly, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {w, h, 1}};
     vkCmdCopyImage(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, e->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
-    e->src = v; e->lv = lv; e->ly = ly; P.cwr[i] = 0; g_fb_copies++;
+    e->serial = v->serial; e->lv = lv; e->ly = ly; P.cwr[i] = 0; g_fb_copies++;
     return e;
 }
 static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the sampled colour attachments it writes, snapshot them, and have write_set bind the snapshots
@@ -2131,10 +2141,26 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
         }
     }
     if (!any) return;
-    int need = 0; for (int a = 0; a < P.n; a++) if (want[a] && P.cwr[a]) need = 1;
-    if (need) pass_end();
+    unsigned reserved = 0;
+    int need = 0;
+    fbsnap_t *cached[8] = {0};
+    for (int a = 0; a < P.n; ++a) if (want[a]) {
+        cached[a] = fb_cached(a);
+        if (cached[a]) reserved |= 1u << (cached[a] - g_fbs);
+        if (!cached[a] || P.cwr[a]) need = 1;
+    }
     VkCommandBuffer cb = C->cb;
-    for (int a = 0; a < P.n && g_fb_n < 8; a++) if (want[a]) { fbsnap_t *e = fb_snap_for(P.ct[a], a); if (e) { g_fb_src[g_fb_n] = P.ct[a]; g_fb_view[g_fb_n++] = e->view; } }
+    if (need) {
+        pass_end();
+        barrier_all(cb);   // earlier fragment reads must finish before recycling their snapshot
+    }
+    for (int a = 0; a < P.n; ++a) if (want[a]) {
+        fbsnap_t *e = fb_snap_for(P.ct[a], a, cached[a], reserved);
+        if (!e) continue;
+        reserved |= 1u << (e - g_fbs);
+        g_fb_src[g_fb_n] = P.ct[a];
+        g_fb_view[g_fb_n++] = e->view;
+    }
     if (need) { barrier_all(cb); pass_begin(); }
 }
 // All storage descriptors of a command are resolved together. Overlapping
