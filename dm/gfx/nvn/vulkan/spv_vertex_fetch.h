@@ -14,7 +14,9 @@ typedef struct {
     uint8_t location, fetch, scaled;    // input variables: location + 1; converted pointers: new class
 } vin_id;
 
-static uint32_t *spv_vertex_fetch(const uint32_t *words, size_t count, uint64_t mask,
+typedef struct { uint8_t at[32]; } vertex_classes;
+
+static uint32_t *spv_vertex_fetch(const uint32_t *words, size_t count, vertex_classes classes,
                                   const uint8_t reflected[32], size_t *out_count, const char **reason) {
     enum { TypeInt = 21, TypeFloat = 22, TypeVector = 23, TypePointer = 32, TypeFunction = 33, Constant = 43, Function = 54, Call = 57,
            Variable = 59, Load = 61, AccessChain = 65, InBoundsAccessChain = 66, Decorate = 71,
@@ -30,8 +32,9 @@ static uint32_t *spv_vertex_fetch(const uint32_t *words, size_t count, uint64_t 
     size_t required = capacity;
     uint32_t *out = malloc(capacity * sizeof *out);
     if (!ids || !out) { *reason = "out of memory"; goto fail; }
-    uint32_t type[4][5] = {{0}}, ptr[4][5] = {{0}}, variables[16] = {0};
-    uint64_t pending = mask;
+    uint32_t type[4][5] = {{0}}, ptr[4][5] = {{0}}, variables[32] = {0};
+    uint32_t pending = 0;
+    for (unsigned loc=0;loc<32;loc++) if (classes.at[loc]) pending|=1u<<loc;
     scaled32_spv scaled = {0};
     uint32_t all_ones = 0;
     size_t pos = 5;
@@ -45,7 +48,7 @@ static uint32_t *spv_vertex_fetch(const uint32_t *words, size_t count, uint64_t 
             if (pending) { *reason = "location has no standalone input variable"; goto fail; }
             // All the module's type IDs are now known. Reuse existing scalar, vector
             // and pointer types; declare any missing ones before the moved variables.
-            for (int loc = 0; loc < 16; loc++) if (variables[loc]) {
+            for (int loc = 0; loc < 32; loc++) if (variables[loc]) {
                 uint32_t var = variables[loc], c = ids[var].fetch, width = ids[var].width;
                 if (!type[c][1]) {
                     if (c == NVN_CT_FLOAT + 1) {
@@ -104,10 +107,10 @@ static uint32_t *spv_vertex_fetch(const uint32_t *words, size_t count, uint64_t 
             } else if (op == TypePointer && n == 4 && w[2] == Input && w[1] < words[3] && w[3] < words[3]) {
                 ids[w[1]].pointee = w[3];
                 if (ids[w[3]].cls) ptr[ids[w[3]].cls][ids[w[3]].width] = w[1];
-            } else if (op == Decorate && n == 4 && w[2] == Location && w[1] < words[3] && w[3] < 16) {
+            } else if (op == Decorate && n == 4 && w[2] == Location && w[1] < words[3] && w[3] < 32) {
                 ids[w[1]].location = w[3] + 1;
             } else if (op == Variable && n >= 4 && w[3] == Input && w[1] < words[3] && w[2] < words[3] && ids[w[2]].location) {
-                unsigned loc = ids[w[2]].location - 1, c = (mask >> (4 * loc)) & 15;
+                unsigned loc = ids[w[2]].location - 1, c = classes.at[loc];
                 if (c) {
                     vin_id value = ids[ids[w[1]].pointee];
                     if (!value.width || value.cls != reflected[loc] + 1 || n != 4 || variables[loc]) {
@@ -118,7 +121,7 @@ static uint32_t *spv_vertex_fetch(const uint32_t *words, size_t count, uint64_t 
                         if (!scaled.function) scaled.function = bound++;
                     } else if (c > 3) goto fail;
                     ids[w[2]].fetch = c; ids[w[2]].width = value.width; variables[loc] = w[2];
-                    pending &= ~(UINT64_C(15) << (4 * loc));
+                    pending &= ~(1u << loc);
                     i += n; continue;
                 }
             }
