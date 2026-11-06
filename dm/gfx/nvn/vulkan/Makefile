@@ -72,8 +72,17 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/000000000000004b.spv $(B)/shaders/000000000000004c.spv \
          $(B)/shaders/000000000000004d.spv $(B)/shaders/000000000000004e.spv $(B)/shaders/000000000000004f.spv $(B)/shaders/0000000000000050.spv $(B)/shaders/0000000000000051.spv \
          $(B)/shaders/0000000000000052.spv $(B)/shaders/0000000000000053.spv $(B)/shaders/0000000000000054.spv $(B)/shaders/0000000000000055.spv \
-         $(B)/shaders/0000000000000056.spv $(B)/shaders/0000000000000057.spv $(B)/shaders/0000000000000058.spv $(B)/shaders/0000000000000059.spv $(B)/shaders/000000000000005a.spv $(B)/shaders/000000000000005b.spv
+         $(B)/shaders/0000000000000056.spv $(B)/shaders/0000000000000057.spv $(B)/shaders/0000000000000058.spv $(B)/shaders/0000000000000059.spv $(B)/shaders/000000000000005a.spv $(B)/shaders/000000000000005b.spv \
+         $(B)/shaders/be5c489b134ec370.spv $(B)/shaders/9954f8894fadd956.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
+# Public recorder keys hash a 0x880-byte guest control section and one code byte (0 or 1).
+$(B)/shaders/be5c489b134ec370.spv: $(B)/shaders/0000000000000035.spv
+	cp $< $@
+	cp $(<:.spv=.vk.txt) $(@:.spv=.vk.txt)
+$(B)/shaders/9954f8894fadd956.spv: tests/public_bindings.frag
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage ps\nb 0 cis 1 tex 3 -1 samp_tex 3\n' > $(@:.spv=.vk.txt)
 $(B)/shaders/000000000000005b.spv: tests/packed_streams.vert tests/packed_streams.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
@@ -202,13 +211,13 @@ RECORDER_LDFLAGS = $(if $(VULKAN_SDK),-L$(VULKAN_SDK)/lib -Xlinker -rpath -Xlink
 RECORDER_SRC = $(filter-out tests/t_replay.c,$(SRC)) tests/recorder_unavailable.c \
                ../../../host/crash.c ../../../host/hle_bigstack.c ../../tests/t_host_stubs.c ../nvn_entry.S ../nvn_thunks.S
 .PHONY: recorded-transfer-test recorded-transfer-conformance
-recorded-transfer-test: $(B)/t_recorded_transfer
-	$(B)/t_recorded_transfer
+recorded-transfer-test: $(B)/t_recorded_transfer fixture
+	DM_VK_DIR="$(abspath $(B)/shaders)" $(B)/t_recorded_transfer
 recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
-$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
+$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c tests/public_bindings.inc ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
 	mkdir -p $(B)
-	$(CC) $(CPPFLAGS) $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
+	$(CC) $(CPPFLAGS) -DDM_VK_PUBLIC_BINDINGS $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
 
 # The Android SHA implementation is the loader's as well. The driver and ANativeWindow
 # are linked from the NDK. Use the device's Vulkan loader when executing the fixture.
