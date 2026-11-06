@@ -146,6 +146,63 @@ static void check_event_lists(NVNdevice *device, NVNqueue *queue, NVNmemoryPool 
 }
 
 #ifdef DM_VK_PUBLIC_BINDINGS
+// Depth/stencil planes are copied separately by Vulkan. Maxwell Z24S8 places
+// stencil in the low byte; ZF32_X24S8 stores the float before that byte.
+static void check_packed_texels(NVNdevice *device, NVNqueue *queue, NVNmemoryPool *pool) {
+    const NVNformat formats[] = {NVN_FORMAT_STENCIL8, NVN_FORMAT_DEPTH24, NVN_FORMAT_DEPTH24_STENCIL8, NVN_FORMAT_DEPTH32F_STENCIL8};
+    for (size_t i = 0; i < sizeof formats / sizeof *formats; ++i) {
+        NVNtexture tex;
+        NVNtextureBuilder tb;
+        API(nvnTextureBuilderSetDefaults)(&tb);
+        API(nvnTextureBuilderSetDevice)(&tb, device);
+        API(nvnTextureBuilderSetFormat)(&tb, formats[i]);
+        API(nvnTextureBuilderSetTarget)(&tb, NVN_TEXTURE_TARGET_2D);
+        API(nvnTextureBuilderSetSize2D)(&tb, 4, 2);
+        API(nvnTextureBuilderSetStorage)(&tb, pool, 0x4000);
+        assert(API(nvnTextureInitialize)(&tex, &tb));
+        NVNcommandBuffer cb;
+        assert(API(nvnCommandBufferInitialize)(&cb, device));
+        API(nvnCommandBufferAddCommandMemory)(&cb, pool, 0, 0x4000);
+        API(nvnCommandBufferBeginRecording)(&cb);
+        API(nvnCommandBufferSetRenderTargets)(&cb, 0, NULL, NULL, &tex, NULL);
+        API(nvnCommandBufferSetScissor)(&cb, 0, 0, 4, 2);
+        API(nvnCommandBufferClearDepthStencil)(&cb, 1, 1, 0x5c, 0xff);
+        NVNcommandHandle commands = API(nvnCommandBufferEndRecording)(&cb);
+        API(nvnQueueSubmitCommands)(queue, 1, &commands);
+        unsigned bpp = nvn_fmt_bpb(formats[i], NULL, NULL);
+        uint8_t cleared[8] = {0}, edit[8] = {0};
+        if (formats[i] == NVN_FORMAT_STENCIL8) {
+            cleared[0] = 0x5c; edit[0] = 0x93;
+        } else if (formats[i] == NVN_FORMAT_DEPTH32F_STENCIL8) {
+            float before = 1, after = 0.375f;
+            memcpy(cleared, &before, 4); memcpy(edit, &after, 4);
+            cleared[4] = 0x5c; edit[4] = 0x93;
+        } else {
+            int stencil = formats[i] == NVN_FORMAT_DEPTH24_STENCIL8;
+            uint32_t before = 0xffffff00u | (stencil ? 0x5c : 0), after = 0x23456700u | (stencil ? 0x93 : 0);
+            memcpy(cleared, &before, 4); memcpy(edit, &after, 4);
+        }
+        NVNcopyRegion all = {0, 0, 0, 4, 2, 1}, one = {2, 1, 0, 1, 1, 1};
+        uint8_t got[100], expected[100];
+        memset(expected, 0xbb, sizeof expected);
+        for (int y = 0; y < 2; ++y) for (int x = 0; x < 4; ++x) memcpy(expected + 3 + 41 * y + bpp * x, cleared, bpp);
+        for (int pass = 0; pass < 2; ++pass) {
+            if (pass) {
+                API(nvnTextureWriteTexels)(&tex, NULL, &one, edit);
+                memcpy(expected + 3 + 41 + bpp * 2, edit, bpp);
+            }
+            memset(got, 0xbb, sizeof got);
+            API(nvnTextureReadTexelsStrided)(&tex, NULL, &all, got + 3, 41, 90);
+            for (size_t k = 0; k < sizeof got; ++k) if (got[k] != expected[k])
+                die("packed format %#x pass %d byte %zu returned %#x expected %#x", formats[i], pass, k, got[k], expected[k]);
+        }
+        API(nvnQueueFinish)(queue);
+        API(nvnCommandBufferFinalize)(&cb);
+        API(nvnTextureFinalize)(&tex);
+    }
+    puts("Public depth/stencil texels: NVN packed planes, subregions and padded rows verified");
+}
+
 static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryPool *pool, uint8_t *storage) {
     enum { texture_offset = 0x4000, read_offset = 0xa000, w = 7, h = 3 };
     NVNbufferAddress addr = API(nvnMemoryPoolGetBufferAddress)(pool);
@@ -415,6 +472,7 @@ int main(void) {
     API(nvnTextureFinalize)(&tex);
 #ifdef DM_VK_PUBLIC_BINDINGS
     check_linear_transfer(&device, &queue, &pool, storage);
+    check_packed_texels(&device, &queue, &pool);
 #endif
     API(nvnQueueFinalize)(&queue);
     API(nvnMemoryPoolFinalize)(&pool);
