@@ -362,7 +362,7 @@ static void *completion_thread(void *a) {
 static int g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
 static int g_logic_op, g_non_solid_fill;
 static uint32_t g_custom_border_limit, g_custom_border_count;
-static int g_border_from_image;
+static int g_border_from_image, g_border_without_format;
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -493,6 +493,8 @@ static void vk_init_(void) {
     if (border_features.customBorderColors && !getenv("DM_VK_NO_CUSTOM_BORDER")) {
         ext[next++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
         g_custom_border_limit = border_props.maxCustomBorderColorSamplers;
+        if (getenv("DM_VK_NO_FORMATLESS_BORDER")) border_features.customBorderColorWithoutFormat = VK_FALSE;
+        g_border_without_format = border_features.customBorderColorWithoutFormat;
     } else {
         border_features.customBorderColors = border_features.customBorderColorWithoutFormat = VK_FALSE;
     }
@@ -622,6 +624,9 @@ static void dummies(void) {
 }
 // Unselected elements of a bindless array often contain no handle, or a handle
 // of another texture kind. Their descriptors still need the shader's view type.
+static VkFormat dummy_format(int num) {
+    return num == 1 ? VK_FORMAT_R32_SINT : num == 2 ? VK_FORMAT_R32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
+}
 static VkImageView sampled_dummy(int view, int num) {
     static VkImageView views[7][3];
     if (view < 0) view = VK_IMAGE_VIEW_TYPE_2D;
@@ -630,7 +635,7 @@ static VkImageView sampled_dummy(int view, int num) {
     if (views[view][num]) return views[view][num];
     int one = view == VK_IMAGE_VIEW_TYPE_1D || view == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
     int cube = view == VK_IMAGE_VIEW_TYPE_CUBE || view == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-    VkFormat format = num == 1 ? VK_FORMAT_R32_SINT : num == 2 ? VK_FORMAT_R32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat format = dummy_format(num);
     VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
         one ? VK_IMAGE_TYPE_1D : view == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
         format, {1, 1, 1}, 1, cube ? 6u : 1u, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
@@ -1177,14 +1182,15 @@ void mtl_prog_release(prog_t *p) { (void)p; }
 
 // Samplers, cached by their parameters
 #include "../nvn_border.h"
-typedef struct { VkFormat format; int needs_swizzle; } border_view;
+enum { BORDER_SWIZZLED=1, BORDER_PACKED=2, BORDER_MIXED_FORMATS=4, BORDER_MIXED_NUMBERS=8, BORDER_FLOAT_AND_INT=16 };
+typedef struct { VkFormat format; unsigned flags; } border_view;
 static border_view sampler_view(const vtex *v, const treg_t *tr) {
     fmt_t f = view_format(v,&tr->v,tr->has_v);
     border_view result = {f.f};
     if (!g_border_from_image && (f.noalpha || tr->t.set_swz || (tr->has_v && tr->v.set_swizzle))) {
         uint8_t swz[] = {2,3,4,5};
         sampled_swizzle(swz,f,&tr->t,&tr->v,tr->has_v);
-        result.needs_swizzle = !!memcmp(swz,(uint8_t[]){2,3,4,5},4);
+        if (memcmp(swz,(uint8_t[]){2,3,4,5},4)) result.flags |= BORDER_SWIZZLED;
     }
     return result;
 }
@@ -1199,7 +1205,7 @@ static VkSampler sampler_for(samp_par p, border_view view) {
     int border = p.ws == 4 || p.ws == 5 || p.wt == 4 || p.wt == 5 || p.wr == 4 || p.wr == 5;
     if (!border) view = (border_view){0};
     for (int i = 0; i < g_nsc; i++)
-        if (g_sc[i].view.format == view.format && g_sc[i].view.needs_swizzle == view.needs_swizzle &&
+        if (g_sc[i].view.format == view.format && g_sc[i].view.flags == view.flags &&
             !memcmp(&g_sc[i].p, &p, sizeof p)) return g_sc[i].s;
     VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = p.magf ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -1210,7 +1216,14 @@ static VkSampler sampler_for(samp_par p, border_view view) {
     if (p.aniso > 1) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = p.aniso > 16 ? 16 : p.aniso; }
     if (p.cmp_mode) { si.compareEnable = VK_TRUE; si.compareOp = (VkCompareOp)(p.cmp_func ? p.cmp_func - 1 : 7); }
     VkSamplerCustomBorderColorCreateInfoEXT custom = {VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT};
-    if (border) {
+    if (border && (view.flags & BORDER_FLOAT_AND_INT)) {
+        // A single VkSampler cannot specify both integer and floating border
+        // colors. Clamp only the border axes so every paired image remains valid.
+        if (si.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (si.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (si.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        RED_ONCE(105, "independent sampler may select both integer and floating images, clamping border axes to edge");
+    } else if (border) {
         int stock = nvn_stock_border(p.border);
         enum clear_type type = clear_color_type(view.format);
         const VkBorderColor fixed[][3] = {
@@ -1218,8 +1231,10 @@ static VkSampler sampler_for(samp_par p, border_view view) {
             {VK_BORDER_COLOR_INT_TRANSPARENT_BLACK,VK_BORDER_COLOR_INT_OPAQUE_BLACK,VK_BORDER_COLOR_INT_OPAQUE_WHITE}};
         si.borderColor = fixed[type != CLEAR_FLOAT][stock];
         if (memcmp(p.border, nvn_mtl_border[stock], sizeof p.border)) {
-            if (view.format != VK_FORMAT_UNDEFINED && !view.needs_swizzle && g_custom_border_count < g_custom_border_limit) {
-                custom.format = view.format;
+            int mixed = view.flags & BORDER_MIXED_FORMATS;
+            int compatible = !mixed || (g_border_without_format && !(view.flags & (BORDER_PACKED | BORDER_MIXED_NUMBERS)));
+            if (view.format != VK_FORMAT_UNDEFINED && !(view.flags & BORDER_SWIZZLED) && compatible && g_custom_border_count < g_custom_border_limit) {
+                custom.format = mixed ? VK_FORMAT_UNDEFINED : view.format;
                 custom.customBorderColor = clear_value(p.border,type);
                 si.borderColor = type == CLEAR_FLOAT ? VK_BORDER_COLOR_FLOAT_CUSTOM_EXT : VK_BORDER_COLOR_INT_CUSTOM_EXT;
                 si.pNext = &custom;
@@ -1248,6 +1263,7 @@ static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
 }
 typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only, table; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
+#include "spv_sampler_pairs.inc"
 typedef struct vin_module {
     vertex_classes classes;
     VkShaderModule module;
@@ -1262,6 +1278,7 @@ typedef struct shader shader_t;
 struct shader {
     shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
     int has_tables;
+    sampler_pairs *sampler_images;
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
@@ -1671,6 +1688,7 @@ static shader_t *shader_get(const uint8_t md[8]) {
         s->pack_locations=1;
     }
     if (s->stage==1) s->outputs=spv_fragment_outputs(spv,ns/4);
+    s->sampler_images=reflect_sampler_pairs(spv,ns/4,s->b,s->nb);
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
     if (!spv) return s;
@@ -2480,10 +2498,67 @@ static VkDescriptorSet allocate_shader_set(const shader_t *s) {
     VKCHECK(result);
     return ds;
 }
+// A shader may dynamically pair any element of its separate texture and
+// sampler arrays. Combine the formats of the actual views written to its set.
+static void include_border_view(border_view *common, border_view view) {
+    switch (view.format) {
+        case VK_FORMAT_B4G4R4A4_UNORM_PACK16: case VK_FORMAT_B5G6R5_UNORM_PACK16:
+        case VK_FORMAT_B5G5R5A1_UNORM_PACK16: case VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR:
+            view.flags |= BORDER_PACKED; break; // Vulkan requires an explicit format for these borders.
+        default: break;
+    }
+    if (!common->format) { *common = view; return; }
+    common->flags |= view.flags;
+    if (common->format == view.format) return;
+    common->flags |= BORDER_MIXED_FORMATS;
+    enum clear_type first = clear_color_type(common->format), next = clear_color_type(view.format);
+    if (first != next) common->flags |= BORDER_MIXED_NUMBERS;
+    if ((first == CLEAR_FLOAT) != (next == CLEAR_FLOAT)) common->flags |= BORDER_FLOAT_AND_INT;
+}
+
+static int write_sampled_binding(VkDescriptorSet ds, const sbind *b, int stage, border_view *possible_views) {
+    VkDescriptorImageInfo images[32] = {0};
+    // The driver consumes descriptor writes immediately. Stream large
+    // tables in bounded chunks; no scratch allocation scales with the layout.
+    for (uint32_t first = 0; first < b->count; first += 32) {
+        uint32_t count = b->count - first < 32 ? b->count - first : 32;
+        for (uint32_t element = 0; element < count; ++element) {
+            uint64_t handle = descriptor_handle(stage, b, first + element);
+            border_view sampled = {0};
+            if (b->type != BT_SAMP) {
+                VkImageView view = tex_slot(handle, b, stage, &sampled);
+                if (!view) return 0;
+                if (possible_views) {
+                    border_view effective = sampled;
+                    if (!effective.format) effective.format = dummy_format(b->num);
+                    include_border_view(possible_views,effective);
+                }
+                images[element].imageView = view; images[element].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            }
+            if (b->type == BT_SAMP) sampled = *possible_views;
+            if (b->type != BT_TEX) {
+                pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20),sampled); pthread_mutex_unlock(&g_rmu);
+            }
+            if (b->type == BT_CIS && sampled.format == VK_FORMAT_UNDEFINED && b->num) {
+                static VkSampler nearest;
+                if (!nearest) { VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; VKCHECK(vkCreateSampler(g_dev, &si, NULL, &nearest)); }
+                images[element].sampler = nearest;
+            }
+        }
+        VkDescriptorType type = b->type == BT_CIS ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : b->type == BT_TEX ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
+        VkWriteDescriptorSet array = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, first,
+            count, type, images, NULL, NULL};
+        vkUpdateDescriptorSets(g_dev, 1, &array, 0, NULL);
+    }
+    return 1;
+}
+
 static VkDescriptorSet write_set(shader_t *s, int stage) {
+    int has_separate = 0;
     // Every statically used descriptor must be populated before submitting this pipeline.
     for (int i = 0; i < s->nb; ++i) {
         const sbind *b = &s->b[i];
+        if (b->type == BT_SAMP) has_separate = 1;
         if (b->type == BT_SIMG || b->table) continue;
         if (is_texel(b) && b->count <= 32) continue;
         if ((b->type == BT_CIS || b->type == BT_TEX) && b->count <= 32 && (b->kind == K_TEXU || b->kind == K_TEX)) continue;
@@ -2496,8 +2571,13 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
     memset(g_bound_images[stage], 0, sizeof g_bound_images[stage]);
     VkDescriptorSet ds = allocate_shader_set(s);
     VkWriteDescriptorSet w[DM_VK_MAX_BINDINGS]; VkDescriptorBufferInfo bi[DM_VK_MAX_BINDINGS]; int nw = 0;
+    int deferred_samplers[DM_VK_MAX_BINDINGS];
+    int ndeferred = 0;
+    border_view binding_views[DM_VK_MAX_BINDINGS];
+    if (has_separate) memset(binding_views,0,s->nb * sizeof *binding_views);
     for (int i = 0; i < s->nb; i++) {
         const sbind *b = &s->b[i];
+        if (b->type == BT_SAMP) { deferred_samplers[ndeferred++] = i; continue; }
         VkWriteDescriptorSet *x = &w[nw]; *x = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0, 1};
         if (is_texel(b)) { if (!bind_texel(ds, b, stage)) return VK_NULL_HANDLE; continue; }
         if (b->type == BT_SIMG) {
@@ -2566,37 +2646,21 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
             d->offset -= s->buffer_bias[i]; d->range += s->buffer_bias[i];
             if (b->type == BT_SSBO && d->range > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "biased storage range exceeds the device descriptor limit"); return VK_NULL_HANDLE; }
             x->descriptorType = b->type == BT_UBO ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; x->pBufferInfo = d;
-        } else if (b->type == BT_CIS || b->type == BT_TEX || b->type == BT_SAMP) {
-            VkDescriptorImageInfo images[32] = {0};
-            // The driver consumes descriptor writes immediately. Stream large
-            // tables in bounded chunks; no scratch allocation scales with the layout.
-            for (uint32_t first = 0; first < b->count; first += 32) {
-                uint32_t count = b->count - first < 32 ? b->count - first : 32;
-                for (uint32_t element = 0; element < count; ++element) {
-                    uint64_t handle = descriptor_handle(stage, b, first + element);
-                    border_view sampled = {0};
-                    if (b->type != BT_SAMP) {
-                        VkImageView view = tex_slot(handle, b, stage, b->type == BT_CIS ? &sampled : NULL);
-                        if (!view) return VK_NULL_HANDLE;
-                        images[element].imageView = view; images[element].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-                    }
-                    if (b->type != BT_TEX) {
-                        pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20),sampled); pthread_mutex_unlock(&g_rmu);
-                    }
-                    if (b->type == BT_CIS && sampled.format == VK_FORMAT_UNDEFINED && b->num) {
-                        static VkSampler nearest;
-                        if (!nearest) { VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; VKCHECK(vkCreateSampler(g_dev, &si, NULL, &nearest)); }
-                        images[element].sampler = nearest;
-                    }
-                }
-                VkDescriptorType type = b->type == BT_CIS ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : b->type == BT_TEX ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
-                VkWriteDescriptorSet array = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, first,
-                    count, type, images, NULL, NULL};
-                vkUpdateDescriptorSets(g_dev, 1, &array, 0, NULL);
-            }
+        } else if (b->type == BT_TEX || b->type == BT_CIS) {
+            if (!write_sampled_binding(ds,b,stage,has_separate ? &binding_views[i] : NULL)) return VK_NULL_HANDLE;
             continue;
         }
         nw++;
+    }
+    for (int i = 0; i < ndeferred; ++i) {
+        int slot = deferred_samplers[i];
+        const sampler_pairs *pairs = s->sampler_images ? &s->sampler_images[slot] : NULL;
+        border_view possible = {0};
+        for (int j = 0; j < s->nb; ++j) {
+            if (!binding_views[j].format || (pairs && !(pairs->mask[j/64] & (UINT64_C(1)<<(j%64))))) continue;
+            include_border_view(&possible,binding_views[j]);
+        }
+        if (!write_sampled_binding(ds,&s->b[slot],stage,&possible)) return VK_NULL_HANDLE;
     }
     vkUpdateDescriptorSets(g_dev, (uint32_t)nw, w, 0, NULL);
     return ds;

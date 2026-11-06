@@ -1,4 +1,4 @@
 stage ps
-b 0 tex 2 tex 3 -1 - -1 view=2 num=0
 b 1 samp 2 samp_tex 10 -1 - -1
+b 0 tex 2 tex 3 -1 - -1 view=2 num=0
 b 2 ubo 1 cbuf 9 -1 - -1

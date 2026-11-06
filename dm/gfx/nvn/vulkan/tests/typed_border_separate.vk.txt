@@ -1,0 +1,9 @@
+stage cs
+tg 1 1 1
+b 4 samp 1 samp_id 1417 -1 - -1
+b 0 tex 1 tex 0 -1 - -1 view=1 num=1
+b 5 samp 1 samp_id 1417 -1 - -1
+b 1 tex 1 tex 1 -1 - -1 view=1 num=2
+b 6 samp 1 samp_id 1417 -1 - -1
+b 2 tex 1 tex 2 -1 - -1 view=1 num=0
+b 3 ssbo 1 sbuf 0 -1 - -1
