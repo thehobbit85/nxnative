@@ -13,7 +13,7 @@ from dm.tools.tests.test_nso import make_nso
 from dm.host.tests.gate.fixture import module
 
 
-def build(output, ndk, program=None, web=False, display=False, watch=False, controllers=False, keyboard=False):
+def build(output, ndk, program=None, web=False, display=False, watch=False, controllers=False, keyboard=False, motion=False):
     output.mkdir(parents=True, exist_ok=True)
     tc = ndk / 'toolchains/llvm/prebuilt' / ('darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64') / 'bin'
     asm = output / 'entry.S'
@@ -43,6 +43,9 @@ def build(output, ndk, program=None, web=False, display=False, watch=False, cont
                        web_appear='_ZN2nn3web17OfflineWebSession6AppearEv', web_exit='_ZN2nn3web17OfflineWebSession11RequestExitEv',
                        web_send='_ZN2nn3web17OfflineWebSession21TrySendContentMessageEPKcm',
                        web_recv='_ZN2nn3web17OfflineWebSession24TryReceiveContentMessageEPmPcm')
+    if motion:
+        imports['six_handles'] = '_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE'
+        imports['six_current'] = '_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE'
     if keyboard:
         imports['keyboard_show'] = '_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE'
     if controllers:
@@ -65,6 +68,7 @@ def build(output, ndk, program=None, web=False, display=False, watch=False, cont
                     *(['-DAPP_DISPLAY=1'] if display else []),
                     *(['-DAPP_CONTROLLERS=1'] if controllers else []),
                     *(['-DAPP_KEYBOARD=1'] if keyboard else []),
+                    *(['-DAPP_MOTION=1'] if motion else []),
                     *(['-DAPP_WATCH=' + str({'heap': 1, 'alias': 2, 'stack': 3}.get(watch, 1))] if watch else []),
                     '-I' + str(ROOT / 'dm/gfx/nvn'), '-I' + str(ROOT / 'dm/gfx/nvn/include'), ROOT / 'dm/android/tests/app_guest.c', asm, '-o', elf], check=True)
     symbols = {}
@@ -142,6 +146,7 @@ if __name__ == '__main__':
     p.add_argument('--watch', nargs='?', const='heap', choices=('heap', 'alias', 'stack'), help='managed write-watch diagnostic fixture')
     p.add_argument('--controllers', action='store_true', help='sample two guest controllers for the Android input test')
     p.add_argument('--keyboard', action='store_true', help='native text dialog and guest encoding checks')
+    p.add_argument('--motion', action='store_true', help='read the live six-axis sensor through the guest API')
     a = p.parse_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or --ndk')
-    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display, a.watch, a.controllers, a.keyboard)
+    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display, a.watch, a.controllers, a.keyboard, a.motion)
