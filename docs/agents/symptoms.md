@@ -406,6 +406,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Audio
 
+- the Android output callback receives valid stereo frames followed by silence before the next numbered SDK block. → [Android startup silence between the first renderer blocks](../reference/audio.md#android-startup-silence-between-the-first-renderer-blocks)
 - abort with Result 0x499 in `audio::GetAudioRendererWorkBufferSize`. → [SDK 8's longer `AudioRendererParameter`](../reference/audio.md#sdk-8s-longer-audiorendererparameter)
 - the game is silent; only the game's updates render (catch-up frames that nothing plays). The log has `audren: OpenAudioRenderer (no event)` and no `render thread started`. → [A renderer opened without an event](../reference/audio.md#a-renderer-opened-without-an-event)
 - `[RED] audren: a second renderer (the host drives only one)` with different parameters from the first open; later, `catch-up renders so far` in the thousands (7,625 in 6 minutes), about 10% of the first renderer's frames. → [A game with more than one renderer](../reference/audio.md#a-game-with-more-than-one-renderer)

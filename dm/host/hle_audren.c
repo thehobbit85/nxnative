@@ -128,7 +128,13 @@ static void render_main(void *arg) {
     void *out = dm_pcmout_open(2);
     gbuf *free_list[NBUF]; int nfree = NBUF;
     for (int i = 0; i < NBUF; i++) { a->bufs[i] = (gbuf){a->pcm[i], sizeof a->pcm[i], 0}; free_list[i] = &a->bufs[i]; }
+#ifdef __ANDROID__
+    // AAudio can request all four 240-frame blocks in its first callback. Queue
+    // the initial SDK output before starting the device, as a guest AudioOut can.
+    int prime = NBUF;
+#else
     dm_pcmout_start(out);
+#endif
     LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
     while (atomic_load(&a->open)) {
         while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
@@ -147,6 +153,9 @@ static void render_main(void *arg) {
         if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
         b->size = (uint64_t)n * 4;
         if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
+#ifdef __ANDROID__
+        else if (prime && !--prime) dm_pcmout_start(out);
+#endif
     }
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes
     cq_popped(a);   // an update waiting for queue space (catch-up pacing) sees open cleared

@@ -15,6 +15,13 @@ Check whether the SDK carries the renderer: list the `sdk` module's exports for 
 The open then goes through `CreateAudioRendererManagerByDfc`; no IPC.
 For a replaced DSP renderer the size query keeps the service's work-buffer contract; a larger local CPU representation is a backend cost. See [A sound engine's heap too small for its renderer and players](#a-sound-engines-heap-too-small-for-its-renderer-and-players).
 
+### Android startup silence between the first renderer blocks
+
+- **Symptom:** the Android output callback receives valid stereo frames followed by silence before the next numbered SDK block.
+- **Cause:** AAudio can request 960 frames in a callback. The renderer started output before it queued its four 240-frame blocks. A cold SDK or a busy emulator could leave only part of that first burst ready.
+- **Fix:** the Android renderer queues its initial blocks before starting AAudio. The buffer-release queue then paces rendering as usual.
+- **Found on:** the [Android AAudio fixture](../../dm/host/tests/t_audio_android.c) with a delayed fourth SDK block, concurrent Vulkan presentation and two CPU workers.
+
 ### SDK 8's longer `AudioRendererParameter`
 
 - **Symptom:** abort with Result 0x499 in `audio::GetAudioRendererWorkBufferSize`.
