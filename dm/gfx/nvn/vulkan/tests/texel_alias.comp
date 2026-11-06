@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=0,r32ui) coherent uniform uimageBuffer views[2];
+layout(set=0,binding=1) uniform usamplerBuffer sampled;
+layout(set=0,binding=2,std430) buffer Result { uint words[]; } result;
+layout(set=0,binding=3,std140) uniform Push { uvec4 rows[16]; } constants;
+#ifdef DYNAMIC_SLOT
+#define SHIFTED constants.rows[15].y
+#else
+#define SHIFTED 1
+#endif
+void main() {
+    int i=int(constants.rows[15].x);
+    result.words[0]=texelFetch(sampled,0).x;
+    imageStore(views[0],i,uvec4(result.words[0]+1));
+    memoryBarrierImage();
+    result.words[1]=imageAtomicAdd(views[SHIFTED],SHIFTED==1 ? 0 : i,100);
+    memoryBarrierImage();
+    result.words[2]=imageLoad(views[0],i).x;
+    result.words[3]=imageSize(views[0]);
+    result.words[4]=imageSize(views[SHIFTED]);
+    result.words[5]=textureSize(sampled);
+}
