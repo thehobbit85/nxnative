@@ -36,9 +36,7 @@ void *front_native_window(int *gen) { if (gen) *gen = atomic_load(&g_win_gen); r
 void front_window_lock(int on) { if (on) pthread_mutex_lock(&g_wmu); else pthread_mutex_unlock(&g_wmu); }
 void *front_metal_layer(void) { return NULL; }
 int front_screen_max_fps(void) { return 0; }
-int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
-    (void)title; (void)sub; (void)guide; (void)initial; (void)max_chars; (void)out; (void)out_cap; return -1;
-}
+#include "keyboard_android.h"
 // Shared host_preload initializes cheats after resolving the modules' build IDs.
 void front_run(void (*guest)(void)) { guest(); }
 
@@ -289,13 +287,16 @@ static void on_focus(ANativeActivity *a, int f) {
     if (!f) { cancel_pads(); atomic_store(&g_ovl_on, 0); }
     pthread_mutex_unlock(&g_pmu);
     if (f) immersive(a);
-    dm_focus_set(f ? 1 : 2);
+    if (f || !atomic_load(&g_keyboard_requests)) dm_focus_set(f ? 1 : 2);
 }
-static void on_destroy(ANativeActivity *a) { (void)a; dm_host_shutdown("activity destroyed"); }
+static void on_destroy(ANativeActivity *a) {
+    pthread_mutex_lock(&g_wmu); if (a == g_act) g_keyboard_live = 0; pthread_mutex_unlock(&g_wmu);
+    dm_host_shutdown("activity destroyed");
+}
 
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *a, void *saved, size_t saved_n) {
     (void)saved; (void)saved_n;
-    g_act = a;
+    pthread_mutex_lock(&g_wmu); g_act = a; g_keyboard_live = 1; pthread_mutex_unlock(&g_wmu);
     web_register(a->env, a->clazz);
     a->callbacks->onNativeWindowCreated = on_window_created; a->callbacks->onNativeWindowDestroyed = on_window_destroyed;
     a->callbacks->onNativeWindowResized = on_window_resized;

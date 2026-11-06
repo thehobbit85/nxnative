@@ -65,6 +65,9 @@ STUBS = {
     # Browser behavior has a separate actual-WebView emulator fixture. These
     # handoff cases leave the browser null; the pause/open test checks forwarding
     # of lifecycle state to a newly created browser, not WebView behavior itself.
+    'com/nxnative/GameKeyboard.java': '''package com.nxnative; class GameKeyboard {
+        GameKeyboard(GameActivity a){} void pause(boolean p){} byte[] read(String a,String b,String c,String d,int e,int f){return null;}
+    }''',
     'com/nxnative/GameControllers.java': """package com.nxnative; class GameControllers {
         GameControllers(GameActivity a){} void close(){} static boolean isController(int sources){return false;}
     }""",
