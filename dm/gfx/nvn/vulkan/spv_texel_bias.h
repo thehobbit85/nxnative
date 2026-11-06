@@ -7,13 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum { TEXEL_WORD_SHIFT=21 }; // wide scaled views use one physical RG16 texel per word
 typedef struct {
     uint32_t binding, element, texels;
     uint32_t swizzle; // 0 = identity, otherwise packed NVN mapping plus one
     uint32_t scaled; // five bits per channel width, bit 20 selects signed conversion
 } texel_bias;
 typedef struct {
-    uint32_t type, binding, index, value, vector_scalar, sparse_vector;
+    uint32_t type, binding, index, value, vector_scalar, sparse_vector, sparse_code;
     unsigned floating:1, integer:1, constant:1, affected:1, variable:1;
 } texel_id;
 typedef struct { uint32_t *w; size_t n, cap; } texel_words;
@@ -35,7 +36,7 @@ static int texel_append(texel_words *dst, const uint32_t *words, size_t n) {
 
 typedef struct {
     texel_words globals, body;
-    uint32_t next, boolean, bool4, uint_type, uint4;
+    uint32_t next, boolean, bool4, uint_type, uint4, sint_type, sint4;
 } texel_module;
 
 #define TEXEL_OP(dst, op, ...) do { \
@@ -55,27 +56,28 @@ fail:
     return 0;
 }
 
-// Return an ID with the bias selected by the original descriptor index. Zero
-// means this particular constant subscript uses an already aligned descriptor.
-static int texel_operand_bias(texel_module *m, const texel_bias *edits, size_t count,
-                              const texel_id *ids, texel_id image, uint32_t type, uint32_t *bias) {
-    *bias=0;
+// An unedited array element uses a zero prefix and one physical texel per
+// guest texel. Return a zero ID when the whole access uses that default.
+static int texel_operand_field(texel_module *m, const texel_bias *edits, size_t count, const texel_id *ids,
+                               texel_id image, uint32_t type, int stride, uint32_t *field) {
+    *field=0;
     const texel_id index=ids[image.index];
     int dynamic=image.index && !index.constant;
     if (dynamic && !index.type) return 0;
     for (size_t i=0;i<count;i++) {
         const texel_bias *e=&edits[i];
-        if (!e->texels || e->binding!=image.binding || (!dynamic && e->element!=index.value)) continue;
-        uint32_t amount=texel_constant(m,type,e->texels);
+        unsigned value=stride ? e->scaled>>TEXEL_WORD_SHIFT : e->texels;
+        if (value<=(unsigned)stride || e->binding!=image.binding || (!dynamic && e->element!=index.value)) continue;
+        uint32_t amount=texel_constant(m,type,value);
         if (!amount) return 0;
-        if (!dynamic) { *bias=amount; return 1; }
-        if (!*bias) *bias=texel_constant(m,type,0);
+        if (!dynamic) { *field=amount; return 1; }
+        if (!*field) *field=texel_constant(m,type,(unsigned)stride);
         uint32_t element=texel_constant(m,index.type,e->element);
-        if (!*bias || !element) return 0;
+        if (!*field || !element) return 0;
         uint32_t match=m->next++, selected=m->next++;
-        TEXEL_OP(&m->body,170,m->boolean,match,image.index,element); // OpIEqual
-        TEXEL_OP(&m->body,169,type,selected,match,amount,*bias);
-        *bias=selected;
+        TEXEL_OP(&m->body,170,m->boolean,match,image.index,element);
+        TEXEL_OP(&m->body,169,type,selected,match,amount,*field);
+        *field=selected;
     }
     return 1;
 fail:
@@ -131,15 +133,18 @@ fail:
     return 0;
 }
 
+#include "spv_texel_wide.inc"
+
 // Apply the mapping after conversion by the image unit. Select the result
 // per descriptor when the subscript is dynamic. A sparse fetch also returns
-// a residency code; replace only its texel member.
+// a residency code for the physical words used by that guest texel.
 static int texel_map_result(texel_module *m, const texel_bias *edits, size_t count, const texel_id *ids,
-                                texel_id image, uint32_t type, size_t instruction, int sparse) {
+                                texel_id image, const uint32_t *op, size_t instruction, uint32_t stride, int sparse) {
     const texel_id index=ids[image.index];
     int dynamic=image.index && !index.constant;
-    uint32_t vector=sparse ? ids[type].sparse_vector : type;
+    uint32_t type=op[1], vector=sparse ? ids[type].sparse_vector : type;
     uint32_t old=m->body.w[instruction+2], raw=0, value=0, result=0, constants=0;
+    texel_fetch_parts parts={0};
     for (size_t i=0;i<count;i++) {
         const texel_bias *e=&edits[i];
         if ((!e->swizzle && !e->scaled) || e->binding!=image.binding || (!dynamic && e->element!=index.value)) continue;
@@ -154,13 +159,22 @@ static int texel_map_result(texel_module *m, const texel_bias *edits, size_t cou
             raw=m->next++;
             m->body.w[instruction+2]=raw;
             value=raw;
-            if (sparse) { value=m->next++; TEXEL_OP(&m->body,81,vector,value,raw,1); }
+            if (sparse) {
+                value=m->next++; TEXEL_OP(&m->body,81,vector,value,raw,1);
+                parts.code_type=ids[type].sparse_code;
+                if (!parts.code_type) return 0;
+            }
             result=value;
         }
         uint32_t mapped=value;
         if (e->scaled) {
             uint32_t scalar=ids[vector].vector_scalar;
-            if (!ids[scalar].floating || !(mapped=texel_scaled_value(m,vector,scalar,value,e->scaled))) return 0;
+            if (!ids[scalar].floating) return 0;
+            if (e->scaled>>TEXEL_WORD_SHIFT) {
+                parts.value[0]=value;
+                mapped=texel_wide_value(m,op,instruction,ids[op[4]].type,stride,vector,scalar,e->scaled,&parts);
+            } else mapped=texel_scaled_value(m,vector,scalar,value,e->scaled);
+            if (!mapped) return 0;
         }
         if (e->swizzle) {
             uint32_t lanes[4], shuffled=m->next++;
@@ -185,6 +199,11 @@ static int texel_map_result(texel_module *m, const texel_bias *edits, size_t cou
         } else { result=mapped; break; }
     }
     if (raw) {
+        if (parts.code) {
+            uint32_t merged=m->next++;
+            TEXEL_OP(&m->body,82,type,merged,parts.code,raw,0);
+            raw=merged;
+        }
         if (sparse) { TEXEL_OP(&m->body,82,type,old,result,raw,1); } // OpCompositeInsert
         else { TEXEL_OP(&m->body,83,type,old,result); } // OpCopyObject
     }
@@ -218,11 +237,14 @@ static uint32_t *spv_texel_bias(const uint32_t *w, size_t count, const texel_bia
             ids[p[1]].vector_scalar=p[2];
             if (p[2]==m.boolean) m.bool4=p[1];
             if (p[2]==m.uint_type) m.uint4=p[1];
+            if (p[2]==m.sint_type) m.sint4=p[1];
         }
-        if (op==30 && len==4 && p[1]<bound && p[3]<bound) ids[p[1]].sparse_vector=p[3];
+        if (op==30 && len==4 && p[1]<bound && p[2]<bound && p[3]<bound) {
+            ids[p[1]].sparse_vector=p[3]; ids[p[1]].sparse_code=p[2];
+        }
         if (op==TypeInt && len==4 && p[1]<bound && p[2]==32) {
             ids[p[1]].integer=1;
-            if (p[3]==0) m.uint_type=p[1];
+            if (p[3]==0) m.uint_type=p[1]; else m.sint_type=p[1];
         }
         // A scalar result uses its integer type ID as its first operand.
         if (len>=3 && p[1]<bound && ids[p[1]].integer && p[2]<bound && op!=TypeInt) {
@@ -258,28 +280,26 @@ static uint32_t *spv_texel_bias(const uint32_t *w, size_t count, const texel_bia
         if (operand<len && p[operand]<bound && ids[p[operand]].affected) {
             uint32_t type=query ? p[1] : operand+1<len && p[operand+1]<bound ? ids[p[operand+1]].type : 0;
             if (!type || type>=bound || !ids[type].integer) { *reason="typed image needs a 32-bit coordinate or size"; goto fail; }
-            uint32_t bias;
-            if (!texel_operand_bias(&m,edits,ne,ids,ids[p[operand]],type,&bias)) goto fail;
-            if (bias && query) {
+            uint32_t bias,stride;
+            if (!texel_operand_field(&m,edits,ne,ids,ids[p[operand]],type,0,&bias) ||
+                !texel_operand_field(&m,edits,ne,ids,ids[p[operand]],type,1,&stride)) goto fail;
+            if (query && (bias || stride)) {
                 uint32_t raw=m.next++;
                 TEXEL_OP(&m.body,ImageQuerySize,type,raw,p[operand]);
-                TEXEL_OP(&m.body,130,type,p[2],raw,bias); // OpISub
+                if (bias) { uint32_t size=stride ? m.next++ : p[2]; TEXEL_OP(&m.body,130,type,size,raw,bias); raw=size; }
+                if (stride && !texel_udiv(&m,type,p[2],raw,stride)) goto fail;
                 i+=len; continue;
             }
             uint32_t adjusted=0;
-            if (bias) {
-                uint32_t coord=p[operand+1], sum=m.next++, wrap=m.next++; adjusted=m.next++;
-                TEXEL_OP(&m.body,128,type,sum,coord,bias); // OpIAdd
-                // A negative or large unsigned coordinate must never wrap
-                // around and acquire access to the hidden prefix.
-                TEXEL_OP(&m.body,176,m.boolean,wrap,sum,bias); // OpULessThan
-                TEXEL_OP(&m.body,Select,type,adjusted,wrap,coord,sum);
+            if (!query && (bias || stride)) {
+                adjusted=texel_coordinate(&m,type,p[operand+1],stride,bias);
+                if (!adjusted) goto fail;
             }
             size_t start=m.body.n;
             if (!texel_append(&m.body,p,len)) goto fail;
             if (adjusted) m.body.w[start+operand+1]=adjusted;
             if ((op==ImageFetch || op==ImageSparseFetch) && (p[1]>=bound ||
-                !texel_map_result(&m,edits,ne,ids,ids[p[operand]],p[1],start,op==ImageSparseFetch))) {
+                !texel_map_result(&m,edits,ne,ids,ids[p[operand]],p,start,stride,op==ImageSparseFetch))) {
                 *reason="unsupported sampled texel result or mapping"; goto fail;
             }
             i+=len; continue;

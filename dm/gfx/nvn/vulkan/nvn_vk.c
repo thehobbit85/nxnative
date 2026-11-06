@@ -2447,8 +2447,14 @@ static VkFormat scaled_texel_format(unsigned format,uint32_t *encoding) {
     } else {
         if (format<NVN_FORMAT_R8_UI2F || format>NVN_FORMAT_RGBA32_I2F) return VK_FORMAT_UNDEFINED;
         unsigned index=format-NVN_FORMAT_R8_UI2F, lane=(index%6)/2;
-        if (lane>1) return VK_FORMAT_UNDEFINED;
-        channels=1+index/6; sign=index&1; fallback=normalized[channels-1][lane];
+        channels=1+index/6; sign=index&1;
+        if (lane==2) {
+            // Each guest word becomes two UNORM16 lanes. A floating-point
+            // view of the original bits would lose NaNs or denormals on some GPUs.
+            *encoding=(channels<<TEXEL_WORD_SHIFT)|(sign<<20);
+            return VK_FORMAT_R16G16_UNORM;
+        }
+        fallback=normalized[channels-1][lane];
         for (unsigned c=0;c<channels;c++) widths[c]=lane ? 16 : 8;
     }
     VkFormat native=vfmt(format,NVN_CT_FLOAT);
@@ -2471,9 +2477,10 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         uint32_t scaled=0;
         if (!f.f && b->type!=BT_STB && b->num==0) f.f=scaled_texel_format(format,&scaled);
         int bw, bh, bytes = nvn_fmt_bpb(format, &bw, &bh);
+        int physical_bytes=scaled>>TEXEL_WORD_SHIFT ? 4 : bytes;
         uint64_t size = (uint64_t)tr.t.d.width * (unsigned)original_bytes;
         if (original_bytes <= 0 || original_bw != 1 || original_bh != 1 || bytes <= 0 || bw != 1 || bh != 1 || f.dec || f.depth || f.f == VK_FORMAT_UNDEFINED ||
-            !size || size % bytes || size / bytes > g_props.limits.maxTexelBufferElements || size > UINT64_MAX - (uintptr_t)tr.t.mem ||
+            !size || size % bytes || size / physical_bytes > g_props.limits.maxTexelBufferElements || size > UINT64_MAX - (uintptr_t)tr.t.mem ||
             (tr.has_v && tr.v.set_target && tr.v.target!=NVN_TEXTURE_TARGET_BUFFER)) ok=0;
         if (ok && tr.t.pool) {
             uint64_t base = (uintptr_t)tr.t.pool->mem, addr = (uintptr_t)tr.t.mem;
@@ -2485,7 +2492,7 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         int storage=b->type==BT_STB;
         if (!(fp.bufferFeatures & (storage ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT : VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT))) ok=0;
         if (ok) {
-            *out=(texel_range){.range={.addr=(uintptr_t)tr.t.mem,.size=size},.format=f.f,.bytes=(uint32_t)bytes,.scaled=scaled};
+            *out=(texel_range){.range={.addr=(uintptr_t)tr.t.mem,.size=size},.format=f.f,.bytes=(uint32_t)physical_bytes,.scaled=scaled};
             uint8_t sw[4]={2,3,4,5};
             sampled_swizzle(sw,f,&tr.t,&tr.v,tr.has_v);
             for (unsigned c=0;c<4;c++) if (sw[c]>5) sw[c]=2+c;
