@@ -357,7 +357,7 @@ static void *completion_thread(void *a) {
 }
 
 // ---------- Device ----------
-static int g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp;
+static int g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -468,6 +468,8 @@ static void vk_init_(void) {
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     g_precise_visibility = f2.features.occlusionQueryPrecise;
     g_depth_clamp = f2.features.depthClamp && !getenv("DM_VK_NO_DEPTH_CLAMP");
+    if (getenv("DM_VK_NO_DEPTH_BIAS_CLAMP")) f2.features.depthBiasClamp = VK_FALSE;
+    g_depth_bias_clamp = f2.features.depthBiasClamp;
     f13.robustImageAccess = VK_FALSE;
     const char *ext[7]; uint32_t next = 0;
     g_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
@@ -1884,7 +1886,8 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     rs.depthClampEnable = k->depth_clamp;
     rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = (VkCullModeFlags)k->poly.cull; rs.frontFace = k->poly.front ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     if (k->origin_ll) rs.frontFace = rs.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
-    rs.depthBiasEnable = k->poly.offset_en != 0; rs.lineWidth = 1;
+    rs.depthBiasEnable = (k->poly.offset_en & NVN_POLYGON_OFFSET_ENABLE_FILL) != 0;
+    rs.lineWidth = 1;
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, (VkSampleCountFlagBits)(k->samples > 1 ? k->samples : 1)};
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     if (k->df) {
@@ -2574,7 +2577,12 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     vkCmdSetViewport(cb, 0, 1, &vv);
     VkRect2D sc = render_scissor();
     vkCmdSetScissor(cb, 0, 1, &sc);
-    vkCmdSetDepthBias(cb, S.po.units, S.po.clamp, S.po.factor);
+    p_poly_offset bias = (S.poly.offset_en & NVN_POLYGON_OFFSET_ENABLE_FILL) ? S.po : (p_poly_offset){0};
+    if (bias.clamp && !g_depth_bias_clamp) {
+        RED_ONCE(109, "polygon depth bias clamp unavailable; using the unclamped bias");
+        bias.clamp = 0; // vkCmdSetDepthBias requires zero unless depthBiasClamp is enabled.
+    }
+    vkCmdSetDepthBias(cb, bias.units, bias.clamp, bias.factor);
     vkCmdSetBlendConstants(cb, S.blend_color);
     for (int f = 0; f < 2; f++) {
         VkStencilFaceFlags ff = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
