@@ -1,15 +1,19 @@
 // Vulkan can require a typed view to start before its guest address. Add the
 // prefix in texels at image accesses, and remove it from image size queries.
-// Each descriptor-array element can point at a differently aligned address.
+// A sampled texel also needs its NVN component mapping: VkBufferView has no
+// swizzle. Both properties can differ per descriptor-array element.
 #pragma once
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { uint32_t binding, element, texels; } texel_bias;
 typedef struct {
-    uint32_t type, binding, index, value;
-    unsigned integer:1, constant:1, affected:1, variable:1;
+    uint32_t binding, element, texels;
+    uint32_t swizzle; // 0 = identity, otherwise packed NVN mapping plus one
+} texel_bias;
+typedef struct {
+    uint32_t type, binding, index, value, vector_scalar, sparse_vector;
+    unsigned floating:1, integer:1, constant:1, affected:1, variable:1;
 } texel_id;
 typedef struct { uint32_t *w; size_t n, cap; } texel_words;
 
@@ -30,7 +34,7 @@ static int texel_append(texel_words *dst, const uint32_t *words, size_t n) {
 
 typedef struct {
     texel_words globals, body;
-    uint32_t next, boolean;
+    uint32_t next, boolean, bool4;
 } texel_module;
 
 #define TEXEL_OP(dst, op, ...) do { \
@@ -60,7 +64,7 @@ static int texel_operand_bias(texel_module *m, const texel_bias *edits, size_t c
     if (dynamic && !index.type) return 0;
     for (size_t i=0;i<count;i++) {
         const texel_bias *e=&edits[i];
-        if (e->binding!=image.binding || (!dynamic && e->element!=index.value)) continue;
+        if (!e->texels || e->binding!=image.binding || (!dynamic && e->element!=index.value)) continue;
         uint32_t amount=texel_constant(m,type,e->texels);
         if (!amount) return 0;
         if (!dynamic) { *bias=amount; return 1; }
@@ -71,6 +75,60 @@ static int texel_operand_bias(texel_module *m, const texel_bias *edits, size_t c
         TEXEL_OP(&m->body,170,m->boolean,match,image.index,element); // OpIEqual
         TEXEL_OP(&m->body,169,type,selected,match,amount,*bias);
         *bias=selected;
+    }
+    return 1;
+fail:
+    return 0;
+}
+
+// Apply the mapping after conversion by the image unit. Select the result
+// per descriptor when the subscript is dynamic. A sparse fetch also returns
+// a residency code; replace only its texel member.
+static int texel_swizzle_result(texel_module *m, const texel_bias *edits, size_t count, const texel_id *ids,
+                                texel_id image, uint32_t type, size_t instruction, int sparse) {
+    const texel_id index=ids[image.index];
+    int dynamic=image.index && !index.constant;
+    uint32_t vector=sparse ? ids[type].sparse_vector : type;
+    uint32_t old=m->body.w[instruction+2], raw=0, value=0, result=0, constants=0;
+    for (size_t i=0;i<count;i++) {
+        const texel_bias *e=&edits[i];
+        if (!e->swizzle || e->binding!=image.binding || (!dynamic && e->element!=index.value)) continue;
+        if (!raw) {
+            uint32_t scalar=ids[vector].vector_scalar;
+            if (!scalar || !(ids[scalar].floating || ids[scalar].integer)) return 0;
+            uint32_t zero=texel_constant(m,scalar,0);
+            uint32_t one=texel_constant(m,scalar,ids[scalar].floating ? 0x3f800000 : 1);
+            if (!zero || !one) return 0;
+            constants=m->next++;
+            TEXEL_OP(&m->globals,44,vector,constants,zero,one,zero,one); // OpConstantComposite
+            raw=m->next++;
+            m->body.w[instruction+2]=raw;
+            value=raw;
+            if (sparse) { value=m->next++; TEXEL_OP(&m->body,81,vector,value,raw,1); }
+            result=value;
+        }
+        uint32_t mapped=m->next++, lanes[4];
+        for (unsigned c=0;c<4;c++) {
+            unsigned selector=((e->swizzle-1)>>(3*c))&7;
+            if (selector>5) return 0;
+            lanes[c]=selector<2 ? selector+4 : selector-2;
+        }
+        TEXEL_OP(&m->body,79,vector,mapped,value,constants,lanes[0],lanes[1],lanes[2],lanes[3]);
+        if (dynamic) {
+            if (!index.type) return 0;
+            uint32_t element=texel_constant(m,index.type,e->element);
+            if (!element) return 0;
+            if (!m->bool4) { m->bool4=m->next++; TEXEL_OP(&m->globals,23,m->bool4,m->boolean,4); }
+            uint32_t eq=m->next++, mask=m->next++, selected=m->next++;
+            TEXEL_OP(&m->body,170,m->boolean,eq,image.index,element);
+            TEXEL_OP(&m->body,80,m->bool4,mask,eq,eq,eq,eq);
+            TEXEL_OP(&m->body,169,vector,selected,mask,mapped,result);
+            result=selected;
+        } else { result=mapped; break; }
+    }
+    if (raw) {
+        if (sparse) { TEXEL_OP(&m->body,82,type,old,result,raw,1); } // OpCompositeInsert
+        else { TEXEL_OP(&m->body,83,type,old,result); } // OpCopyObject
     }
     return 1;
 fail:
@@ -97,6 +155,12 @@ static uint32_t *spv_texel_bias(const uint32_t *w, size_t count, const texel_bia
         if (!len || len>count-i) goto fail;
         if (op==Variable && len>=4 && p[2]<bound && p[3]==0) ids[p[2]].variable=1; // UniformConstant
         if (op==TypeBool && len==2) m.boolean=p[1];
+        if (op==22 && len==3 && p[1]<bound && p[2]==32) ids[p[1]].floating=1;
+        if (op==23 && len==4 && p[1]<bound && p[2]<bound && p[3]==4) {
+            ids[p[1]].vector_scalar=p[2];
+            if (p[2]==m.boolean) m.bool4=p[1];
+        }
+        if (op==30 && len==4 && p[1]<bound && p[3]<bound) ids[p[1]].sparse_vector=p[3];
         if (op==TypeInt && len==4 && p[1]<bound && p[2]==32) ids[p[1]].integer=1;
         // A scalar result uses its integer type ID as its first operand.
         if (len>=3 && p[1]<bound && ids[p[1]].integer && p[2]<bound && op!=TypeInt) {
@@ -140,18 +204,23 @@ static uint32_t *spv_texel_bias(const uint32_t *w, size_t count, const texel_bia
                 TEXEL_OP(&m.body,130,type,p[2],raw,bias); // OpISub
                 i+=len; continue;
             }
+            uint32_t adjusted=0;
             if (bias) {
-                uint32_t coord=p[operand+1], sum=m.next++, wrap=m.next++, adjusted=m.next++;
+                uint32_t coord=p[operand+1], sum=m.next++, wrap=m.next++; adjusted=m.next++;
                 TEXEL_OP(&m.body,128,type,sum,coord,bias); // OpIAdd
                 // A negative or large unsigned coordinate must never wrap
                 // around and acquire access to the hidden prefix.
                 TEXEL_OP(&m.body,176,m.boolean,wrap,sum,bias); // OpULessThan
                 TEXEL_OP(&m.body,Select,type,adjusted,wrap,coord,sum);
-                size_t start=m.body.n;
-                if (!texel_append(&m.body,p,len)) goto fail;
-                m.body.w[start+operand+1]=adjusted;
-                i+=len; continue;
             }
+            size_t start=m.body.n;
+            if (!texel_append(&m.body,p,len)) goto fail;
+            if (adjusted) m.body.w[start+operand+1]=adjusted;
+            if ((op==ImageFetch || op==ImageSparseFetch) && (p[1]>=bound ||
+                !texel_swizzle_result(&m,edits,ne,ids,ids[p[operand]],p[1],start,op==ImageSparseFetch))) {
+                *reason="unsupported sampled texel result or mapping"; goto fail;
+            }
+            i+=len; continue;
         }
         if (!texel_append(&m.body,p,len)) goto fail;
         i+=len;

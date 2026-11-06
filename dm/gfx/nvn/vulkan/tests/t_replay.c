@@ -2731,7 +2731,7 @@ static void descriptor_lifetime(void) {
 // atomic and read must observe each other before there can be any copyback.
 static void typed_writable_aliases(void) {
     for (int split=0;split<2;split++) for (unsigned shift=1;shift<=3;shift++) {
-        uint32_t words[10], result[6]={0};
+        uint32_t words[10], result[9]={0};
         for (int i=0;i<10;i++) words[i]=0xfedcba00+i;
         uint32_t *first=words+1;
         tex_t views[2];
@@ -2740,6 +2740,8 @@ static void typed_writable_aliases(void) {
                 .d={.width=i?4:7,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_BUFFER,.format=NVN_FORMAT_R32UI}};
             nvn_tex_layout(&views[i].d,&views[i].L); mtl_reg_tex(984+i,&views[i],NULL);
         }
+        view_t maps[]={{.set_swizzle=1,.swz={2,0,2,1}},{.set_swizzle=1,.swz={2,2,1,0}}};
+        for (int i=0;i<2;i++) mtl_reg_tex(987+i,&views[i],&maps[i]);
         mtl_queue_activate(984); mtl_sub_begin(); list_t list={0};
         uint32_t values[]={30,31,32,33};
         push_constants(&list,1,240,values,sizeof values);
@@ -2752,18 +2754,18 @@ static void typed_writable_aliases(void) {
         uint32_t params[]={shift,slot,0,0}; push_constants(&list,1,240,params,sizeof params);
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&texel_alias_program,.stages=0x20);
         RECORD(OP_BIND_IMG,p_bind_handles,.stage=5,.first=0,.n=2,.h={984,985});
-        RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=1,.h={985});
+        RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=2,.h={987,988});
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)result,.size=sizeof result);
         RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
         put(&list,OP_END,NULL,0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
-        uint32_t expected[]={30,31,131,7,slot?4u:7u,4};
+        uint32_t expected[]={30,31,131,7,slot?4u:7u,slot?4u:7u,slot?30u:0u,slot?1u:30u,slot?0u:1u};
         assert(!memcmp(result,expected,sizeof result));
         for (unsigned i=0;i<10;i++) {
             uint32_t want=i>=1+shift && i<5+shift ? values[i-1-shift] : 0xfedcba00+i;
             if (i==1+shift) want=131;
             assert(words[i]==want);
         }
-        for (int i=0;i<2;i++) { mtl_reg_tex(984+i,NULL,NULL); mtl_tex_release(&views[i]); }
+        for (int i=0;i<2;i++) { mtl_reg_tex(984+i,NULL,NULL); mtl_reg_tex(987+i,NULL,NULL); mtl_tex_release(&views[i]); }
         mtl_queue_forget(984);
     }
     puts("Shifted typed views share in-dispatch writes, atomics, fetches and guest sizes");
@@ -2776,16 +2778,22 @@ static void typed_srgb(void) {
     uint32_t result[2][4][4]={0};
     tex_t t={.serial=0xad72,.mem=(uint8_t *)(data+1),.d={.width=4,.height=1,.depth=1,.levels=1,
         .target=NVN_TEXTURE_TARGET_BUFFER,.format=NVN_FORMAT_RGBA8_SRGB}};
-    nvn_tex_layout(&t.d,&t.L); mtl_reg_tex(986,&t,NULL);
+    nvn_tex_layout(&t.d,&t.L);
     // Optionally fill an entire ring before the producer. Its format views
     // must stay alive on the overflow allocation until the submission fence.
     size_t fill_bytes=64u<<20;
     uint32_t *fill=NULL;
     if (getenv("DM_VK_TEST_TEXEL_ROLLOVER")) { fill=malloc(fill_bytes); assert(fill); }
-    for (int split=0;split<2;split++) {
+    const uint8_t channels[][4]={{2,3,4,5},{4,1,2,0},{5,4,0,1},{1,4,0,1},{0,0,0,0}};
+    for (int mode=0;mode<5;mode++) for (int split=0;split<2;split++) {
+        t.d.format=mode==3 ? NVN_FORMAT_RGBX8_SRGB : NVN_FORMAT_RGBA8_SRGB;
+        t.set_swz=mode!=0; t.swz=4|(1<<3)|(2<<6); // B, one, R, zero
+        view_t view={.set_swizzle=1,.swz={5,4,0,1}};
+        if (mode==4) memset(view.swz,0,4);
+        mtl_reg_tex(986,&t,mode>=2 ? &view : NULL);
         memset(result,0xff,sizeof result); memset(data+1,0,sizeof seed);
         mtl_queue_activate(986); mtl_sub_begin(); list_t list={0};
-        if (fill) { RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)fill,.size=fill_bytes,.value=0x8745); }
+        if (fill && mode==0) { RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)fill,.size=fill_bytes,.value=0x8745); }
         push_constants(&list,1,240,seed,sizeof seed);
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(data+1),.size=sizeof seed);
@@ -2807,12 +2815,13 @@ static void typed_srgb(void) {
             for (int pass=0;pass<2;pass++) {
                 uint32_t converted=result[pass][i][0];
                 assert(result[pass][i][1]==before && result[pass][i][2]==4);
-                assert((converted>>24)==(before>>24));
-                for (int shift=0;shift<24;shift+=8) {
-                    float c=(float)((before>>shift)&255)/255;
+                int source[]={0,255,0,0,0,(int)(before>>24)};
+                for (int component=0;component<3;component++) {
+                    float c=(float)((before>>(8*component))&255)/255;
                     float linear=c<=0.04045f ? c/12.92f : powf((c+0.055f)/1.055f,2.4f);
-                    assert(abs((int)((converted>>shift)&255)-(int)lroundf(255*linear))<=1);
+                    source[2+component]=(int)lroundf(255*linear);
                 }
+                for (int c=0;c<4;c++) assert(abs((int)((converted>>(8*c))&255)-source[channels[mode][c]])<=1);
                 before=converted;
             }
             assert(data[i+1]==before);

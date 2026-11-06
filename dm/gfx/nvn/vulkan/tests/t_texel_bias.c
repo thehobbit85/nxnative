@@ -12,10 +12,10 @@ int main(int argc, char **argv) {
     rewind(f);
     uint32_t *module=malloc(bytes); assert(module);
     assert(fread(module,1,bytes,f)==(size_t)bytes); fclose(f);
-    texel_bias edits[]={{0,0,1},{0,1,3},{1,0,2}};
+    texel_bias edits[]={{0,0,1,0},{0,1,3,0},{1,0,2,1+(2|1<<9)},{1,1,3,1+(1|2<<6)}};
     size_t words=0; const char *reason;
-    assert(!spv_texel_bias(module,4,edits,3,&words,&reason));
-    uint32_t *out=spv_texel_bias(module,(size_t)bytes/4,edits,3,&words,&reason);
+    assert(!spv_texel_bias(module,4,edits,4,&words,&reason));
+    uint32_t *out=spv_texel_bias(module,(size_t)bytes/4,edits,4,&words,&reason);
     assert(out && !reason && words>(size_t)bytes/4);
     f=fopen(argv[2],"wb"); assert(f);
     assert(fwrite(out,sizeof *out,words,f)==words); assert(!fclose(f));
