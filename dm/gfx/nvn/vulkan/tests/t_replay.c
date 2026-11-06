@@ -15,6 +15,7 @@ uint64_t guest_ns(void) { return now_ns(); }
 static int test_nvn2;
 int dm_sdk_ounce(void) { return test_nvn2; }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
+static prog_t packed_program={.nstage=2};
 static prog_t restart_program={.nstage=2};
 static prog_t table_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t warp_program[2] = {{.nstage = 1}, {.nstage = 1}};
@@ -68,6 +69,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &output_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x33 + stage; return 1; }
     if (p == &driver_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x32; return 1; }
     if (p == &compute || p == &groups) { assert(stage == 0); memset(key, 0, 8); key[7] = p == &groups ? 4 : 3; return 1; }
+    if (p == &packed_program) { assert(stage < 2); memset(key,0,8); key[7]=stage ? 0x22 : 0x5b; return 1; }
     if (p == &restart_program) { assert(stage < 2); memset(key,0,8); key[7]=stage ? 0x38 : 0x5a; return 1; }
     if (p == &table_program[0] || p == &table_program[1]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x58 + (p == &table_program[1]) : 1; return 1; }
     if (p == &bindless_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x31 : 1; return 1; }
@@ -1612,6 +1614,55 @@ static void primitive_restart(void) {
     puts("NVN restart markers split strips, fans and quads across every index width and indirect draws");
 }
 
+static uint32_t packed_vertex(const int value[4]) {
+    return (uint32_t)value[0] | ((uint32_t)value[1]<<10) | ((uint32_t)value[2]<<20) | ((uint32_t)value[3]<<30);
+}
+static void packed_streams(void) {
+    tex_t out={.serial=0x3960,.d={.width=4,.height=4,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&out.d,&out.L);
+    uint32_t normalized[16]={0}, old[16]={0}, changed[18]={0};
+    uint32_t *new_stream=changed+2;
+    assert((uintptr_t)new_stream>UINT32_MAX);
+    int expected[][4]={{81,567,1019,1},{1003,72,625,3}};
+    for (int i=4;i<7;i++) {
+        normalized[2*i+1]=packed_vertex((int[]){374,491,857,2});
+        old[2*i+1]=packed_vertex(expected[0]);
+        new_stream[2*i+1]=packed_vertex(expected[1]);
+    }
+    mtl_pool_add(changed,sizeof changed);
+    for (int test=0;test<4;test++) {
+        uint8_t pixels[64]; list_t list={0}; memset(pixels,0,sizeof pixels);
+        if (test) {
+            new_stream[11]=0; // Middle vertex is GPU-produced, neighbors retain their CPU values.
+            gpu_draw_words(&list,new_stream+11,(uint32_t[]){packed_vertex(expected[1]),0,0,0},1);
+            if (test==3) { put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);mtl_sub_commit();list.length=0; }
+        }
+        RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&out,.r={.width=4,.height=4,.depth=1},.mask=15,.c.f={0,0,1,1});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&out});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&packed_program,.stages=3);
+        va_st attributes[32]={0};
+        attributes[27]=(va_st){.fmt=NVN_FORMAT_RGB10A2,.offset=4,.stream=5};
+        attributes[31]=(va_st){.fmt=NVN_FORMAT_RGB10A2UI,.offset=4,.stream=6};
+        p_bind_vattr array={.n=32};memcpy(array.st,attributes,sizeof attributes);put(&list,OP_BIND_VATTR,&array,sizeof array);
+        RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=7,.st={[5]={.stride=8},[6]={.stride=8}});
+        p_bind_vbuf full={.first=5,.n=2,.r={{(uintptr_t)normalized,sizeof normalized},{(uintptr_t)old,sizeof old}}};
+        put(&list,OP_BIND_VBUF,&full,offsetof(p_bind_vbuf,r)+2*sizeof full.r[0]);
+        if (test==1) {
+            full.first=6;full.n=1;full.r[0]=(NVNbufferRange){(uintptr_t)new_stream,16*4};
+            put(&list,OP_BIND_VBUF,&full,offsetof(p_bind_vbuf,r)+sizeof full.r[0]);
+        } else if (test>=2) RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=6,.addr=(uintptr_t)new_stream,.size=16*4);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)expected[test!=0],.size=16);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.first=4,.count=3);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&out,.src=(uintptr_t)pixels,.r={.width=4,.height=4,.depth=1});
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (int i=0;i<16;i++) if (memcmp(pixels+4*i,(uint8_t[]){0,255,0,255},4)) {
+            fprintf(stderr,"packed streams case%d pixel%d: %u,%u,%u\n",test,i,pixels[4*i],pixels[4*i+1],pixels[4*i+2]);abort();
+        }
+    }
+    mtl_pool_del(changed);mtl_tex_release(&out);
+    puts("Packed high vertex attributes and full/compact stream rebinding use current GPU bytes");
+}
+
 static void indirect_draws(void) {
     tex_t output={.serial=0x3950,.d={.width=4,.height=4,.depth=1,.levels=1,
         .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
@@ -2206,6 +2257,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DIVISORS")) { instance_divisors(); return 0; }
     if (getenv("DM_VK_TEST_BLEND_CONSTANTS")) { blend_constants(); return 0; }
     if (getenv("DM_VK_TEST_STENCIL_FACES")) { stencil_faces(); return 0; }
+    if (getenv("DM_VK_TEST_PACKED_STREAMS")) { packed_streams(); return 0; }
     if (getenv("DM_VK_TEST_RESTART")) { primitive_restart(); return 0; }
     if (getenv("DM_VK_TEST_INDIRECT_DRAWS")) { indirect_draws(); return 0; }
     if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
@@ -2230,6 +2282,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DESCRIPTOR_POOLS")) { descriptor_lifetime(); return 0; }
     descriptor_lifetime();
     if(getenv("DM_VK_TEST_SEPARATE")) { separate_descriptors();return 0; }
+    packed_streams();
     primitive_restart();
     indirect_draws();
     separate_descriptors();

@@ -1,0 +1,4 @@
+stage vs
+vin 27 0
+vin 31 2
+b 0 ubo 1 cbuf 0 -1 - -1

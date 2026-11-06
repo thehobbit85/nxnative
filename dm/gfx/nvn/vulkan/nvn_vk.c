@@ -1112,7 +1112,7 @@ static int sampler_source(const char *kind) {
 }
 typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only, table; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 typedef struct vin_module {
-    uint64_t mask;
+    vertex_classes classes;
     VkShaderModule module;
     struct vin_module *next;
 } vin_module;
@@ -1125,7 +1125,7 @@ struct shader {
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
     VkShaderModule mod; VkDescriptorSetLayout dsl;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
-    sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
+    sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask; int pack_locations;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
     uint8_t *c1; uint32_t c1_len; uint32_t tg[3];
     VkPipelineLayout cpl; VkPipeline cpp;   // compute shaders: their layout and pipeline (dispatch)
 };
@@ -1299,6 +1299,28 @@ static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s
     else *bytes=words*4;
     return biased;
 }
+static unsigned shader_location(const shader_t *s, unsigned location) {
+    return s->pack_locations ? (unsigned)__builtin_popcount(s->vin_mask & ((1u<<location)-1)) : location;
+}
+// NVN has 32 attribute locations. On a device with fewer slots a shader may
+// still fit: compact its sparse vertex inputs, leaving interpolator outputs alone.
+static int pack_vertex_locations(uint32_t *words, size_t count, const shader_t *s) {
+    if (!s->pack_locations) return 1;
+    uint8_t *input=calloc(words[3],1);
+    if (!input) return 0;
+    for (size_t i=5;i<count;i+=words[i]>>16) {
+        unsigned n=words[i]>>16, op=words[i]&0xffff;
+        if (!n || n>count-i) { free(input);return 0; }
+        if (op==59 && n>=4 && words[i+2]<words[3] && words[i+3]==1) input[words[i+2]]=1;
+    }
+    for (size_t i=5;i<count;i+=words[i]>>16) if ((words[i]&0xffff)==71 && (words[i]>>16)==4 &&
+        words[i+1]<words[3] && input[words[i+1]] && words[i+2]==30) {
+        unsigned loc=words[i+3];
+        if (loc>=32 || !(s->vin_mask & (1u<<loc))) { free(input);return 0; }
+        words[i+3]=shader_location(s,loc);
+    }
+    free(input);return 1;
+}
 static uint32_t *stage_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
     if (s->stage==0) spv=vertex_spv(spv,bytes,s);
     else if (!g_draw_parameters) {
@@ -1309,6 +1331,7 @@ static uint32_t *stage_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
     if (!spv) return NULL;
     spv=shader_bias_spv(spv,bytes,s);
     if (!spv) return NULL;
+    if (!pack_vertex_locations(spv,*bytes/4,s)) { free(spv);return NULL; }
     uint32_t set=s->stage==1?1:0;
     for (size_t i=5;i<*bytes/4;) {
         uint32_t op=spv[i]&0xffff,len=spv[i]>>16;
@@ -1321,33 +1344,35 @@ static uint32_t *stage_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
 
 // Reuse one module across PSOs that fetch the same locations in the same classes.
 // Only a new class combination reopens the vertex artifact; its bytes live for this call.
-static VkShaderModule vertex_variant(shader_t *s, uint64_t mask) {
-    for (vin_module *v = s->vertex_variants; v; v = v->next) if (v->mask == mask) return v->module;
+static VkShaderModule vertex_variant(shader_t *s, vertex_classes classes) {
+    for (vin_module *v = s->vertex_variants; v; v = v->next) if (!memcmp(&v->classes,&classes,sizeof classes)) return v->module;
     char path[1024]; size_t ns = 0, words = 0;
     snprintf(path, sizeof path, "%s/%s.spv", g_vkdir, s->key);
     uint32_t *spv = read_file(path, &ns);
     if (!spv) { LOG("[RED] vk: cannot reopen vertex shader %s", s->key); return VK_NULL_HANDLE; }
     spv = vertex_spv(spv, &ns, s);
+    if (!spv) return VK_NULL_HANDLE;
     spv = shader_bias_spv(spv, &ns, s);
     if (!spv) return VK_NULL_HANDLE;
     const char *reason;
-    uint32_t *variant = spv_vertex_fetch(spv, ns / 4, mask, s->vin, &words, &reason);
+    uint32_t *variant = spv_vertex_fetch(spv, ns / 4, classes, s->vin, &words, &reason);
     free(spv);
     VkShaderModule module = VK_NULL_HANDLE;
+    if (variant && !pack_vertex_locations(variant,words,s)) { free(variant); variant=NULL; reason="vertex input packing failed"; }
     if (variant) {
         VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, words * 4, variant};
         VkResult r = vkCreateShaderModule(g_dev, &mi, NULL, &module);
         free(variant);
         if (r != VK_SUCCESS) {
             module = VK_NULL_HANDLE;
-            LOG("[RED] vk: vertex shader %s fetch variant %#llx rejected (%d)", s->key, (unsigned long long)mask, (int)r);
+            LOG("[RED] vk: vertex shader %s fetch variant rejected (%d)", s->key, (int)r);
         }
     } else {
-        LOG("[RED] vk: vertex shader %s cannot convert input classes %#llx: %s", s->key, (unsigned long long)mask, reason);
+        LOG("[RED] vk: vertex shader %s cannot convert input classes: %s", s->key, reason);
     }
     vin_module *v = malloc(sizeof *v);
     if (!v) { if (module) vkDestroyShaderModule(g_dev, module, NULL); return VK_NULL_HANDLE; }
-    *v = (vin_module){mask, module, s->vertex_variants}; s->vertex_variants = v;
+    *v = (vin_module){classes, module, s->vertex_variants}; s->vertex_variants = v;
     return module;
 }
 // Core descriptor limits apply across the layouts in a pipeline as well as per
@@ -1495,6 +1520,14 @@ static shader_t *shader_get(const uint8_t md[8]) {
         }
         if (size) s->subgroup = (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, NULL, (uint32_t)size};
     }
+    uint32_t location_limit=g_props.limits.maxVertexInputAttributes;
+    if (getenv("DM_VK_TEST_16_ATTRIBUTES") && location_limit>16) location_limit=16;
+    if (s->stage==0 && location_limit<32 && (s->vin_mask>>location_limit)) {
+        if ((uint32_t)__builtin_popcount(s->vin_mask)>location_limit) {
+            LOG("[RED] vk: vertex shader %s needs more than the device's %u inputs",key,location_limit); free(spv);return s;
+        }
+        s->pack_locations=1;
+    }
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
     if (!spv) return s;
@@ -1604,7 +1637,7 @@ static void rp_end(VkCommandBuffer cb) { if (g_dynrend) p_end_rendering(cb); els
 static struct {
     const prog_t *bst[5], *cprog;   // the program bound to each graphics stage (NVN stage bits 1 vertex, 2 fragment, 4 geometry, 8 / 16 tessellation): games bind a program to some stages and NULL to others
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
-    va_st attr[16]; int nattr; vs_st stream[16]; int nstream; NVNbufferRange vbuf[16];
+    va_st attr[32]; int nattr; vs_st stream[16]; int nstream; NVNbufferRange vbuf[16];
     p_bind_buf ubo[6][16], ssbo[6][16];
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
@@ -1712,7 +1745,7 @@ static void set_rt(const p_set_rt *r) {
 // Pipelines, cached by everything they are built from
 typedef struct {
     shader_t *vs, *fs; int prim;
-    va_st attr[16]; int nattr; vs_st stream[16]; int nstream, split_instances;
+    va_st attr[32]; int nattr; vs_st stream[16]; int nstream, split_instances;
     blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples;
     VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll, rasterizer_discard;
 } pso_key;
@@ -1737,12 +1770,13 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
                                              {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, k->fs ? k->fs->mod : VK_NULL_HANDLE, "main", NULL}};
     if (k->vs->subgroup.requiredSubgroupSize) st[0].pNext = &k->vs->subgroup;
     if (k->fs && k->fs->subgroup.requiredSubgroupSize) st[1].pNext = &k->fs->subgroup;
-    VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[16]; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
+    VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[32]; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
     VkVertexInputBindingDivisorDescriptionEXT divisors[16]; uint32_t ndiv=0;
-    uint64_t fetch_mask = 0;
+    vertex_classes classes={0};
+    int convert_inputs=0;
     for (int i = 0; i < 32; i++) {
         if (!(k->vs->vin_mask >> i & 1)) continue;
-        if (i >= k->nattr || i >= 16 || k->attr[i].stream >= 16) {
+        if (i >= k->nattr || k->attr[i].stream >= 16) {
             LOG("[RED] vk: vertex shader %s input %d has no usable NVN attribute or stream", k->vs->key, i);
             return VK_NULL_HANDLE;
         }
@@ -1756,13 +1790,14 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
             static const VkFormat raw[] = {VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32A32_UINT};
             unsigned index = fmt - NVN_FORMAT_R32_UI2F;
             f = raw[index / 6];
-            fetch_mask |= (uint64_t)(4 + index % 2) << (4 * i);
+            classes.at[i]=(uint8_t)(4+index%2);
+            convert_inputs=1;
         } else if (!f && ct <= NVN_CT_INT) {
             // Fetch using the source class for widening, normalization and w padding.
             // The shader variant bitcasts that result back to the declared input type.
             for (unsigned c = NVN_CT_FLOAT; c <= NVN_CT_INT; c++) {
                 f = vfmt(k->attr[i].fmt, c);
-                if (f) { fetch_mask |= (uint64_t)(c + 1) << (4 * i); break; }
+                if (f) { classes.at[i]=(uint8_t)(c+1); convert_inputs=1; break; }
             }
         }
         if (!f) {
@@ -1778,11 +1813,11 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
                 k->vs->key, i, f, k->attr[i].fmt);
             return VK_NULL_HANDLE;
         }
-        va[nva++] = (VkVertexInputAttributeDescription){(uint32_t)i, k->attr[i].stream, f, k->attr[i].offset};
+        va[nva++] = (VkVertexInputAttributeDescription){shader_location(k->vs,(unsigned)i), k->attr[i].stream, f, k->attr[i].offset};
         used |= 1u << k->attr[i].stream;
     }
-    if (fetch_mask) {
-        st[0].module = vertex_variant(k->vs, fetch_mask);
+    if (convert_inputs) {
+        st[0].module = vertex_variant(k->vs, classes);
         if (!st[0].module) return VK_NULL_HANDLE;
     }
     for (int s = 0; s < 16; s++) if (used >> s & 1) {
