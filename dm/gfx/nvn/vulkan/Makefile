@@ -18,6 +18,9 @@ $(B)/t_geometry_topology: tests/t_geometry_topology.c
 $(B)/topology.spv: ../../../tools/tests/test_android_geometry_compute.py ../../../android/tools/spv_geometry.py ../../../android/tools/spv_capture.py ../../../android/tools/spv_module.py
 	mkdir -p $(B)
 	GLSLC="$(GLSLC)" python3 ../../../tools/tests/test_android_geometry_compute.py --fixture $@
+.PHONY: warp-width-fixture
+warp-width-fixture: $(B)/t_replay
+	GLSLC="$(GLSLC)" python3 ../../../tools/tests/test_android_warp_width.py --fixture "$(abspath $(B))/warp-shaders"
 .PHONY: vertex-capture-fixture vertex-capture-test
 vertex-capture-fixture: $(B)/t_shader_capture $(B)/capture.spv
 vertex-capture-test: vertex-capture-fixture
@@ -91,7 +94,7 @@ $(B)/shaders/0000000000000040.spv: tests/buffer.comp tests/buffer.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/buffer.vk.txt $(@:.spv=.vk.txt)
-$(B)/t_replay: $(SRC) tests/resource_shapes.inc ../../../android/tests/resource_shapes_cases.h tests/driver_c2.inc tests/split_handle.inc tests/uniform_storage.inc spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h shader_contract.h geometry_contract.h meshstage_contract.h uniform_address.h split_handle.h driver_c2.h driver_c0.h resource_contract.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
+$(B)/t_replay: $(SRC) tests/resource_shapes.inc ../../../android/tests/resource_shapes_cases.h tests/driver_c2.inc tests/split_handle.inc tests/uniform_storage.inc spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h shader_contract.h warp_width.h geometry_contract.h meshstage_contract.h uniform_address.h split_handle.h driver_c2.h driver_c0.h resource_contract.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile

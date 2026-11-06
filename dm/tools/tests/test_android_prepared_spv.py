@@ -42,7 +42,8 @@ class PreparedExport(unittest.TestCase):
             result = self.export(folder, out, env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue((out / 'export-contract.json').is_file())
-            self.assertIn('stage cs\ncap 1\n', (out / (key + '.vk.txt')).read_text())
+            sidecar = (out / (key + '.vk.txt')).read_text().splitlines()
+            self.assertTrue({'stage cs', 'cap 1', 'warp independent'} <= set(sidecar))
             subprocess.run([str(Path(env['PATH']) / 'spirv-val'), '--target-env', 'vulkan1.1', out / (key + '.spv')], check=True)
 
     def test_corruption_or_stale_producer_never_publishes(self):

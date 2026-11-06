@@ -8,6 +8,7 @@
 #include "geometry_contract.h"
 #include "meshstage_contract.h"
 #include "resource_contract.h"
+#include "warp_width.h"
 
 // Raster-discard vertex capture: the geometry ABI plus two helper bindings.
 typedef struct { uint32_t output_binding, control_binding; } dm_vk_capture;
@@ -70,19 +71,36 @@ static const char *dm_vk_feedback_line(const char *line, size_t n, dm_vk_feedbac
 static int dm_vk_line_is(const char *line, size_t length, const char *value) {
     return strlen(value) == length && !memcmp(line, value, length);
 }
-static const char *dm_vk_shader_contract(const char *text, size_t length, const uint32_t *words, size_t count) {
+static const char *dm_vk_shader_contract_width(const char *text, size_t length, const uint32_t *words, size_t count,
+                                               dm_vk_warp_width *required, uint32_t *local_count) {
     if (count < 5 || words[0] != 0x07230203 || words[4]) return "invalid SPIR-V header";
     if (words[1] < 0x10000 || words[1] > 0x10300 || (words[1] & 0xff)) return "incompatible SPIR-V version";
     if (memchr(text, 0, length)) return "embedded NUL in shader sidecar";
     uint32_t caps[128]; unsigned nc = 0, ne = 0, entries = 0, functions = 0;
     const char *extensions[128]; size_t extension_lengths[128];
     unsigned char cap_seen[128] = {0}, ext_seen[128] = {0};
-    int model = -1;
+    int model = -1, native_use = 0, partitioned = 0, warp_row = 0;
+    uint32_t workgroup_size = 0;
+    dm_vk_warp_width warp = {0};
     uint32_t local[3] = {0}, local_entry = 0, entry_id = 0;
     unsigned local_modes = 0;
     for (size_t at = 5; at < count;) {
         uint32_t op = words[at] & 0xffff, n = words[at] >> 16;
         if (!n || n > count - at) return "truncated SPIR-V instruction";
+        if (op >= 333 && op <= 366) native_use = 1;
+        if (op == 330 && n > 1) {
+            static const char marker[] = "nxnative.native-warp32.v1";
+            if ((n - 1) * 4 >= sizeof marker && !memcmp(words + at + 1, marker, sizeof marker)) partitioned = 1;
+        }
+        if (op == 72 && n == 5 && words[at + 3] == 11) {
+            uint32_t member = words[at + 4];
+            if ((member >= 36 && member <= 41) || (member >= 4416 && member <= 4420)) native_use = 1;
+        }
+        if (op == 71 && n == 4 && words[at + 2] == 11) {
+            uint32_t builtin = words[at + 3];
+            if (builtin == 25) workgroup_size = words[at + 1];
+            if ((builtin >= 36 && builtin <= 41) || (builtin >= 4416 && builtin <= 4420)) native_use = 1;
+        }
         if (op == 17) {
             if (n != 2 || nc == 128) return "invalid capability list";
             for (unsigned i = 0; i < nc; i++) if (caps[i] == words[at + 1]) return "duplicate module capability";
@@ -130,6 +148,9 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
             if (dm_vk_line_is(line + 6, n - 6, "ts")) mesh_kind = 1;
             else if (dm_vk_line_is(line + 6, n - 6, "ms")) mesh_kind = 2;
             if (mesh_kind ? model != 5 : !dm_vk_line_is(line + 6, n - 6, names[model])) return "shader stage does not match module";
+        } else if (n >= 5 && !memcmp(line, "warp ", 5)) {
+            if (warp_row++ || !dm_vk_warp_line(line, n, &warp)) return "invalid or duplicate subgroup width range";
+            if (warp.max > 32 && !partitioned) return "subgroup width range requires a partitioned shader";
         } else if (n >= 4 && !memcmp(line, "cap ", 4)) {
             if (n <= 4 || line[4] < '0' || line[4] > '9') return "invalid sidecar capability";
             uint32_t value = 0;
@@ -185,6 +206,31 @@ static const char *dm_vk_shader_contract(const char *text, size_t length, const 
     }
     for (unsigned i = 0; i < nc; i++) if (!cap_seen[i]) return "missing shader capability";
     for (unsigned i = 0; i < ne; i++) if (!ext_seen[i]) return "missing shader extension";
+    // Older exports have no width row. Require the guest width when a native
+    // group operation or lane input remains in their shipped instructions.
+    if (!warp_row && required) {
+        for (size_t at = 5; !native_use && at < count; at += words[at] >> 16) {
+            uint32_t op = words[at] & 0xffff, n = words[at] >> 16;
+            unsigned first, last;
+            if (op == 224 || op == 225) { first = 1; last = op == 224 ? 2 : 1; }
+            else if (op == 228 || op == 319) first = last = 2;
+            else if ((op >= 227 && op <= 242) || op == 318 || op == 5614 || op == 5615 || op == 6035) first = last = 4;
+            else continue;
+            for (unsigned i = first; i <= last && i < n; i++) {
+                const uint32_t *scope = dm_vk_warp_constant(words, at, words[at + i]);
+                if (!scope || (scope[0] >> 16) != 4 || scope[3] == 3) native_use = 1;
+            }
+        }
+        for (unsigned i = 0; i < ne; i++)
+            if (strstr(extensions[i], "subgroup") || strstr(extensions[i], "group_non_uniform") ||
+                strstr(extensions[i], "group_uniform_arithmetic") || strstr(extensions[i], "shader_ballot")) native_use = 1;
+        if (native_use) warp = (dm_vk_warp_width){32, 32};
+    }
+    if (required) *required = warp;
+    if (local_count) *local_count = model == 5 && warp.min ? dm_vk_warp_local(words, count, workgroup_size, local) : 0;
     return NULL;
+}
+static inline const char *dm_vk_shader_contract(const char *text, size_t length, const uint32_t *words, size_t count) {
+    return dm_vk_shader_contract_width(text, length, words, count, NULL, NULL);
 }
 #endif

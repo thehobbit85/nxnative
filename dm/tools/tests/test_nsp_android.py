@@ -176,7 +176,7 @@ class AndroidTarget(unittest.TestCase):
     def test_shader_reuse_hashes_lowering_tools_helpers_and_effective_options(self):
         # A cached export is observable output: a changed compiler input must
         # replace it, even when a DLL keeps the same size and mtime.
-        cases = ('optimizer', 'validator', 'dll_same_stat', 'helper', 'source', 'debug', 'precision', 'target_env', 'geometry_contract', 'mesh_contract', 'uniform_address', 'split_handle', 'driver_c2', 'driver_c0', 'resource_contract', 'driver_c2_modes')
+        cases = ('optimizer', 'validator', 'dll_same_stat', 'helper', 'source', 'debug', 'precision', 'target_env', 'geometry_contract', 'mesh_contract', 'uniform_address', 'split_handle', 'driver_c2', 'driver_c0', 'resource_contract', 'driver_c2_modes', 'warp_width')
         for change in cases:
             with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); repo = root / 'repo'; shader = root / 'shader'; shader.mkdir()
@@ -200,6 +200,7 @@ class AndroidTarget(unittest.TestCase):
                     'dm/gfx/nvn/vulkan/driver_c0.h': '// c0v0',
                     'dm/gfx/nvn/vulkan/resource_contract.h': '// resources0',
                     'dm/gfx/nvn/vulkan/driver_c2_modes.h': '// modes0',
+                    'dm/gfx/nvn/vulkan/warp_width.h': '// width0',
                 }
                 for name, content in inputs.items():
                     path = repo / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content)
@@ -234,6 +235,7 @@ class AndroidTarget(unittest.TestCase):
                     elif change == 'driver_c2': (repo / 'dm/gfx/nvn/vulkan/driver_c2.h').write_text('// c2v1')
                     elif change == 'driver_c0': (repo / 'dm/gfx/nvn/vulkan/driver_c0.h').write_text('// c0v1')
                     elif change == 'resource_contract': (repo / 'dm/gfx/nvn/vulkan/resource_contract.h').write_text('// resources1')
+                    elif change == 'warp_width': (repo / 'dm/gfx/nvn/vulkan/warp_width.h').write_text('// width1')
                     elif change == 'driver_c2_modes': (repo / 'dm/gfx/nvn/vulkan/driver_c2_modes.h').write_text('// modes1')
                     result = nsp.android_shaders(sys.executable, repo, shader, env, shader, g, 'package bytes')
                     self.assertEqual((result / (key + '.spv')).read_bytes(), b'rebuilt output')

@@ -14,6 +14,7 @@ uint64_t guest_ns(void) { return now_ns(); }
 static int test_nvn2;
 int dm_sdk_ounce(void) { return test_nvn2; }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
+static prog_t warp_program[2] = {{.nstage = 1}, {.nstage = 1}};
 static prog_t driver_program = {.nstage = 1};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
@@ -38,6 +39,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
     if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
     if (p == &c2_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x51 : 0x35; return 1; }
     if (p == &driver_c2_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x50; return 1; }
@@ -1285,7 +1287,32 @@ static void typed_graphics(void) {
 #include "split_handle.inc"
 #include "driver_c2.inc"
 #include "resource_shapes.inc"
+// Run with the maximum supported width on a known fixed- or selectable-size
+// driver. Verify both a legal quad exchange and a full-width exchange whose
+// conditional atomics must never execute when the driver cannot run it.
+static void native_warp_width(unsigned available) {
+    assert(available >= 4 && available <= 128);
+    for (unsigned test = 0; test < 2; test++) {
+        uint32_t words[64];
+        for (unsigned i = 0; i < 64; i++) words[i] = 100 + i;
+        list_t list = {0};
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &warp_program[test], .stages = 0x20);
+        RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)words, .size = sizeof words);
+        RECORD(OP_DISPATCH, p_dispatch, .x = 1, .y = 1, .z = 1);
+        put(&list, OP_END, NULL, 0);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (unsigned i = 0; i < 32; i++) {
+            int active = (!test || available >= 32) && !(i & 4);
+            assert(words[i] == 100 + i + active);
+            assert(words[32 + i] == (active ? 100 + (i ^ (test ? 16u : 3u)) : 132 + i));
+        }
+    }
+    puts("Conditional native shuffles and atomic side effects match the device subgroup width");
+}
+
 int main(void) {
+    const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
+    if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
     if (getenv("DM_VK_TEST_C0")) { compute_driver_constants(); draw_parameters(); return 0; }
     if (getenv("DM_VK_TEST_C2")) { driver_c2(); c2_sample(); return 0; }
     driver_c2(); c2_sample();
