@@ -1012,6 +1012,8 @@ static void graphics_storage(void) {
     tex_t target={.serial=0xb100,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&target.d,&target.L);
     for(int split=0;split<2;split++) {
+        mtl_queue_activate(0xb100+split);
+        mtl_set_origin_lower_left(split); mtl_set_queue_origin_lower_left(split);
         uint32_t vertices[5]={0xcafebabe,10,10,10,0xcafebabe}, fragments[66], vertex_result[3]={0}, fragment_result[64]={0};
         for(int i=0;i<66;i++) fragments[i]=i==0||i==65?0xcafebabe:20;
         uint8_t pixels[8*8*4]={0};list_t list={0};
@@ -1019,6 +1021,14 @@ static void graphics_storage(void) {
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&storage_program,.stages=3);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)(vertices+1),.size=12);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=1,.index=0,.addr=(uintptr_t)(fragments+1),.size=256);
+        // Both clipped-away draws must still execute every vertex invocation.
+        const p_scissor clipped[] = {{2,2,0,3}, {12,1,4,3}};
+        for (unsigned i=0; i<sizeof clipped/sizeof *clipped; ++i) {
+            put(&list, OP_SCISSOR, &clipped[i], sizeof clipped[i]);
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+            put(&list,OP_BARRIER,NULL,0);
+        }
+        RECORD(OP_SCISSOR,p_scissor,.x=0,.y=0,.w=8,.h=8);
         for(int draw=0;draw<3;draw++) {
             uint32_t value=20+draw;push_constants(&list,0,240,&value,sizeof value);
             RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
@@ -1034,12 +1044,14 @@ static void graphics_storage(void) {
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)fragment_result,.size=sizeof fragment_result);
         RECORD(OP_DISPATCH,p_dispatch,.x=64,.y=1,.z=1);
         put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
-        for(int i=0;i<3;i++) if(vertices[i+1]!=13||vertex_result[i]!=1013) {
-            fprintf(stderr,"graphics storage split%d vertex%d: %u/%u expected 13/1013\n",split,i,vertices[i+1],vertex_result[i]);abort();
+        for(int i=0;i<3;i++) if(vertices[i+1]!=15||vertex_result[i]!=1015) {
+            fprintf(stderr,"graphics storage split%d vertex%d: %u/%u expected 15/1015\n",split,i,vertices[i+1],vertex_result[i]);abort();
         }
         for(int i=0;i<64;i++) assert(fragments[i+1]==23 && fragment_result[i]==1023 && !memcmp(pixels+4*i,(uint8_t[]){0,255,0,255},4));
         assert(vertices[0]==0xcafebabe&&vertices[4]==0xcafebabe&&fragments[0]==0xcafebabe&&fragments[65]==0xcafebabe);
+        mtl_queue_forget(0xb100+split);
     }
+    mtl_set_origin_lower_left(0);
     mtl_tex_release(&target);
     puts("Vertex and fragment storage writes survive successive draws, compute consumers and fences");
 }
