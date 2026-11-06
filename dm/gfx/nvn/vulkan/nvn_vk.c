@@ -3120,7 +3120,7 @@ static void copy_float_depth_plane(vtex *s, vtex *d, VkImageCopy r) {
 static void copy_t2t(const p_copy_t2t *c) {
     if (vk_skip() & SK_T2T) return;
     if (g_plog) LOG("plog:  t2t %llu (fmt %#x) %dx%d → %llu (fmt %#x) %dx%d flags %#x", (unsigned long long)c->src->serial, c->src->d.format, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial, c->dst->d.format, c->dr.width, c->dr.height, c->flags);
-    vtex *s = tex_get(c->src, 0), *d = tex_get(c->dst, 1); if (!s || !d) return;
+    vtex *s = tex_get(c->src, 0), *d = tex_get(c->dst, 0); if (!s || !d) return;
     pass_end();
     p_copy_t2t whole;
     if (c->flags & DM_COPY_RESOLVE) {
@@ -3146,6 +3146,14 @@ static void copy_t2t(const p_copy_t2t *c) {
         RED_ONCE(52,"texture copy with incompatible slices or flags");
         return;
     }
+    if (s->f.dec && d->f.dec && same && !mirror && !(c->flags & DM_COPY_RESOLVE) &&
+        !s->gpu && !d->gpu && c->src->mem && c->dst->mem) {
+        if (copy_stored_blocks(c,region)) return;
+        // A dependency inside the storage copy can finish a segment.
+        s=tex_get(c->src,0); d=tex_get(c->dst,0);
+        if (!s || !d) return;
+    }
+    d->gpu = 1;
     if (src.aspectMask!=dst.aspectMask) {
         if (same && !mirror && s->samples==1 && d->samples==1 &&
             ((s->f.f==VK_FORMAT_D32_SFLOAT && d->f.f==VK_FORMAT_D32_SFLOAT_S8_UINT) ||
