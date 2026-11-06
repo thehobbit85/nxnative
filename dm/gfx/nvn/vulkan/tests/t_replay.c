@@ -739,6 +739,13 @@ static void conditional_rendering(void) {
         }
     }
     RECORD(OP_RENDER_COND, p_render_cond, .mode=3);
+    // A deferred handle read of freshly copied GPU bytes cuts the native
+    // command buffer. NVN still sees one submission with rendering disabled.
+    uint64_t handle = 0;
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&color, .src=(uintptr_t)&handle, .r={.width=2,.height=1,.depth=1});
+    RECORD(OP_BIND_TEX, p_bind_handles, .stage=1,.first=5,.n=1,.defer=1,.src=(uintptr_t)&handle);
+    RECORD(OP_SCISSOR, p_scissor, .w=8,.h=2);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .mask=15,.rgba={.125f});
     RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&color, .src=(uintptr_t)pixels, .r={.width=8,.height=2,.depth=1});
     put(&list, OP_END, NULL, 0);
     mtl_sub_begin();
