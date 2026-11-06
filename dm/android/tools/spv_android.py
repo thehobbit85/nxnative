@@ -16,6 +16,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 from dm.android.tools.target_contract import shader_contract, stamp_export
+from dm.tools import shader_lib
 from dm.android.tools.spv_module import decode, opcode, string_operand
 from dm.android.tools.spv_capture import geometry_capture
 from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
@@ -457,6 +458,13 @@ def export_prepared(directory, out, keys=None):
     print(f'Exported {len(selected)} validated Vulkan shader stages from prepared capture to {out}')
 
 
+def capture_library(cache):
+    # Successive compiler batches share one chain. Its reflection can live
+    # in a packed image or a loose build folder, sometimes both during staging.
+    library, = {shader_lib.folder_of(path) for path in cache.glob('b-*')}
+    return shader_lib.view(library)
+
+
 def export(pkg, keys, out, *, prepare_only=False):
     if not keys or any(not re.fullmatch('[0-9a-f]{16}', key) for key in keys):
         raise ValueError('expected one or more 16-digit lowercase shader keys')
@@ -493,7 +501,7 @@ def export(pkg, keys, out, *, prepare_only=False):
         with capture_cache(cas, out.parent / 'vk-metallib.db'):
             for i in range(0, len(keys), 512):
                 subprocess.run([sys.executable, TOOLS / 'own_compilers.py', pkg, cache, *keys[i:i + 512]], env=env, check=True)
-        libraries, = cache.glob('b-*')
+        libraries = capture_library(cache)
         stage_counts = collections.Counter()
         products = []
         for key in keys:

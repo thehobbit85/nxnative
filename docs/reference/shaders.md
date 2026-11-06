@@ -12,6 +12,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** eight independent mutation cases and an in-flight input mutation failed before the fix and pass afterwards. Existing product-corruption, package-change and Apple/Vulkan target-isolation checks remain in the suite.
 - **Found on:** the Android shader cache audit (synthetic inputs).
 
+### Android capture reads packed reflection
+
+- **Symptom:** Android shader export stops after the compiler succeeds with `Not a directory` at `b-<chain>.img/<key>_b.json`.
+- **Cause:** the exporter used the packed shader-library image as a filesystem directory when reading the reflection for each captured stage.
+- **Fix:** resolve the compiler's chain through `shader_lib.view` once and read each stage from that library. This also reads a loose library from an older build.
+- **Check:** `test_android_prepared_spv.py` reads the same reflection from a folder, a packed image and an image alongside a staging folder.
+- **Found on:** [Hollow Knight](../../dm/games/0100633007D48000/README.md#found-on-this-game) during a full ARM64 Android shader export.
+
 ### Portable export from prepared shaders
 
 - **Symptom:** exporting Android SPIR-V required Xcode even after translation and guest-resource reflection had already been captured.

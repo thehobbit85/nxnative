@@ -14,6 +14,24 @@ sys.path.insert(0, str(ROOT))
 from dm.android.tools.target_contract import shader_contract
 
 
+class CaptureLibrary(unittest.TestCase):
+    def test_reflection_survives_packed_compiler_output(self):
+        from dm.android.tools import spv_android
+        from dm.tools import shader_lib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            library = cache / 'b-0123456789ab'
+            library.mkdir()
+            name = '0123456789abcdef_b.json'
+            (library / name).write_text('{"stage":"cs"}')
+            self.assertEqual((spv_android.capture_library(cache) / name).read_text(), '{"stage":"cs"}')
+            self.assertTrue(shader_lib.pack(library, say=lambda *_: None))
+            self.assertEqual((spv_android.capture_library(cache) / name).read_text(), '{"stage":"cs"}')
+            library.mkdir()  # A subsequent partial compiler batch has started staging files.
+            self.assertEqual((spv_android.capture_library(cache) / name).read_text(), '{"stage":"cs"}')
+
+
 @unittest.skipUnless(all(shutil.which(t) for t in ('glslc', 'spirv-val', 'spirv-opt')), 'requires shader tools')
 class PreparedExport(unittest.TestCase):
     def fixture(self, root):
