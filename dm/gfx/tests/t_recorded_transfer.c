@@ -316,6 +316,7 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
         size_t stride = API(nvnTextureBuilderGetStorageSize)(&tb) / h;
         assert(stride > 4 * w && stride <= 128);
         NVNtexture tex;
+        dm_guest_write_prepare(storage + texture_offset, stride * h);
         memset(storage + texture_offset, 0x5e, stride * h);
         assert(API(nvnTextureInitialize)(&tex, &tb));
         uint8_t pattern[h][w * 4];
@@ -397,6 +398,55 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
     puts("Public nested fence rearmed on submission, timed out during guest writeback and published both generations");
 }
 #endif
+
+// The same command list and expected bytes run on Metal and Vulkan.
+static void check_subregion_transfers(NVNdevice *device, NVNqueue *queue, NVNmemoryPool *pool, uint8_t *storage) {
+    enum { input=0xa000, output=0xa200, consumed=0xa400, donor=0xa600, row=32, image=96, size=192 };
+    NVNbufferAddress addr=API(nvnMemoryPoolGetBufferAddress)(pool);
+    for (int mode=0; mode<3; ++mode) {
+        int volume=mode==1, bc=mode==2;
+        unsigned w=bc ? 16 : 8, h=bc ? 16 : 8;
+        NVNtextureBuilder tb;
+        API(nvnTextureBuilderSetDefaults)(&tb); API(nvnTextureBuilderSetDevice)(&tb,device);
+        API(nvnTextureBuilderSetFormat)(&tb,bc ? NVN_FORMAT_RGBA_DXT1 : NVN_FORMAT_RGBA8);
+        API(nvnTextureBuilderSetTarget)(&tb,volume ? NVN_TEXTURE_TARGET_3D : NVN_TEXTURE_TARGET_2D_ARRAY);
+        API(nvnTextureBuilderSetSize3D)(&tb,w,h,8); API(nvnTextureBuilderSetLevels)(&tb,2);
+        API(nvnTextureBuilderSetStorage)(&tb,pool,0x4000);
+        assert(API(nvnTextureBuilderGetStorageSize)(&tb)<=input-0x4000);
+        NVNtexture tex; assert(API(nvnTextureInitialize)(&tex,&tb));
+        NVNtextureView view; API(nvnTextureViewSetDefaults)(&view); API(nvnTextureViewSetLevels)(&view,1,1);
+        if (!volume) API(nvnTextureViewSetLayers)(&view,1,3);
+        NVNcopyRegion region={bc?4:1,0,1,bc?4:2,bc?8:2,2};
+        uint8_t wanted[size]; memset(wanted,0xee,size);
+        memset(storage+input,0x55,size); memset(storage+output,0xee,size); memset(storage+consumed,0x13,size);
+        API(nvnTextureWriteTexelsStrided)(&tex,&view,&region,storage+input,row,image);
+        for (int z=0; z<2; ++z) for (int y=0; y<2; ++y) for (int x=0; x<8; ++x) {
+            size_t k=z*image+y*row+x;
+            wanted[k]=storage[input+k]=17+61*z+13*y+3*x;
+        }
+        memcpy(storage+donor,wanted+image,8); memset(storage+input+image,0,8);
+        NVNcommandBuffer cb; assert(API(nvnCommandBufferInitialize)(&cb,device));
+        API(nvnCommandBufferAddCommandMemory)(&cb,pool,0,0x4000);
+        API(nvnCommandBufferBeginRecording)(&cb);
+        API(nvnCommandBufferCopyBufferToBuffer)(&cb,addr+donor,addr+input+image,8,0);
+        API(nvnCommandBufferSetCopyRowStride)(&cb,row); API(nvnCommandBufferSetCopyImageStride)(&cb,image);
+        API(nvnCommandBufferCopyBufferToTexture)(&cb,addr+input,&tex,&view,&region,0);
+        API(nvnCommandBufferCopyTextureToBuffer)(&cb,&tex,&view,&region,addr+output,0);
+        API(nvnCommandBufferCopyBufferToBuffer)(&cb,addr+output,addr+consumed,size,0);
+        NVNcommandHandle commands=API(nvnCommandBufferEndRecording)(&cb);
+        API(nvnQueueSubmitCommands)(queue,1,&commands); API(nvnQueueFinish)(queue);
+        for (size_t k=0; k<size; ++k) if (wanted[k]!=storage[output+k] || wanted[k]!=storage[consumed+k])
+            die("pitched transfer mode %d byte %zu: copied %02x consumed %02x expected %02x",mode,k,storage[output+k],storage[consumed+k],wanted[k]);
+        if (!volume) {
+            uint8_t bytes[size]; memset(bytes,0xee,sizeof bytes);
+            API(nvnTextureReadTexelsStrided)(&tex,&view,&region,bytes,row,image);
+            for (size_t k=0; k<size; ++k) if (wanted[k]!=bytes[k])
+                die("pitched transfer storage mode %d byte %zu: got %02x expected %02x",mode,k,bytes[k],wanted[k]);
+        }
+        API(nvnCommandBufferFinalize)(&cb); API(nvnTextureFinalize)(&tex);
+    }
+    puts("Public NVN pitched GPU transfers: array mip, 3D slices, original BC blocks and same-list buffer consumer passed");
+}
 
 typedef struct {
     const NVNtexture *texture;
@@ -614,6 +664,7 @@ int main(void) {
     API(nvnSyncFinalize)(&sync);
     API(nvnCommandBufferFinalize)(&cb);
     API(nvnTextureFinalize)(&tex);
+    check_subregion_transfers(&device,&queue,&pool,storage);
 #ifdef DM_VK_PUBLIC_BINDINGS
     check_linear_transfer(&device, &queue, &pool, storage);
     check_packed_texels(&device, &queue, &pool, storage);

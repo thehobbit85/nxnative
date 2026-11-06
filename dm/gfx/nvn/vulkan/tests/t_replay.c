@@ -45,6 +45,7 @@ static prog_t draw_parameters_program = {.nstage = 2};
 static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
 static const void *flushed_storage;
 // The raw replay fixture has no shared recorder or sparse guest page tables.
+int nvn_ft_tracked(uint64_t serial) { (void)serial; return 0; }
 int nvn_sparse_pool(const void *pool) { (void)pool; return 0; }
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t addr, uint64_t size) { abort(); }
 int nvn_flushed(const void *p, uint64_t n) { (void)n; return p == flushed_storage; }
@@ -590,6 +591,63 @@ static void guarded_texture_transfers(void) {
     }
     assert(munmap(mapping,8*page)==0);
     puts("Vulkan guarded pitched array and volume transfers preserved GPU and CPU source rows");
+}
+
+// BC endpoints that are not selected still belong to the guest bytes. A
+// round-trip through decoded pixels cannot reconstruct them.
+static void compressed_transfers(void) {
+    tex_t blocks={.serial=0x8fbd00,.has_layout=1,.d={.width=16,.height=8,.depth=3,.levels=2,
+        .target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA_DXT1}};
+    tex_t color={.serial=0x8fbd01,.d={.width=8,.height=4,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&blocks.d,&blocks.L); nvn_tex_layout(&color.d,&color.L);
+    blocks.mem=calloc(1,blocks.L.size); assert(blocks.mem);
+    uint32_t source[12]={0}, expected[3][4]={{0x001ff800,0,0x123407e0,0},{0x0077f800,0,0x345607e0,0},{0x993307e0,0,0x1122f800,0}};
+    assert(!nvn_swizzle(&blocks.d,1,0,expected[0],16,blocks.mem));
+    memcpy(source,expected[1],16); memcpy(source+7,expected[2],16); source[7]=0;
+    view_t slice={.set_levels=1,.base_level=1,.nlevels=1,.set_layers=1,.min_layer=1,.nlayers=2};
+    for (int i=0; i<2; ++i) {
+        view_t sample=slice; sample.set_target=1; sample.target=NVN_TEXTURE_TARGET_2D;
+        sample.min_layer=1+i; sample.nlayers=1; mtl_reg_tex(990+i,&blocks,&sample);
+    }
+    uint8_t rgba[2][32][4]={0};
+    uint32_t returned[3][4]={{0}}, forwarded[3][4]={{0}};
+    list_t list={0};
+    // An earlier fill to the destination's physical block must not publish
+    // over the later texture copy when this submission completes.
+    uint8_t *alias=blocks.mem + blocks.L.layer_size + nvn_tex_level_offset(&blocks.d,1);
+    RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)alias,.size=4,.value=0xcafebabe);
+    RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)(source+7),.size=4,.value=expected[2][0]);
+    RECORD(OP_COPY_STRIDE,p_copy_stride,.stride=24);
+    RECORD(OP_COPY_STRIDE,p_copy_stride,.image=1,.stride=28);
+    RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&blocks,.has_view=1,.view=slice,.src=(uintptr_t)source,.r={.width=8,.height=4,.depth=2});
+    RECORD(OP_COPY_STRIDE,p_copy_stride,.stride=0);
+    RECORD(OP_COPY_STRIDE,p_copy_stride,.image=1,.stride=0);
+    view_t mip={.set_levels=1,.base_level=1,.nlevels=1};
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&blocks,.has_view=1,.view=mip,.src=(uintptr_t)returned,.r={.width=8,.height=4,.depth=3});
+    uint64_t copy[]={(uintptr_t)returned,(uintptr_t)forwarded,sizeof returned}; put(&list,OP_COPY_B2B,copy,sizeof copy);
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&color});
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&feedback_program,.stages=3);
+    for (int i=0; i<2; ++i) {
+        RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1,.slot=0,.h=990+i);
+        RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1,.slot=1,.h=990+i);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&color,.src=(uintptr_t)rgba[i],.r={.width=8,.height=4,.depth=1});
+    }
+    put(&list,OP_END,NULL,0);
+    mtl_queue_activate(0x8fbd00); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    assert(!memcmp(expected,returned,sizeof expected) && !memcmp(expected,forwarded,sizeof expected));
+    for (int z=0; z<3; ++z) {
+        uint32_t pool[4]; assert(!nvn_deswizzle(&blocks.d,1,z,blocks.mem,pool,16));
+        assert(!memcmp(expected[z],pool,sizeof pool));
+    }
+    for (unsigned z=0; z<2; ++z) for (int i=0; i<32; ++i) {
+        int red = (i%8<4) != z;
+        uint8_t want[]={red?255:0,red?255:0,red?0:255,255};
+        assert(!memcmp(rgba[z][i],want,4));
+    }
+    mtl_reg_tex(990,NULL,NULL); mtl_reg_tex(991,NULL,NULL);
+    mtl_tex_release(&color); mtl_tex_release(&blocks); free(blocks.mem); mtl_queue_forget(0x8fbd00);
+    puts("Vulkan compressed block transfers preserved guest bytes, decoded pixels and same-list consumers");
 }
 
 // The shader reports all four fetched register words. Green means a faithful fetch,
@@ -2546,7 +2604,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_PACKED_STREAMS")) { packed_streams(); return 0; }
     if (getenv("DM_VK_TEST_RESTART")) { primitive_restart(); return 0; }
     if (getenv("DM_VK_TEST_INDIRECT_DRAWS")) { indirect_draws(); return 0; }
-    if (getenv("DM_VK_TEST_BUFFER_IMAGE")) { guarded_texture_transfers(); return 0; }
+    if (getenv("DM_VK_TEST_BUFFER_IMAGE")) { guarded_texture_transfers(); compressed_transfers(); return 0; }
     if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
@@ -2612,6 +2670,7 @@ int main(void) {
     registered_images();
     strided_layers();
     guarded_texture_transfers();
+    compressed_transfers();
     queue_lifetime();
     origin_facing();
     queue_viewport_origin();

@@ -4,9 +4,10 @@
 int nvn_sparse_pool(const void *pool);
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t addr, uint64_t size);
 
-static void storage_bytes(const tex_t *t, int sparse, size_t offset, void *dst, size_t n) {
-    if (sparse) nvn_sparse_copy(t->pool, dst, (uintptr_t)t->mem + offset, n);
-    else memcpy(dst, t->mem + offset, n);
+static void storage_bytes(const tex_t *t, int sparse, size_t offset, uint8_t *linear, size_t n, int write) {
+    if (write) memcpy(t->mem + offset, linear, n);
+    else if (sparse) nvn_sparse_copy(t->pool, linear, (uintptr_t)t->mem + offset, n);
+    else memcpy(linear, t->mem + offset, n);
 }
 
 typedef struct {
@@ -35,16 +36,20 @@ static int texel_region(const tex_t *t, unsigned level, unsigned layer0, const N
     return 1;
 }
 
-static int storage_texels(const tex_t *t, unsigned level, uint8_t *dst, size_t row, size_t img, texel_extent ext) {
+static int storage_texels(const tex_t *t, unsigned level, uint8_t *linear, size_t row, size_t img, texel_extent ext, int write) {
     if (!t->mem) return 0;
     size_t x0 = ext.x0, y0 = ext.y0, width = ext.bytes, rows = ext.rows;
     uint32_t nz = ext.nz, layer = ext.layer;
     int volume = ext.volume;
     int sparse = t->pool && nvn_sparse_pool(t->pool);
+    if (write) {
+        if (sparse) return 0;
+        dm_guest_write_prepare(t->mem, t->L.size);
+    }
     if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {
         size_t stride = t->L.layer_size / (t->d.height ? t->d.height : 1);
         if (level || layer || nz != 1 || x0 + width > stride) return 0;
-        for (size_t y = 0; y < rows; ++y) storage_bytes(t, sparse, (y0 + y) * stride + x0, dst + y * row, width);
+        for (size_t y = 0; y < rows; ++y) storage_bytes(t, sparse, (y0 + y) * stride + x0, linear + y * row, width, write);
         return 1;
     }
     for (uint32_t z = 0; z < nz; ++z) {
@@ -62,7 +67,7 @@ static int storage_texels(const tex_t *t, unsigned level, uint8_t *dst, size_t r
             if (count > width - x) count = width - x;
             uint64_t offset = base + nvn_bl_offset(bx, y0 + y, volume ? layer + z : 0, pitch, block_rows, th, td);
             if (offset > t->L.size || count > t->L.size - offset) return 0;
-            storage_bytes(t, sparse, offset, dst + z * img + y * row + x, count);
+            storage_bytes(t, sparse, offset, linear + z * img + y * row + x, count, write);
             x += count;
         }
     }
