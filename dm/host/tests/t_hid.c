@@ -162,6 +162,17 @@ static void t_npads(void) {
     CHECK(info[0] == 2 && info[1] == NPAD_HANDHELD, "handheld: the applet selects the handheld controller");
 }
 
+static void t_cancel_pad(void) {
+    uint64_t buttons; int32_t axes[4];
+    dm_input_peek(&buttons, axes);
+    dm_pad_set_player(1, DM_BTN_A, 500, 0, 0, 0);
+    dm_pad_set_player(0, DM_BTN_B, 0, 0, 0, 0); dm_pad_set_player(0, 0, 0, 0, 0, 0);
+    dm_pad_cancel_player(1);
+    CHECK(buttons_of(1, STYLE_FULLKEY) == 0 && lx_of(1) == 0, "unplug with an unread press clears that player's guest sample");
+    dm_input_peek(&buttons, axes);
+    CHECK(buttons == DM_BTN_B && axes[0] == 0, "an applet retains the other player's tap across cancellation");
+}
+
 static dm_haptic_state vibration[DM_PLAYERS];
 static int vibration_calls;
 static void vibration_sink(dm_haptic_state s) { vibration[s.player] = s; vibration_calls++; }
@@ -514,6 +525,7 @@ int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
     t_npads();
+    t_cancel_pad();
     t_script();
     t_vibration();
     t_rumble_log();
