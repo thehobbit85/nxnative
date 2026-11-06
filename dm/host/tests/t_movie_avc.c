@@ -192,18 +192,18 @@ int main(void) {
     for (unsigned profile = 100; profile <= 244; profile += 144) for (unsigned chroma = 0; chroma <= 3; chroma++) {
         for (int scaling = 0; scaling < 2; scaling++) {
             size_t n = sps(&w, profile, 2, chroma, scaling);
-            assert(avc_sps(w.p, n, NULL, NULL) == 0);
-            for (size_t cut = 0; cut < n; cut++) assert(avc_sps(w.p, cut, NULL, NULL) == 4);
+            assert(avc_sps(w.p, n, NULL) == 0);
+            for (size_t cut = 0; cut < n; cut++) assert(avc_sps(w.p, cut, NULL) == 4);
         }
     }
     for (unsigned poc = 0; poc <= 1; poc++) {
         size_t n = sps(&w, 100, poc, 1, 0);
-        assert(avc_sps(w.p, n, NULL, NULL) == 4);
+        assert(avc_sps(w.p, n, NULL) == 4);
     }
-    size_t n = sps(&w, 66, 0, 1, 0); assert(avc_sps(w.p, n, NULL, NULL) == 0);
+    size_t n = sps(&w, 66, 0, 1, 0); assert(avc_sps(w.p, n, NULL) == 0);
     memset(w.p, 0, sizeof w.p); w.p[0] = 0x67; w.p[1] = 100;
-    assert(avc_sps(w.p, sizeof w.p, NULL, NULL) == 4); // unterminated Exp-Golomb code
-    assert(avc_sps(w.p, sizeof w.p + 1, NULL, NULL) == 4);
+    assert(avc_sps(w.p, sizeof w.p, NULL) == 4); // unterminated Exp-Golomb code
+    assert(avc_sps(w.p, sizeof w.p + 1, NULL) == 4);
 
     mavc *a = mavc_new(); uint8_t out[16 * 16 * 3 / 2]; int64_t pts = -1;
     n = sps(&w, 100, 2, 1, 0); keep_ps(a, w.p, n); queue_picture(a);

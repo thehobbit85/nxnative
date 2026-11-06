@@ -14,12 +14,15 @@
 #endif
 #include "hle_movie_avc.h"
 
+typedef struct { int w, h, full_range; } avc_picture_info;
+
 #define QMAX 16
 struct mavc {
     uint8_t sps[512], pps[512]; int nsps, npps, dirty;
 #ifdef __ANDROID__
     media_stream stream;
-    int coded_w, coded_h, nq, fed_picture, output_standard, output_full;
+    avc_picture_info coded;
+    int nq, fed_picture, output_standard, output_full;
     int64_t max_pts;
     struct avc_frame *first, *last;
 #else
@@ -50,7 +53,8 @@ void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a
 #endif
 int mavc_queued(const mavc *a) { return a->nq; }
 
-// Read only the SPS prefix through pic_order_cnt_type (H.264 7.4.2.1.1, 8.2.1.3).
+// Read the SPS through pic_order_cnt_type for reordering. MediaCodec also
+// needs the coded size and VUI full-range flag (H.264 7.4.2.1.1, Annex E).
 // CRI Sofdec2 waits for every picture; holding four merely because profile_idc
 // is High made the final picture arrive with EOS, which its player discards.
 // Other POC modes keep the existing depth; a truncated/unsupported SPS does too.
@@ -66,7 +70,8 @@ static unsigned avc_ue(avc_bits *b) {
     while (!b->bad && !avc_u(b, 1)) if (++z > 30) { b->bad = 1; return 0; }
     return b->bad ? 0 : ((1u << z) - 1) + avc_u(b, z);
 }
-static int avc_sps(const uint8_t *nal, size_t n, int *width, int *height) {
+static int avc_sps(const uint8_t *nal, size_t n, avc_picture_info *picture) {
+    if (picture) *picture = (avc_picture_info){0};
     int fallback = n > 1 && nal[1] == 66 ? 0 : 4;
     if (n < 4 || n > 512 || (nal[0] & 31) != 7) return fallback;
     avc_bits b = {0};
@@ -99,7 +104,7 @@ static int avc_sps(const uint8_t *nal, size_t n, int *width, int *height) {
     if (avc_ue(&b) > 12) return fallback; // log2_max_frame_num_minus4
     unsigned poc = avc_ue(&b);
     int depth = !b.bad && poc == 2 ? 0 : fallback;
-    if (!width || !height || poc > 2) return depth;
+    if (!picture || poc > 2) return depth;
     if (!poc) avc_ue(&b);
     if (poc == 1) {
         avc_u(&b, 1); avc_ue(&b); avc_ue(&b); // signed Exp-Golomb offsets have the same length
@@ -110,7 +115,17 @@ static int avc_sps(const uint8_t *nal, size_t n, int *width, int *height) {
     avc_ue(&b); avc_u(&b, 1);
     unsigned wm = avc_ue(&b), hm = avc_ue(&b), frame_only = avc_u(&b, 1);
     if (!b.bad && wm < 1024 && hm < 1024) {
-        *width = 16 * (wm + 1); *height = 16 * (hm + 1) * (2 - frame_only);
+        picture->w = 16 * (wm + 1); picture->h = 16 * (hm + 1) * (2 - frame_only);
+        if (!frame_only) avc_u(&b, 1); // mb_adaptive_frame_field_flag
+        avc_u(&b, 1); // direct_8x8_inference_flag
+        if (avc_u(&b, 1)) for (int i = 0; i < 4; i++) avc_ue(&b); // frame crop offsets
+        if (!avc_u(&b, 1)) return depth; // no VUI
+        if (avc_u(&b, 1) && avc_u(&b, 8) == 255) avc_u(&b, 32); // extended aspect ratio
+        if (avc_u(&b, 1)) avc_u(&b, 1); // overscan
+        if (avc_u(&b, 1)) {
+            avc_u(&b, 3); // video_format
+            picture->full_range = avc_u(&b, 1) && !b.bad;
+        }
     }
     return depth;
 }
@@ -122,10 +137,9 @@ static void keep_ps(mavc *a, const uint8_t *nal, size_t n) {   // a parameter se
     memcpy(dst, nal, n); *dn = (int)n; a->dirty = 1;
     if (t == 7) {
 #ifdef __ANDROID__
-        a->coded_w = a->coded_h = 0;
-        avc_sps(nal, n, &a->coded_w, &a->coded_h);
+        avc_sps(nal, n, &a->coded);
 #else
-        a->depth = avc_sps(nal, n, NULL, NULL);
+        a->depth = avc_sps(nal, n, NULL);
 #endif
     }
 }

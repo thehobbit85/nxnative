@@ -39,6 +39,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** `md_format` sets the key from the stream, by the rule native-texture output already uses for its own conversion: the matrix the stream declares (the H.264 format description's `YCbCrMatrix`, the VP9 colour config), undeclared BT.709 from 720 lines up. H.264 pictures are reported as limited range, since VideoToolbox gives video range NV12 whatever the stream's range; VP8 and VP9 report the stream's range.
 - **Found on:** [Kirby Star Allies](../../dm/games/01007E3006DDA000/README.md): the opening movie and the movie after the first file start.
 
+### H.264 range changes on Android
+
+- **Symptom:** a movie changes colour when the player reads an older output buffer, or full-range video appears washed out on the Android emulator.
+- **Cause:** the guest's buffer-format query read the latest decoder matrix and range for every output index. Separately, the Goldfish H.264 decoder returned limited-range samples labelled full range.
+- **Fix:** keep the matrix and range with each decoded guest slot for both buffer-format getters. For full-range streams on Goldfish, select the AOSP software decoder using the SPS range flag.
+- **Found on:** the ARM64 API 35 emulator. `t_android_movie_avc` holds two consecutive synthetic BT.601 limited and BT.709 full sequences, reads the buffers in reverse and checks their metadata and NV12 planes.
+
 ### SDK 4's `movie::Decoder` constructor without a priority
 
 - **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` right after `nnMain` starts the logos.

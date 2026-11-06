@@ -99,6 +99,7 @@ typedef struct {
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
 #ifdef __ANDROID__
     media_stream aac; struct pcm_chunk *pcm_first, *pcm_last;
+    int avc_color, avc_slot_color[MD_NOUT]; // matrix/range returned with each decoded output, guarded by mu
 #else
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
 #endif
@@ -459,7 +460,14 @@ static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     if (d->w <= 0 || d->h <= 0) return 0;
     size_t need = (size_t)d->w * d->h * (d->fmt == MD_FMT_ABGR ? 4 : 3) / (d->fmt == MD_FMT_ABGR ? 1 : 2);
     if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
-    return mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
+    int got = mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
+#ifdef __ANDROID__
+    if (got) {
+        int color = (mavc_bt709(d->avc, d->h) ? 3 : 1) + mavc_fullrange(d->avc);
+        dm_host_mutex_lock(&d->mu); d->avc_slot_color[slot] = d->avc_color = color; pthread_mutex_unlock(&d->mu);
+    }
+#endif
+    return got;
 }
 static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } md_aac_close(d); if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
 #ifndef __ANDROID__
@@ -714,6 +722,9 @@ static void md_reset(mdec_t *d, int close) {
 #endif
     if (d->avc) mavc_drop(d->avc);   // H.264 pictures waiting for their turn belong to the old position
     dm_host_mutex_lock(&d->mu);
+#ifdef __ANDROID__
+    d->avc_color = 0;
+#endif
     // Every input goes back to the free list, as with MediaCodec, but one the client holds may still be sent: Big Brain Academy: Brain vs. Brain's event thread acquires inputs while its
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
     uint64_t now = now_ns();
@@ -823,7 +834,7 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
 }
-static void md_format(mdec_t *d, void *md) {
+static void md_format(mdec_t *d, void *md, int slot) {
     if (MD_AUDIO(d)) { G.set_i32(md, "channel-count", d->ch > 0 ? d->ch : 2); G.set_i32(md, "sample-rate", d->rate > 0 ? d->rate : 48000); return; }
     int w, h, stride, slice; md_dims(d, &w, &h, &stride, &slice);
     G.set_i32(md, "width", w); G.set_i32(md, "height", h);
@@ -835,6 +846,15 @@ static void md_format(mdec_t *d, void *md) {
     // every chroma row was read from the first one (a grey movie with vertical bands). The picture size again, as the SDK's DecoderImpl::GetOutputBufferFormatFromDecoder
     // (SDK 19 subsdk0+0x121f50) also sets it
     G.set_i32(md, "nv12-uv-stride", stride); G.set_i32(md, "nv12-width", w); G.set_i32(md, "nv12-height", h);
+#ifdef __ANDROID__
+    if (d->type == MD_TYPE_AVC) {
+        dm_host_mutex_lock(&d->mu);
+        int color = (unsigned)slot < (unsigned)d->nout && d->out[slot].pic ? d->avc_slot_color[slot] : d->avc_color;
+        pthread_mutex_unlock(&d->mu);
+        G.set_i32(md, "nv12-colorspace", color ? color : h >= 720 ? 3 : 1);
+        return;
+    }
+#endif
     // The picture's colour space, as DecoderImpl::GetOutputBufferFormatFromDecoder (SDK 4 subsdk0+0x2d8c60) sets it: the hardware decoder's hw-buf-ColorSpace / 32 + 1, 1 to 5. Kirby Star Allies' player
     // (main+0x1529f8) indexes its YUV → RGB matrices with it: 1 BT.601 limited range, 2 BT.601 full, 3 BT.709 limited, 4 BT.709 full, 5 BT.601 limited; anything else, an unset key too, selects an
     // all-zero matrix, which drew its movies black. By the rule md_rgba uses: what the stream declares, undeclared BT.709 from 720 lines up. VideoToolbox's H.264 pictures are always video range (open_session)
@@ -846,13 +866,13 @@ static void md_format(mdec_t *d, void *md) {
 HLE_FORCE("_ZN5movie7Decoder15GetOutputFormatEPNS_9MediaDataE", "movie decoder: output format (NV12)", int, h_movie_OutFmt, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (!md) return 0x100b;
-    md_format(d, md); MD_TRACE(d, 9, "GetOutputFormat");
+    md_format(d, md, -1); MD_TRACE(d, 9, "GetOutputFormat");
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder21GetOutputBufferFormatEiPNS_9MediaDataE", "movie decoder: output frame format (NV12)", int, h_movie_BufFmt, void **self, int i, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (!md) return 0x100b;
-    md_format(d, md); MD_TRACE(d, 10, "GetOutputBufferFormat index %d", i);
+    md_format(d, md, i); MD_TRACE(d, 10, "GetOutputBufferFormat index %d", i);
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder19GetOutputBufferSizeEPiS1_", "movie decoder: output buffer size (one NV12 frame)", int, h_movie_OutSize, void **self, int *size, int *mode) {
@@ -952,7 +972,7 @@ HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: ge
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferEPNS_9MediaDataE", "movie decoder: get a frame with its format", int, h_movie_GetOutFmt, void **self, int i, void *buf, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
-    if (md) md_format(d, md);
+    if (md) md_format(d, md, i);
     return h_movie_GetOut(self, i, buf);
 }
 // Return output slot i to the decoder, if the client holds it. One it does not hold (released already, or returned by a Flush) is left alone: MediaCodec refuses it (-EACCES),

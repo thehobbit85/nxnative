@@ -20,21 +20,43 @@ void mavc_free(mavc *a) { if (a) { mavc_drop(a); free(a->au); free(a); } }
 void mavc_set_rgba(mavc *a) { a->rgba = 1; }
 static int avc_ready(const void *);
 static int copy_picture(void *, AMediaFormat *, const uint8_t *, size_t, int64_t);
+static int avc_start(AMediaCodec *codec, AMediaFormat *f) {
+    return codec && AMediaCodec_configure(codec, f, NULL, NULL, 0) == AMEDIA_OK && AMediaCodec_start(codec) == AMEDIA_OK;
+}
+static AMediaCodec *avc_decoder(AMediaFormat *f, int full_range) {
+    AMediaCodec *codec = AMediaCodec_createDecoderByType("video/avc");
+    char *name = NULL;
+    if (full_range && codec && AMediaCodec_getName(codec, &name) == AMEDIA_OK) {
+        int bridge = !strcmp(name, "c2.goldfish.h264.decoder");
+        AMediaCodec_releaseName(codec, name);
+        // Goldfish converts full-range samples to limited while still labelling them full.
+        // Its AOSP software decoder preserves both. Keep the default for limited-range
+        // streams and other drivers, and fall back if the codec cannot start this profile.
+        if (bridge) {
+            AMediaCodec *software = AMediaCodec_createCodecByName("c2.android.avc.decoder");
+            if (avc_start(software, f)) { AMediaCodec_delete(codec); return software; }
+            if (software) AMediaCodec_delete(software);
+            LOG("[RED] movie: AOSP AVC decoder unavailable; emulator bridge may mislabel full-range output");
+        }
+    }
+    if (avc_start(codec, f)) return codec;
+    if (codec) AMediaCodec_delete(codec);
+    return NULL;
+}
 static int open_session(mavc *a) {
-    if (!a->coded_w || !a->coded_h || !a->npps) return 0;
+    if (!a->coded.w || !a->coded.h || !a->npps) return 0;
     AMediaFormat *f = AMediaFormat_new();
     if (!f) return 0;
     uint8_t c0[516] = {0,0,0,1}, c1[516] = {0,0,0,1};
     memcpy(c0 + 4, a->sps, a->nsps); memcpy(c1 + 4, a->pps, a->npps);
     AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, "video/avc");
-    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, a->coded_w);
-    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, a->coded_h);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, a->coded.w);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, a->coded.h);
     AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 19); // OMX_COLOR_FormatYUV420Planar
     AMediaFormat_setBuffer(f, "csd-0", c0, a->nsps + 4); AMediaFormat_setBuffer(f, "csd-1", c1, a->npps + 4);
-    a->stream = (media_stream){.codec=AMediaCodec_createDecoderByType("video/avc"), .owner=a, .copy=copy_picture, .ready=avc_ready};
-    int ok = a->stream.codec && AMediaCodec_configure(a->stream.codec, f, NULL, NULL, 0) == AMEDIA_OK && AMediaCodec_start(a->stream.codec) == AMEDIA_OK;
+    a->stream = (media_stream){.codec=avc_decoder(f, a->coded.full_range), .owner=a, .copy=copy_picture, .ready=avc_ready};
     AMediaFormat_delete(f);
-    if (!ok) { close_session(a); return 0; }
+    if (!a->stream.codec) { close_session(a); return 0; }
     a->dirty = 0; return 1;
 }
 static int avc_ready(const void *owner) { return ((const mavc *)owner)->first != NULL; }
