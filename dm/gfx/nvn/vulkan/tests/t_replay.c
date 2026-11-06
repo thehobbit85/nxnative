@@ -1417,6 +1417,41 @@ static void texture_copy_regions(void) {
     puts("Vulkan texture copies preserve 3D slices and array layers, convert RGBA to RG and mirror both axes");
 }
 
+// R11G11B10F is renderable on the Android test driver but lacks BLIT_DST.
+// Copy two source layers into a subrectangle of a nonzero mip; the blue
+// channel distinguishes layers and the untouched green border guards writes.
+static void hdr_scaled_copies(void) {
+    tex_t src={.serial=0x8fbe00,.d={.width=2,.height=2,.depth=2,.levels=1,.target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_R11G11B10F}};
+    tex_t dst=src; dst.serial++; dst.d.width=dst.d.height=12; dst.d.depth=4; dst.d.levels=2;
+    nvn_tex_layout(&src.d,&src.L); nvn_tex_layout(&dst.d,&dst.L);
+    uint32_t pixels[2][2][2], got[2][4][6][6], initial[4][6][6];
+    const uint32_t green=0x3c0u<<11;
+    for (int z=0; z<2; ++z) for (int y=0; y<2; ++y) for (int x=0; x<2; ++x)
+        pixels[z][y][x]=(x?0x3c0u:0) | (y?green:0) | ((z?0x1c0u:0x1e0u)<<22);
+    for (int z=0; z<4; ++z) for (int y=0; y<6; ++y) for (int x=0; x<6; ++x) initial[z][y][x]=green;
+    view_t mip={.set_levels=1,.base_level=1,.nlevels=1}, slice=mip; slice.set_layers=1; slice.min_layer=1; slice.nlayers=2;
+    list_t list={0};
+    RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&src,.src=(uintptr_t)pixels,.r={.width=2,.height=2,.depth=2});
+    for (int linear=0; linear<2; ++linear) {
+        RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&dst,.has_view=1,.view=mip,.src=(uintptr_t)initial,.r={.width=6,.height=6,.depth=4});
+        RECORD(OP_COPY_T2T,p_copy_t2t,.src=&src,.dst=&dst,.has_dv=1,.dv=slice,
+               .flags=NVN_COPY_FLAGS_MIRROR_X_BIT|NVN_COPY_FLAGS_MIRROR_Y_BIT|(linear?NVN_COPY_FLAGS_LINEAR_FILTER_BIT:0),
+               .sr={.width=2,.height=2,.depth=2},.dr={.xoffset=1,.yoffset=1,.width=4,.height=4,.depth=2});
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&dst,.has_view=1,.view=mip,.src=(uintptr_t)got[linear],.r={.width=6,.height=6,.depth=4});
+    }
+    put(&list,OP_END,NULL,0); mtl_queue_activate(0x8fbe00);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    const uint32_t levels[2][4]={{0x3c0,0x3c0,0,0},{0x3c0,0x3a0,0x340,0}};
+    for (int linear=0; linear<2; ++linear) for (int z=0; z<4; ++z) for (int y=0; y<6; ++y) for (int x=0; x<6; ++x) {
+        uint32_t want=green;
+        if ((z==1 || z==2) && x>=1 && x<=4 && y>=1 && y<=4)
+            want=levels[linear][x-1] | (levels[linear][y-1]<<11) | ((z==1?0x1e0u:0x1c0u)<<22);
+        if (got[linear][z][y][x]!=want) die("HDR %s layer %d (%d,%d) returned %#x expected %#x",linear?"linear":"nearest",z,x,y,got[linear][z][y][x],want);
+    }
+    mtl_tex_release(&src); mtl_tex_release(&dst); mtl_queue_forget(0x8fbe00);
+    puts("Vulkan packed HDR nearest and bilinear copies preserved mip, layer and border pixels");
+}
+
 static void stencil_faces(void) {
     tex_t packed={.serial=0x8170,.d={.width=4,.height=2,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_DEPTH32F_STENCIL8}};
     tex_t color=packed; color.serial++; color.d.format=NVN_FORMAT_R32F;
@@ -2631,7 +2666,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_RESTART")) { primitive_restart(); return 0; }
     if (getenv("DM_VK_TEST_INDIRECT_DRAWS")) { indirect_draws(); return 0; }
     if (getenv("DM_VK_TEST_BUFFER_IMAGE")) { guarded_texture_transfers(); compressed_transfers(); return 0; }
-    if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
+    if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); hdr_scaled_copies(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
@@ -2678,7 +2713,7 @@ int main(void) {
     buffer_range_lifetime();
     ordered_buffers();
     draw_parameters();
-    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies(); stencil_faces(); blend_constants(); instance_divisors();
+    texture_copy_regions(); hdr_scaled_copies(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies(); stencil_faces(); blend_constants(); instance_divisors();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);

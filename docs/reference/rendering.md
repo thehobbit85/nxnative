@@ -1290,6 +1290,8 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ### Copies a blit cannot do, drawn
 
+- **Android Vulkan.** Link’s Awakening uses the packed HDR format R11G11B10F. Android llvmpipe supports sampling and rendering to this format but does not advertise it as a blit destination. A scaled or mirrored color copy can instead draw into the selected destination mip and layer. The replay checks exact packed nearest and bilinear pixels on two layers, both mirror axes and unchanged pixels around the destination rectangle.
+
 - **Symptom:** a scaled texture copy skipped with a red line (Metal blits cannot scale); format-changing, depth-stencil and mirrored copies.
 - **Fix:** such copies (a format change, a scaled region or a mirrored one) are drawn (`copy_t2t_draw`, Depth16Unorm as well since Kirby Air Riders' far shadow mips), one render pass per layer; a destination made without render-target use is upgraded first ([Render-target use added on demand](#render-target-use-added-on-demand)); depth and stencil are written from a fragment shader, stencil through `[[stencil]]` export from an `X32_Stencil8` view of the source.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md): RG11B10F → RGBA16F every frame, half-size depth-stencil copies, and a scaled `MIRROR_Y` copy of the frame to 1280×720 RGBA8. [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md): one scaled copy when leaving the title (1920×1080 → 1280×720, RGB10A2, flags `ENGINE_2D`; probably the captured frame for the transition): 04 listed it as open (skipped with a red line); `copy_t2t_draw` now draws scaled copies too (its comment in `nvn_mtl.m` names this one), so it is no longer skipped.

@@ -3051,48 +3051,7 @@ static int depth_copy_scaled(vtex *s, vtex *d, const p_copy_t2t *c, uint32_t sl,
     }
     return 1;
 }
-// NVN depth downsampling selects sample zero. Reading it explicitly also
-// works on Vulkan 1.1 devices without a depth/stencil resolve extension.
-static void resolve_depth(const p_copy_t2t *c, vtex *src, vtex *dst, uint32_t sl, uint32_t sly, uint32_t dl, uint32_t dly) {
-    static const uint32_t code[] =
-#include "resolve_depth.frag.inc"
-    ;
-    static shader_t fragment = {.key = "resolve-depth", .stage = 1, .nb = 1, .b = {{.type = BT_TEX, .count = 1}}};
-    static VkPipelineLayout layout;
-    if (!layout) {
-        VkDescriptorSetLayoutBinding binding = {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
-        VkDescriptorSetLayoutCreateInfo set = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 1, &binding};
-        VKCHECK(vkCreateDescriptorSetLayout(g_dev, &set, NULL, &fragment.dsl));
-        VkPushConstantRange push = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 2*sizeof(int32_t)};
-        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &fragment.dsl, 1, &push};
-        VKCHECK(vkCreatePipelineLayout(g_dev, &info, NULL, &layout));
-    }
-    view_t view = {.set_levels=1,.base_level=sl,.nlevels=1,.set_layers=1,.min_layer=sly,.nlayers=1};
-    VkImageView source = tex_view(src,c->src,&view,1,VK_IMAGE_VIEW_TYPE_2D,VIEW_SAMPLED);
-    view.base_level=dl; view.min_layer=dly;
-    VkImageView destination = tex_view(dst,c->dst,&view,1,VK_IMAGE_VIEW_TYPE_2D,VIEW_ATTACHMENT);
-    if (!source || !destination) { RED_ONCE(96, "depth resolve requires a sampled source and renderable destination"); return; }
-    pso_key k = {.vs=clear_vertex(), .fs=clear_shader(&fragment,code,sizeof code), .prim=NVN_DRAW_PRIMITIVE_TRIANGLES,
-                 .df=dst->f.f, .stencil=dst->f.stencil, .ds={.dt=1,.dw=1,.df=NVN_COMPARE_FUNC_ALWAYS}};
-    VkPipeline pipeline = pso_get(&k,layout);
-    if (!pipeline) return;
-    VkDescriptorSet set = allocate_shader_set(&fragment);
-    VkDescriptorImageInfo image = {.imageView=source,.imageLayout=VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,NULL,set,0,0,1,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,&image};
-    vkUpdateDescriptorSets(g_dev,1,&write,0,NULL);
-    VkExtent2D size = {dst->w >> dl ? dst->w >> dl : 1, dst->h >> dl ? dst->h >> dl : 1};
-    rp_desc pass = {.dv=destination,.df=dst->f.f,.stencil=dst->f.stencil,.dl=VK_ATTACHMENT_LOAD_OP_LOAD,.sl=VK_ATTACHMENT_LOAD_OP_LOAD,
-                    .w=size.width,.h=size.height,.layout=VK_IMAGE_LAYOUT_GENERAL};
-    begin_tracked_pass(&pass);
-    VkRect2D rect = {{c->dr.xoffset,c->dr.yoffset},{(uint32_t)c->dr.width,(uint32_t)c->dr.height}};
-    clear_draw_state(pipeline,rect,size,0);
-    vkCmdBindDescriptorSets(C->cb,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,1,&set,0,NULL);
-    int32_t offset[] = {c->sr.xoffset-c->dr.xoffset,c->sr.yoffset-c->dr.yoffset};
-    vkCmdPushConstants(C->cb,layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof offset,offset);
-    vkCmdDraw(C->cb,3,1,0,0);
-    rp_end(C->cb);
-    barrier_all(C->cb);
-}
+#include "image_copy_draw.inc"
 static VkOffset3D copy_end(VkOffset3D start, VkExtent3D size) {
     return (VkOffset3D){start.x+(int32_t)size.width,start.y+(int32_t)size.height,start.z+(int32_t)size.depth};
 }
@@ -3170,7 +3129,9 @@ static void copy_t2t(const p_copy_t2t *c) {
         }
         if (depth) {
             for (uint32_t i=0;i<src.layerCount;i++)
-                resolve_depth(c,s,d,src.mipLevel,src.baseArrayLayer+i,dst.mipLevel,dst.baseArrayLayer+i);
+                if (!draw_image_slice(c,s,d,src.mipLevel,src.baseArrayLayer+i,dst.mipLevel,dst.baseArrayLayer+i,0)) {
+                    RED_ONCE(96,"depth resolve requires a sampled source and renderable destination"); return;
+                }
             return;
         }
         VkImageResolve resolve = {src,region.srcOffset,dst,region.dstOffset,region.extent};
@@ -3196,6 +3157,15 @@ static void copy_t2t(const p_copy_t2t *c) {
                          dst,{region.dstOffset,copy_end(region.dstOffset,dest)}};
         mirror_offsets(b.srcOffsets,c->flags);
         vkCmdBlitImage(C->cb,s->img,VK_IMAGE_LAYOUT_GENERAL,d->img,VK_IMAGE_LAYOUT_GENERAL,1,&b,linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    } else if (!depth && (d->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+               clear_color_type(s->f.f)==CLEAR_FLOAT && clear_color_type(d->f.f)==CLEAR_FLOAT &&
+               s->target!=NVN_TEXTURE_TARGET_3D && d->target!=NVN_TEXTURE_TARGET_3D &&
+               (s!=d || src.mipLevel!=dst.mipLevel || src.baseArrayLayer!=dst.baseArrayLayer)) {
+        for (uint32_t i=0; i<src.layerCount; ++i)
+            if (!draw_image_slice(c,s,d,src.mipLevel,src.baseArrayLayer+i,dst.mipLevel,dst.baseArrayLayer+i,linear)) {
+                RED_ONCE(52,"color copy requires a sampled source and renderable destination"); return;
+            }
+        return;
     } else if (depth && !linear && s->target!=NVN_TEXTURE_TARGET_3D && d->target!=NVN_TEXTURE_TARGET_3D) {
         for (uint32_t i=0;i<src.layerCount;i++)
             if (!depth_copy_scaled(s,d,c,src.mipLevel,src.baseArrayLayer+i,dst.mipLevel,dst.baseArrayLayer+i)) {
