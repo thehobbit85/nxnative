@@ -145,6 +145,62 @@ static void check_event_lists(NVNdevice *device, NVNqueue *queue, NVNmemoryPool 
     puts("Public NVN event lists: 7 + 4 at the fence, refill and nested return preserved both guards");
 }
 
+#ifdef DM_VK_PUBLIC_BINDINGS
+static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryPool *pool, uint8_t *storage) {
+    enum { texture_offset = 0x4000, read_offset = 0xa000, w = 7, h = 3 };
+    NVNbufferAddress addr = API(nvnMemoryPoolGetBufferAddress)(pool);
+    for (int rt = 0; rt < 2; ++rt) {
+        NVNtextureBuilder tb;
+        API(nvnTextureBuilderSetDefaults)(&tb);
+        API(nvnTextureBuilderSetDevice)(&tb, device);
+        API(nvnTextureBuilderSetTarget)(&tb, NVN_TEXTURE_TARGET_2D);
+        API(nvnTextureBuilderSetSize2D)(&tb, w, h);
+        API(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA8);
+        API(nvnTextureBuilderSetFlags)(&tb, rt ? NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET : NVN_TEXTURE_FLAGS_LINEAR);
+        if (!rt) API(nvnTextureBuilderSetStride)(&tb, 64);
+        API(nvnTextureBuilderSetStorage)(&tb, pool, texture_offset);
+        size_t stride = API(nvnTextureBuilderGetStorageSize)(&tb) / h;
+        assert(stride > 4 * w && stride <= 128);
+        NVNtexture tex;
+        memset(storage + texture_offset, 0x5e, stride * h);
+        assert(API(nvnTextureInitialize)(&tex, &tb));
+        uint8_t pattern[h][w * 4];
+        for (unsigned y = 0; y < h; ++y) for (unsigned x = 0; x < w * 4; ++x)
+            pattern[y][x] = (uint8_t)(1 + y * 40 + x);
+        NVNcopyRegion region = {0, 0, 0, w, h, 1};
+        API(nvnTextureWriteTexels)(&tex, NULL, &region, pattern);
+        NVNcommandBuffer cb;
+        assert(API(nvnCommandBufferInitialize)(&cb, device));
+        API(nvnCommandBufferAddCommandMemory)(&cb, pool, 0, 0x4000);
+        API(nvnCommandBufferBeginRecording)(&cb);
+        API(nvnCommandBufferSetCopyRowStride)(&cb, 0);
+        API(nvnCommandBufferSetCopyImageStride)(&cb, 0);
+        API(nvnCommandBufferCopyTextureToBuffer)(&cb, &tex, NULL, &region, addr + read_offset, 0);
+        NVNcommandHandle commands = API(nvnCommandBufferEndRecording)(&cb);
+        API(nvnQueueSubmitCommands)(queue, 1, &commands);
+        API(nvnQueueFinish)(queue);
+        for (size_t i = 0; i < sizeof pattern; ++i) if (storage[read_offset + i] != ((uint8_t *)pattern)[i])
+            die("linear GPU upload, render-target flag %d, byte %zu: %u expected %u", rt, i, storage[read_offset + i], ((uint8_t *)pattern)[i]);
+        const NVNtexture *target = &tex;
+        API(nvnCommandBufferBeginRecording)(&cb);
+        API(nvnCommandBufferSetRenderTargets)(&cb, 1, &target, NULL, NULL, NULL);
+        API(nvnCommandBufferSetScissor)(&cb, 0, 0, w, h);
+        float green[] = {0, 1, 0, 1};
+        API(nvnCommandBufferClearColor)(&cb, 0, green, 15);
+        commands = API(nvnCommandBufferEndRecording)(&cb);
+        API(nvnQueueSubmitCommands)(queue, 1, &commands);
+        API(nvnQueueFinish)(queue);
+        uint8_t pixel[] = {0, 255, 0, 255};
+        for (int y = 0; y < h; ++y) for (size_t x = 0; x < stride; ++x) {
+            uint8_t want = x < 4 * w ? pixel[x % 4] : 0x5e;
+            if (storage[texture_offset + stride * y + x] != want) die("linear GPU writeback flag %d row %d byte %zu", rt, y, x);
+        }
+        API(nvnCommandBufferFinalize)(&cb);
+        API(nvnTextureFinalize)(&tex);
+    }
+}
+#endif
+
 typedef struct {
     const NVNtexture *texture;
     const NVNtextureView *view;
@@ -354,10 +410,13 @@ int main(void) {
     API(nvnTexturePoolFinalize)(&descriptors);
     API(nvnQueueFinish)(&queue);
     check_event_lists(&device, &queue, &pool, storage);
-    API(nvnQueueFinalize)(&queue);
     API(nvnSyncFinalize)(&sync);
     API(nvnCommandBufferFinalize)(&cb);
     API(nvnTextureFinalize)(&tex);
+#ifdef DM_VK_PUBLIC_BINDINGS
+    check_linear_transfer(&device, &queue, &pool, storage);
+#endif
+    API(nvnQueueFinalize)(&queue);
     API(nvnMemoryPoolFinalize)(&pool);
     API(nvnDeviceFinalize)(&device);
     puts("Public NVN recorder returned both layers, preserved guards and padding, and reported timestamps on the guest clock");
