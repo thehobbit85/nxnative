@@ -452,8 +452,6 @@ static void vk_init_(void) {
     VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, chain};
     vkGetPhysicalDeviceFeatures2(g_pd, &f2);
     g_draw_parameters = dv >= VK_API_VERSION_1_2 ? f11.shaderDrawParameters : sdp.shaderDrawParameters;
-    if (getenv("DM_VK_NO_DRAW_PARAMETERS")) g_draw_parameters = 0;
-    if (!g_draw_parameters) LOG("vk: shader draw parameters supplied by host push constants");
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     g_precise_visibility = f2.features.occlusionQueryPrecise;
     f13.robustImageAccess = VK_FALSE;
@@ -464,6 +462,10 @@ static void vk_init_(void) {
             g_vertex_divisor_limit=divisor_ext ? div_ext_props.maxVertexAttribDivisor : div_khr_props.maxVertexAttribDivisor;
     }
     LOG("vk: native vertex instance divisor limit %u",g_vertex_divisor_limit);
+    // A guest draw may need several native instance ranges on these devices.
+    // Keep its original BaseInstance in the existing draw-parameter push block.
+    if (g_vertex_divisor_limit<UINT32_MAX || getenv("DM_VK_NO_DRAW_PARAMETERS")) g_draw_parameters=0;
+    if (!g_draw_parameters) LOG("vk: shader draw parameters supplied by host push constants");
     if (g_segment_timestamps && has_calibrated) ext[next++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
     g_selectable_subgroup_stages = 0;
     if (f13.subgroupSizeControl || size_features.subgroupSizeControl) {
@@ -1623,7 +1625,7 @@ static void set_rt(const p_set_rt *r) {
 // Pipelines, cached by everything they are built from
 typedef struct {
     shader_t *vs, *fs; int prim;
-    va_st attr[16]; int nattr; vs_st stream[16]; int nstream;
+    va_st attr[16]; int nattr; vs_st stream[16]; int nstream, split_instances;
     blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples;
     VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll, rasterizer_discard;
 } pso_key;
@@ -1699,8 +1701,8 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     for (int s = 0; s < 16; s++) if (used >> s & 1) {
         uint32_t stride = s < k->nstream ? k->stream[s].stride : 0, div = s < k->nstream ? k->stream[s].divisor : 0;
         if (div > 1 && stride) {
-            if (div<=g_vertex_divisor_limit) divisors[ndiv++]=(VkVertexInputBindingDivisorDescriptionEXT){(uint32_t)s,div};
-            else RED_ONCE(11, "instance divisor %u exceeds native vertex input limit %u",div,g_vertex_divisor_limit);
+            if (k->split_instances) stride=0;
+            else divisors[ndiv++]=(VkVertexInputBindingDivisorDescriptionEXT){(uint32_t)s,div};
         }
         vb[nvb++] = (VkVertexInputBindingDescription){(uint32_t)s, stride, div ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX};
     }
@@ -2318,6 +2320,32 @@ static int draw_begin(void) {
     for (int a = 0; a < P.n; a++) if (S.chmask.mask >> (4 * a) & 0xf) P.cwr[a] = P.cdrawn[a] = 1;
     return 1;
 }
+typedef struct {
+    uint32_t slot, stride, divisor;
+    VkBuffer buffer;
+    VkDeviceSize start, size;
+} instance_stream;
+
+// With no native divisor, bind a constant element for each run over which
+// all divided streams stay unchanged. The underlying buffer may be GPU-owned.
+static void emit_instances(VkCommandBuffer cb, int indexed, uint32_t count, int32_t first,
+                           uint32_t base, uint32_t instances, const instance_stream *streams, unsigned n) {
+    for (uint32_t done=0;done<instances;) {
+        uint32_t run=instances-done;
+        for (unsigned i=0;i<n;i++) {
+            const instance_stream *s=&streams[i];
+            uint32_t until=s->divisor-done%s->divisor;
+            if (until<run) run=until;
+            VkDeviceSize delta=(VkDeviceSize)(done/s->divisor)*s->stride;
+            VkBuffer buffer=delta<s->size ? s->buffer : g_zero_buf;
+            VkDeviceSize offset=delta<s->size ? s->start+delta : 0;
+            vkCmdBindVertexBuffers(cb,s->slot,1,&buffer,&offset);
+        }
+        if (indexed) vkCmdDrawIndexed(cb,count,run,0,first,base+done);
+        else vkCmdDraw(cb,count,run,(uint32_t)first,base+done);
+        done+=run;
+    }
+}
 static VkRect2D clipped_rect(p_scissor sc, uint32_t width, uint32_t height) {
     int64_t right = (int64_t)sc.x + sc.w, bottom = (int64_t)sc.y + sc.h;
     int32_t x = sc.x > 0 ? sc.x : 0, y = sc.y > 0 ? sc.y : 0;
@@ -2359,6 +2387,10 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     k.rasterizer_discard = S.rasterizer_discard;
     k.origin_ll = g_queue_origin_ll;
     k.vs = vs; k.fs = fs; k.prim = prim; k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
+    for (int i=0;i<k.nattr;i++) if ((vs->vin_mask >> i & 1) && k.attr[i].stream<(unsigned)k.nstream) {
+        vs_st stream=k.stream[k.attr[i].stream];
+        if (stream.stride && stream.divisor>g_vertex_divisor_limit) k.split_instances=1;
+    }
     k.nc = P.n; memcpy(k.cf, P.cf, sizeof k.cf); memcpy(k.blend, S.blend, P.n * sizeof *k.blend);
     k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.samples;
     if (P.dt) { k.df = P.dt->f.f; k.stencil = P.dt->f.stencil; k.ds = S.ds; }
@@ -2415,22 +2447,27 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     }
     uint32_t used = 0, ext[16] = {0};
     for (int i = 0; i < S.nattr; i++) if (vs->vin_mask >> i & 1) { uint32_t st = S.attr[i].stream, e = S.attr[i].offset + 16; used |= 1u << st; if (e > ext[st]) ext[st] = e; }
+    instance_stream split[16]; unsigned nsplit=0;
     for (int s = 0; s < 16; s++) if (used >> s & 1) {
         VkDeviceSize o = 0; VkBuffer b = g_zero_buf;
         uint64_t stride = s < S.nstream ? S.stream[s].stride : 0, size = S.vbuf[s].size, from, to;
-        int per_inst = s < S.nstream && S.stream[s].divisor;
-        if (per_inst) {
-            uint32_t divisor=S.stream[s].divisor;
-            if (divisor>g_vertex_divisor_limit) divisor=1;
-            from=0;
-            to=((uint64_t)g_draw_base_instance+(inst-1)/divisor)*stride+ext[s];
+        uint32_t divisor=s<S.nstream ? S.stream[s].divisor : 0;
+        int emulate=k.split_instances && stride && divisor>1;
+        if (divisor) {
+            uint64_t last=(uint64_t)g_draw_base_instance+(inst-1)/divisor;
+            from=emulate ? (uint64_t)g_draw_base_instance*stride : 0;
+            to=stride && last>(UINT64_MAX-ext[s])/stride ? size : last*stride+ext[s];
         }
         else { from = (uint64_t)vlo * stride; to = (uint64_t)vhi * stride + ext[s]; }
         if (to > size) to = size;
         if (S.vbuf[s].address && to > from && gw_find(S.vbuf[s].address + from, to - from, 1, &b, &o, NULL)) {}   // vertices a dispatch wrote (GPU particles)
         else if (S.vbuf[s].address && to > from) { VkDeviceSize ro = copy_in(S.vbuf[s].address + from, to - from, 16); if (ro != VK_WHOLE_SIZE) { b = C->ring; o = ro; atomic_fetch_add(&g_vbuf_copies, 1); atomic_fetch_add(&g_vbuf_copy_bytes, to - from); } }
-        vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &b, &o);
+        if (emulate) split[nsplit++]=(instance_stream){(uint32_t)s,(uint32_t)stride,divisor,b,o,b!=g_zero_buf && to>from ? to-from : 0};
+        else vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &b, &o);
     }
+    int indexed=di!=NULL || prim==NVN_DRAW_PRIMITIVE_QUADS;
+    uint32_t count=(uint32_t)(dw ? dw->count : di->count);
+    int32_t first=(int32_t)((dw ? dw->first : di->base_vertex)-vlo);
     if (dw) {
         if (prim == NVN_DRAW_PRIMITIVE_QUADS) {   // quads as two triangles each, through indices made here
             uint32_t nq = (uint32_t)dw->count / 4; if (!nq) return;
@@ -2438,11 +2475,9 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
             uint32_t *ix = (uint32_t *)(C->ringp + o);
             for (uint32_t q = 0; q < nq; q++) { uint32_t b = q * 4; uint32_t v[6] = {b, b + 1, b + 2, b, b + 2, b + 3}; memcpy(ix + 6 * q, v, 24); }
             vkCmdBindIndexBuffer(cb, C->ring, o, VK_INDEX_TYPE_UINT32);
-            if (!draw_begin()) SKIP(2);
-            vkCmdDrawIndexed(cb, nq * 6, inst, 0, (int32_t)(dw->first - vlo), (uint32_t)dw->base_instance);
-        } else { if (!draw_begin()) SKIP(2); vkCmdDraw(cb, (uint32_t)dw->count, inst, (uint32_t)(dw->first - vlo), (uint32_t)dw->base_instance); }
+            count=nq*6;
+        }
     } else {
-        int32_t voff = (int32_t)(di->base_vertex - vlo);
         if (prim == NVN_DRAW_PRIMITIVE_QUADS || (isz == 1 && !g_has_u8)) {   // quads, or 8-bit indices without the extension: widened to 32 bits on the CPU
             uint32_t n = (uint32_t)di->count, nq = prim == NVN_DRAW_PRIMITIVE_QUADS ? n / 4 : 0, out = nq ? nq * 6 : n;
             VkDeviceSize o = ring_alloc((VkDeviceSize)out * 4, 16); if (o == VK_WHOLE_SIZE) return;
@@ -2450,16 +2485,15 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
             if (nq) for (uint32_t q = 0; q < nq; q++) { uint32_t b = 4 * q; uint32_t v[6] = {IDX(b), IDX(b + 1), IDX(b + 2), IDX(b), IDX(b + 2), IDX(b + 3)}; memcpy(ix + 6 * q, v, 24); }
             else for (uint32_t i = 0; i < n; i++) ix[i] = IDX(i);
             vkCmdBindIndexBuffer(cb, C->ring, o, VK_INDEX_TYPE_UINT32);
-            if (!draw_begin()) SKIP(2);
-            vkCmdDrawIndexed(cb, out, inst, 0, voff, (uint32_t)di->base_instance);
+            count=out;
         } else {
             VkDeviceSize o = copy_in(di->ibuf, (uint64_t)di->count * isz, 16); if (o == VK_WHOLE_SIZE) return;
             vkCmdBindIndexBuffer(cb, C->ring, o, isz == 1 ? VK_INDEX_TYPE_UINT8_EXT : isz == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-            if (!draw_begin()) SKIP(2);
-            vkCmdDrawIndexed(cb, (uint32_t)di->count, inst, 0, voff, (uint32_t)di->base_instance);
         }
     }
     #undef IDX
+    if (!draw_begin()) SKIP(2);
+    emit_instances(cb,indexed,count,first,g_draw_base_instance,inst,split,nsplit);
     for (int i = 0; i < g_nwb; i++) {
         gw_t *w = &g_wb[i];
         buffer_written(w->addr, w->size, w->buf, w->off, w->p);
