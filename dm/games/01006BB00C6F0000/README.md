@@ -67,7 +67,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 **Verified on llvmpipe, 2026-11-06.** A fresh ARM64 Android 15 install with the renderer at `9d35f040` played from the title screen through file selection, Marin's opening dialogue, movement, Tarin's shield and the exit to Mabe Village. Link, the hearts, the shield acquisition text and the outdoor scenery rendered. The installed shader and reflection files match the production export of 9,698 validated stages. The test supplied the standard and controller-symbol fonts through the Android packager.
 
-The updated renderer at `f7cc0c56` loaded the existing Mabe Village autosave from file selection. Link moved outside the house and the three hearts rendered. The autosave's preview showed scrambled colors in file selection. Its cause remains open.
+The renderers at `f7cc0c56` and `93dc719c` loaded the existing Mabe Village autosave from file selection. Link moved outside the house and the three hearts rendered. The later build completed the reload without the earlier packed HDR blit error. The existing autosave's preview still showed scrambled colors in file selection. Its cause remains open.
 
 **Verified, 2026-11-04:** the ARM64 Android 15 / API 35 emulator with SwiftShader renders the opening room, Link, Marin, Tarin, hearts, complete menu and dialogue text, inventory and item effects. Scripted input advances the opening conversation, moves Link, talks to Tarin, obtains the shield and raises it with R. Leaving the house reaches Mabe Village with its scenery and location text visible. These checks use the original exported shaders and the production renderer, without diagnostic shader replacements.
 
