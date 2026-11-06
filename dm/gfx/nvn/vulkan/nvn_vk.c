@@ -802,7 +802,7 @@ static void bc_decode(int dec, const uint8_t *src, size_t src_pitch, uint32_t w,
 typedef struct { uint64_t key; VkImageView v; } vview;
 struct vtex {
     uint64_t serial; VkImage img; VkSampleCountFlagBits samples; VkImageUsageFlags usage; VkDeviceMemory m; int blk; VkDeviceSize moff, msize; fmt_t f; int nvn_fmt, target;
-    uint32_t w, h, d, levels, layers; VkImageAspectFlags aspect; int uploaded, gpu;
+    uint32_t w, h, d, levels, layers; VkImageAspectFlags aspect; int uploaded; _Atomic int gpu;
     int dirty;   // the CPU wrote its storage since the last upload (WriteTexels, a movie frame, a flushed pool range): uploaded again at its next use, unless the GPU renders into it
     const uint8_t *mem; uint64_t len;   // its storage in guest memory
     uint64_t stamp; const void *span;   // uploaded from a dirty-tracked pool (nvn_dirty.c): the write generation then and the tracked range, re-uploaded when the game writes it
@@ -947,7 +947,7 @@ static void tex_upload(vtex *v, const tex_t *t) {
             texel_extent ext = {.bytes=pitch, .rows=by, .nz=d, .layer=ly};
             int rc;
             if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))
-                rc = !storage_texels(t, lv, tmp, pitch, pitch * by, ext);
+                rc = !storage_texels(t, lv, tmp, pitch, pitch * by, ext, 0);
             else rc = nvn_deswizzle(&t->d, lv, ly, t->mem, tmp, pitch);
             if (rc) { RED_ONCE(5, "texture format %#x target %d: deswizzle failed", t->d.format, t->d.target); if (tmp != dst) free(tmp); continue; }
             if (v->f.dec) for (uint32_t z = 0; z < d; z++)
@@ -1969,7 +1969,7 @@ int nvn_dpool_base(const void *pool, int texture);   // shared recorder's host-t
 // Finish only an actual GPU dependency, before allocating this command's sets
 // or buffers: a submission cut here would invalidate those allocations later.
 static void begin_segment(void);
-static void cpu_ready(uint64_t addr, uint64_t size) {
+static void cpu_access_ready(uint64_t addr, uint64_t size, int writing) {
     if (!size) return;
     for (int i = 0; i < P.n; i++) {
         const vtex *v = P.ct[i];
@@ -1981,7 +1981,11 @@ static void cpu_ready(uint64_t addr, uint64_t size) {
     pthread_mutex_lock(&g_gwmu);
     for (size_t i = 0; i < g_ngw && !gpu; i++) {
         const gw_t *w = &g_gw[i];
-        if (w->cpu_known || !overlaps(addr, size, w->addr, w->size)) continue;
+        if (!overlaps(addr, size, w->addr, w->size)) continue;
+        // Even a known fill will publish on completion. Land it before
+        // overwriting these bytes, or it can undo the new texture contents.
+        if (writing) { gpu = 1; break; }
+        if (w->cpu_known) continue;
         uint64_t at = addr > w->addr ? addr : w->addr;
         uint64_t left = size - (at - addr), wn = w->size - (at - w->addr);
         if (left > wn) left = wn;
@@ -2007,11 +2011,13 @@ static void cpu_ready(uint64_t addr, uint64_t size) {
         uint64_t lo = addr > w->addr ? addr : w->addr;
         uint64_t n = size - (lo - addr), wn = w->size - (lo - w->addr);
         if (n > wn) n = wn;
+        dm_guest_write_prepare((void *)(uintptr_t)lo, n);
         memcpy((void *)(uintptr_t)lo, w->p + (lo - w->addr), n);
     }
     pthread_mutex_unlock(&g_gwmu);
     if (gpu) { mtl_wait(mtl_sub_commit(), UINT64_MAX); begin_segment(); }
 }
+static void cpu_ready(uint64_t addr, uint64_t size) { cpu_access_ready(addr,size,0); }
 static void uniform_ready(int stage, int reg, int64_t off, uint32_t count) {
     if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16 || off < 0 || !count) return;
     const p_bind_buf *u = &S.ubo[stage][reg];
@@ -3818,7 +3824,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     int gpu = v && v->gpu;
     int ok = gpu && gpu_texels(v, level, r, NULL, dst, row, img, ext);
     pthread_mutex_unlock(&g_rmu);
-    if (!gpu) ok = storage_texels(t, level, dst, row, img, ext);
+    if (!gpu) ok = storage_texels(t, level, dst, row, img, ext, 0);
     if (!ok) RED_ONCE(80, "unsupported CPU texture read (format %#x, samples %u)", t->d.format, t->d.samples);
 }
 
