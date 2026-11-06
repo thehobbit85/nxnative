@@ -21,7 +21,7 @@ static prog_t restart_program={.nstage=2};
 static prog_t table_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t warp_program[2] = {{.nstage = 1}, {.nstage = 1}};
 static prog_t driver_program = {.nstage = 1};
-static prog_t typed_border_program = {.nstage=1};
+static prog_t typed_border_program[] = {{.nstage=1},{.nstage=1}};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -63,7 +63,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
-    if (p==&typed_border_program) { assert(stage==0); memset(key,0,8); key[7]=0x69; return 1; }
+    for (int i=0;i<2;++i) if (p==&typed_border_program[i]) { assert(stage==0); memset(key,0,8); key[7]=0x69+i; return 1; }
     if (p==&mixed_color_program) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x67 : 0x52; return 1; }
     for (int i=0;i<2;++i) if (p==&logic_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x64+i : 0x52; return 1; }
     for (int i=0;i<3;++i) if (p==&alpha_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x61+i : 0x52; return 1; }
@@ -252,7 +252,8 @@ static VkPhysicalDeviceFeatures replay_features(int *custom_border) {
             VkPhysicalDeviceCustomBorderColorFeaturesEXT b={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT};
             VkPhysicalDeviceFeatures2 f={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,&b};
             vkGetPhysicalDeviceFeatures2(physical,&f);
-            *custom_border=b.customBorderColors && !getenv("DM_VK_NO_CUSTOM_BORDER");
+            if (b.customBorderColors && !getenv("DM_VK_NO_CUSTOM_BORDER"))
+                *custom_border=1 | (b.customBorderColorWithoutFormat && !getenv("DM_VK_NO_FORMATLESS_BORDER") ? 2 : 0);
         }
         free(ext);
     }
@@ -371,7 +372,7 @@ static void uniform_texture_array(int table, int custom_border) {
     }
     samp_par edge = {0}, border = {.ws = NVN_WRAP_MODE_CLAMP_TO_BORDER, .border = {1,1,1,1}};
     if (custom_border) {
-        memcpy(border.border, (float[]){96.f/255,32.f/255,160.f/255,127.f/255}, sizeof border.border);
+        memcpy(border.border, (float[]){96.f/255,32.f/255,159.f/255,127.f/255}, sizeof border.border);
         border.minf=NVN_MIN_FILTER_LINEAR; border.magf=NVN_MAG_FILTER_LINEAR;
     }
     mtl_reg_samp(257, &edge); mtl_reg_samp(258, &border); mtl_reg_samp(513, &border);
@@ -389,8 +390,8 @@ static void uniform_texture_array(int table, int custom_border) {
             memcpy(expected[3], (uint8_t[]){0,0,128,128}, 4);
             memset(expected[7], 0, 4);
         } else {
-            memcpy(expected[3], (uint8_t[]){48,16,208,191}, 4);
-            memcpy(expected[7], (uint8_t[]){96,32,160,127}, 4);
+            memcpy(expected[3], (uint8_t[]){48,16,207,191}, 4);
+            memcpy(expected[7], (uint8_t[]){96,32,159,127}, 4);
         }
     }
     for (int gpu=0;gpu<4;gpu++) for (int pass = 0; pass < 8; ++pass) {
@@ -455,8 +456,11 @@ static void uniform_texture_array(int table, int custom_border) {
         uint64_t before=mtl_last_fence();
         mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
         if(!gpu || gpu==3) assert(mtl_last_fence()==before+1);
-        for (size_t i = 0; i < sizeof pixels; i += 4) if (memcmp(pixels + i, expected[pass], 4)) {
-            fprintf(stderr, "uniform texture array GPU%d pass %d pixel %zu: %u %u %u %u\n", gpu, pass, i / 4, pixels[i],pixels[i+1],pixels[i+2],pixels[i+3]);
+        for (size_t i = 0; i < sizeof pixels; ++i) {
+            int half_unorm = custom_border==STOCK_FALLBACK && pass==3 && i%4>=2;
+            if (pixels[i]==expected[pass][i%4] || (half_unorm && pixels[i]==127)) continue;
+            fprintf(stderr,"uniform texture array GPU%d pass %d pixel %zu channel %zu: %u expected %u\n",
+                    gpu,pass,i/4,i%4,pixels[i],expected[pass][i%4]);
             abort();
         }
     }
@@ -469,7 +473,7 @@ static void uniform_texture_array(int table, int custom_border) {
 }
 
 // A single guest sampler is used with three different numerical types in one dispatch.
-static void typed_sampler_border(int native) {
+static void typed_sampler_border(int native, int separate) {
     NVNformat formats[] = {NVN_FORMAT_RGBA32I,NVN_FORMAT_RGBA32UI,NVN_FORMAT_RGBA32F};
     tex_t textures[3];
     for (int i=0; i<3; ++i) {
@@ -483,7 +487,7 @@ static void typed_sampler_border(int native) {
     struct { int32_t s[4]; uint32_t u[4]; float f[4]; } result;
     memset(&result,0xcc,sizeof result); mtl_pool_add(&result,sizeof result);
     list_t list={0};
-    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&typed_border_program,.stages=0x20);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&typed_border_program[separate],.stages=0x20);
     for (uint32_t i=0; i<3; ++i)
         RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=i,.h=(1417ull<<20)|(1410+i));
     RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&result,.size=sizeof result);
@@ -504,7 +508,7 @@ static void typed_sampler_border(int native) {
 static void custom_borders(void) {
     int native;
     replay_features(&native);
-    typed_sampler_border(native);
+    typed_sampler_border(native,0); typed_sampler_border(native,1);
     for (int table=0; table<3; ++table) uniform_texture_array(table,native ? CUSTOM_BORDER : STOCK_FALLBACK);
     puts(native ? "Custom sampler borders: float/sint/uint, linear edge and full border through fixed and indexed bindings passed"
                 : "Sampler fallback: typed stock colors through fixed and indexed bindings passed");
@@ -2500,14 +2504,16 @@ static void retired_texture_pool(void) {
     assert(!munmap(pool,page));
     puts("Pool retirement preserves submitted draws, invalidates warm/cold IDs and requires registration after address reuse");
 }
-static void separate_descriptors(void) {
+static void separate_descriptors(int mixed_formats) {
+    int caps; replay_features(&caps);
     tex_t images[2],output={.serial=0xd002,.d={.width=4,.height=4,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&output.d,&output.L);
     for(int i=0;i<2;i++) {
-        images[i]=(tex_t){.serial=0xd000+i,.d={.width=1,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_3D,.format=NVN_FORMAT_RGBA8}};
+        images[i]=(tex_t){.serial=0xd000+i,.d={.width=1,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_3D,.format=mixed_formats && i ? NVN_FORMAT_RGBA16F : NVN_FORMAT_RGBA8}};
         nvn_tex_layout(&images[i].d,&images[i].L);mtl_reg_tex(2053+i,&images[i],NULL);
     }
-    samp_par edge={0},border={.ws=NVN_WRAP_MODE_CLAMP_TO_BORDER,.border={1,1,1,1}};
+    samp_par edge={0},border={.ws=NVN_WRAP_MODE_CLAMP_TO_BORDER,
+        .border={96.f/255,32.f/255,159.f/255,127.f/255}};
     mtl_reg_samp(513,&edge);mtl_reg_samp(514,&border);
     uint64_t handles[8]={0},samplers[8]={0};mtl_pool_add(handles,sizeof handles);mtl_pool_add(samplers,sizeof samplers);
     float positions[]={-1,-1,3,-1,-1,3},white[]={1,1,1,1};
@@ -2547,7 +2553,11 @@ static void separate_descriptors(void) {
         RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
         RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=4,.height=4,.depth=1});
         put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
-        uint8_t want[4]={0,params.image?0:255,params.image?255:0,255};if((pass&6)==6) memset(want,255,4);
+        uint8_t want[4]={0,params.image?0:255,params.image?255:0,255};if((pass&6)==6) {
+            int exact=caps & (mixed_formats ? 2 : 1);
+            if (exact) memcpy(want,(uint8_t[]){96,32,159,127},4);
+            else memset(want,0,4);
+        }
         if(pass==8) want[1]=0;
         for(int i=0;i<16;i++) if(memcmp(pixels+4*i,want,4)) {
             fprintf(stderr,"separate descriptors mode%d pass%d pixel%d: %u,%u,%u,%u\n",mode,pass,i,pixels[4*i],pixels[4*i+1],pixels[4*i+2],pixels[4*i+3]);abort();
@@ -2784,11 +2794,11 @@ int main(void) {
     typed_buffers();
     if (getenv("DM_VK_TEST_DESCRIPTOR_POOLS")) { descriptor_lifetime(); return 0; }
     descriptor_lifetime();
-    if(getenv("DM_VK_TEST_SEPARATE")) { separate_descriptors();return 0; }
+    if(getenv("DM_VK_TEST_SEPARATE")) { separate_descriptors(0); separate_descriptors(1);return 0; }
     packed_streams();
     primitive_restart();
     indirect_draws();
-    separate_descriptors();
+    separate_descriptors(0); separate_descriptors(1);
     if(getenv("DM_VK_TEST_RETIRE")) { retired_texture_pool();return 0; }
     retired_texture_pool();
     const char *buffers=getenv("DM_VK_TEST_BUFFERS");

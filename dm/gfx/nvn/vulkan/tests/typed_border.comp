@@ -1,8 +1,20 @@
 #version 450
 layout(local_size_x=1) in;
+#ifdef SEPARATE
+layout(binding=0) uniform itexture2D signedTex;
+layout(binding=1) uniform utexture2D unsignedTex;
+layout(binding=2) uniform texture2D floatTex;
+layout(binding=4) uniform sampler signedSampler;
+layout(binding=5) uniform sampler unsignedSampler;
+layout(binding=6) uniform sampler floatSampler;
+#define signedImage isampler2D(signedTex,signedSampler)
+#define unsignedImage usampler2D(unsignedTex,unsignedSampler)
+#define floatImage sampler2D(floatTex,floatSampler)
+#else
 layout(binding=0) uniform isampler2D signedImage;
 layout(binding=1) uniform usampler2D unsignedImage;
 layout(binding=2) uniform sampler2D floatImage;
+#endif
 layout(binding=3, std430) writeonly buffer Results { ivec4 s; uvec4 u; vec4 f; } result;
 void main() {
     vec2 outside = vec2(-1.0,0.5);
