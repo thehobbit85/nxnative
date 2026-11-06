@@ -32,6 +32,7 @@ static prog_t uniform_storage_program = {.nstage = 2};
 static prog_t split_program[3] = {{.nstage = 2}, {.nstage = 2}, {.nstage = 2}};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
+static prog_t image_draw = {.nstage = 2}, image_compute = {.nstage = 1};
 static prog_t feedback_program = {.nstage = 2};
 static prog_t depth_clamp_program = {.nstage = 2};
 static prog_t depth_range_program = {.nstage = 2};
@@ -55,6 +56,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
     if (p == &blend_mrt_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x55 : 0x52; return 1; }
     if (p == &divisor_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x56+stage; return 1; }
+    if (p == &image_draw || p == &image_compute) { assert(stage < p->nstage); memset(key, 0, 8); key[7] = p == &image_compute ? 0x5f : stage ? 0x5e : 0x35; return 1; }
     if (p == &feedback_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x5d : 0x35; return 1; }
     if (p == &depth_clamp_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x53 : 0x5c; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
@@ -1888,6 +1890,57 @@ static void buffer_range_lifetime(void) {
     free(large);
     puts("600 live GPU buffer ranges and ring rollover retain their data through completion");
 }
+static void image_order(void) {
+    tex_t data={.serial=0xb197,.d={.width=4,.height=4,.depth=2,.levels=2,.flags=NVN_TEXTURE_FLAGS_IMAGE,
+        .target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_R32UI}};
+    tex_t color={.serial=0xb198,.d={.width=2,.height=2,.depth=1,.levels=1,.flags=NVN_TEXTURE_FLAGS_IMAGE,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_R32UI}};
+    nvn_tex_layout(&data.d,&data.L); nvn_tex_layout(&color.d,&color.L);
+    view_t slice={.set_target=1,.target=NVN_TEXTURE_TARGET_2D,.set_levels=1,.base_level=1,.nlevels=1,
+        .set_layers=1,.min_layer=1,.nlayers=1};
+    mtl_reg_tex(986,&data,&slice); mtl_reg_tex(987,&color,NULL);
+    const uint32_t src[8]={91,92,93,94,10,11,12,13}, dimensions[3]={2,2,1};
+    uint32_t counts[5]={71,0,0,0,72}, image[8]={0}, pixel[4]={0}, mip0[4]={0};
+    view_t mip={.set_levels=1,.base_level=1,.nlevels=1};
+    list_t list={0};
+    RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&data,.src=(uintptr_t)src,.r={.width=2,.height=2,.depth=1});
+    RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&data,.has_view=1,.view=mip,.src=(uintptr_t)src,.r={.width=2,.height=2,.depth=2});
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&color});
+    RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(counts+1),.size=12);
+    push_constants(&list,1,240,dimensions,sizeof dimensions);
+    RECORD(OP_DISPATCH,p_dispatch,.x=3,.y=1,.z=1);
+    RECORD(OP_BARRIER,uint32_t,NVN_BARRIER_ORDER_INDIRECT_DATA_BIT);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&image_compute,.stages=0x20);
+    RECORD(OP_BIND_IMG,p_bind_handles,.stage=5,.first=3,.n=2,.h={986,987});
+    RECORD(OP_DISPATCH,p_dispatch,.ind=(uintptr_t)(counts+1));
+    RECORD(OP_BARRIER,uint32_t,NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_INVALIDATE_SHADER_BIT);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&image_draw,.stages=3);
+    RECORD(OP_BIND_IMG,p_bind_handles,.stage=1,.first=3,.n=1,.h={986});
+    RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_BARRIER,uint32_t,NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
+    RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_BARRIER,uint32_t,NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_INVALIDATE_SHADER_BIT);
+    RECORD(OP_DISPATCH,p_dispatch,.ind=(uintptr_t)(counts+1));
+    RECORD(OP_BARRIER,uint32_t,NVN_BARRIER_ORDER_PRIMITIVES_BIT);
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&data,.view=mip,.has_view=1,.src=(uintptr_t)image,.r={.width=2,.height=2,.depth=2});
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&color,.src=(uintptr_t)pixel,.r={.width=2,.height=2,.depth=1});
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&data,.src=(uintptr_t)mip0,.r={.width=2,.height=2,.depth=1});
+    put(&list,OP_END,NULL,0);
+    mtl_queue_activate(0xb197);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    assert(counts[0]==71 && counts[4]==72 && !memcmp(counts+1,dimensions,sizeof dimensions));
+    assert(!memcmp(mip0,src,sizeof mip0) && !memcmp(image,src,sizeof mip0));
+    for (uint32_t i=0;i<4;++i) {
+        if (pixel[i]!=15+2*i || image[4+i]!=35+5*i) die("ordered image pixel %u: attachment %u, storage %u expected %u/%u",
+            i,pixel[i],image[4+i],15+2*i,35+5*i);
+    }
+    mtl_reg_tex(986,NULL,NULL); mtl_reg_tex(987,NULL,NULL);
+    mtl_tex_release(&data); mtl_tex_release(&color); mtl_queue_forget(0xb197);
+    puts("Vulkan direct and GPU-indirect dispatch, fragment image atomics, attachment reads and transfer barriers passed");
+}
+
 // Each output reads both attachments as they stood before this draw. The
 // attachments deliberately share their format and dimensions.
 static void attachment_feedback(void) {
@@ -2430,6 +2483,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
     if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); segment_timestamps(); return 0; }
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
+    if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_CLAMP")) { depth_clamp(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
@@ -2462,6 +2516,7 @@ int main(void) {
     gpu_indices();
     graphics_storage_alias();
     simultaneous_aliases();
+    image_order();
     attachment_feedback();
     layered_feedback();
     graphics_storage();
