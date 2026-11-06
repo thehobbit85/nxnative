@@ -698,7 +698,7 @@ static void bc_decode(int dec, const uint8_t *src, size_t src_pitch, uint32_t w,
 // ---------- Images ----------
 typedef struct { uint64_t key; VkImageView v; } vview;
 struct vtex {
-    uint64_t serial; VkImage img; VkImageUsageFlags usage; VkDeviceMemory m; int blk; VkDeviceSize moff, msize; fmt_t f; int nvn_fmt, target;
+    uint64_t serial; VkImage img; VkSampleCountFlagBits samples; VkImageUsageFlags usage; VkDeviceMemory m; int blk; VkDeviceSize moff, msize; fmt_t f; int nvn_fmt, target;
     uint32_t w, h, d, levels, layers; VkImageAspectFlags aspect; int uploaded, gpu;
     int dirty;   // the CPU wrote its storage since the last upload (WriteTexels, a movie frame, a flushed pool range): uploaded again at its next use, unless the GPU renders into it
     const uint8_t *mem; uint64_t len;   // its storage in guest memory
@@ -777,6 +777,7 @@ static vtex *tex_get_locked(const tex_t *t, int for_rt) {
     if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     VkSampleCountFlagBits sc = t->d.samples > 1 ? (VkSampleCountFlagBits)t->d.samples : VK_SAMPLE_COUNT_1_BIT;
+    v->samples = sc;
     // NVN permits a six-face square 2D array to be sampled through a cube view.
     int cube_views = cube || (t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY && v->w == v->h &&
                               v->layers >= 6 && sc == VK_SAMPLE_COUNT_1_BIT);
@@ -1385,23 +1386,24 @@ static VkPipelineLayout layout_get(shader_t *vs, shader_t *fs) {
 
 // ---------- Render passes: dynamic rendering, or a render pass + framebuffer made for each pass ----------
 typedef struct { int n; VkImageView cv[8]; VkFormat cf[8]; VkAttachmentLoadOp cl[8]; VkClearColorValue cc[8];
-                 VkImageView dv; VkFormat df; int stencil; VkAttachmentLoadOp dl, sl; VkClearDepthStencilValue dc; uint32_t w, h; VkImageLayout layout; } rp_desc;
+                 VkImageView dv; VkFormat df; int stencil; VkAttachmentLoadOp dl, sl; VkClearDepthStencilValue dc; uint32_t w, h; VkSampleCountFlagBits samples; VkImageLayout layout; } rp_desc;
 static struct { uint64_t key; VkRenderPass rp; } g_rpc[512]; static int g_nrpc; static pthread_mutex_t g_rpmu = PTHREAD_MUTEX_INITIALIZER;
 // The render pass of these attachments (cached; also the "compatible" one pipelines are made against: load actions do not affect compatibility)
-static VkRenderPass rp_get(const VkFormat *cf, const VkAttachmentLoadOp *cl, int n, VkFormat df, int stencil, VkAttachmentLoadOp dl, VkAttachmentLoadOp sl, VkImageLayout layout) {
+static VkRenderPass rp_get(const VkFormat *cf, const VkAttachmentLoadOp *cl, int n, VkFormat df, int stencil, VkAttachmentLoadOp dl, VkAttachmentLoadOp sl, VkImageLayout layout, VkSampleCountFlagBits samples) {
+    if (!samples) samples = VK_SAMPLE_COUNT_1_BIT;
     uint64_t key = 0xcbf29ce484222325ull;
     #define MIX(v) key = (key ^ (uint64_t)(v)) * 0x100000001b3ull
-    for (int i = 0; i < n; i++) { MIX(cf[i]); MIX(cl[i]); } MIX(n); MIX(df); MIX(stencil); MIX(dl); MIX(sl); MIX(layout);
+    for (int i = 0; i < n; i++) { MIX(cf[i]); MIX(cl[i]); } MIX(n); MIX(df); MIX(stencil); MIX(dl); MIX(sl); MIX(layout); MIX(samples);
     #undef MIX
     pthread_mutex_lock(&g_rpmu);
     for (int i = 0; i < g_nrpc; i++) if (g_rpc[i].key == key) { VkRenderPass r = g_rpc[i].rp; pthread_mutex_unlock(&g_rpmu); return r; }
     VkAttachmentDescription at[9]; VkAttachmentReference cr[8], dr = {VK_ATTACHMENT_UNUSED, layout}; uint32_t na = 0;
     for (int i = 0; i < n; i++) {
         if (!cf[i]) { cr[i] = (VkAttachmentReference){VK_ATTACHMENT_UNUSED, layout}; continue; }
-        at[na] = (VkAttachmentDescription){0, cf[i], VK_SAMPLE_COUNT_1_BIT, cl[i], VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, layout, layout};
+        at[na] = (VkAttachmentDescription){0, cf[i], samples, cl[i], VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, layout, layout};
         cr[i] = (VkAttachmentReference){na++, layout};
     }
-    if (df) { at[na] = (VkAttachmentDescription){0, df, VK_SAMPLE_COUNT_1_BIT, dl, VK_ATTACHMENT_STORE_OP_STORE, stencil ? sl : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+    if (df) { at[na] = (VkAttachmentDescription){0, df, samples, dl, VK_ATTACHMENT_STORE_OP_STORE, stencil ? sl : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                                                 stencil ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE, layout, layout}; dr.attachment = na++; }
     VkSubpassDescription sp = {0, VK_PIPELINE_BIND_POINT_GRAPHICS, 0, NULL, (uint32_t)n, cr, NULL, df ? &dr : NULL, 0, NULL};
     VkRenderPassCreateInfo ci = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, na, at, 1, &sp, 0, NULL};
@@ -1425,7 +1427,7 @@ static VkFramebuffer rp_begin(VkCommandBuffer cb, const rp_desc *d) {
     VkFormat cf[8]; VkImageView views[9]; VkClearValue cv[9]; uint32_t nv = 0;
     for (int i = 0; i < d->n; i++) { cf[i] = d->cv[i] ? d->cf[i] : VK_FORMAT_UNDEFINED; if (d->cv[i]) { cv[nv].color = d->cc[i]; views[nv++] = d->cv[i]; } }
     if (d->dv) { cv[nv].depthStencil = d->dc; views[nv++] = d->dv; }
-    VkRenderPass rp = rp_get(cf, d->cl, d->n, d->dv ? d->df : VK_FORMAT_UNDEFINED, d->stencil, d->dl, d->sl, d->layout);
+    VkRenderPass rp = rp_get(cf, d->cl, d->n, d->dv ? d->df : VK_FORMAT_UNDEFINED, d->stencil, d->dl, d->sl, d->layout, d->samples);
     VkFramebufferCreateInfo fi = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, rp, nv, views, d->w, d->h, 1};
     VkFramebuffer fb; VKCHECK(vkCreateFramebuffer(g_dev, &fi, NULL, &fb));
     VkRenderPassBeginInfo bi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, rp, fb, {{0, 0}, {d->w, d->h}}, nv, cv};
@@ -1455,7 +1457,7 @@ static uint32_t g_draw_base_instance;
 static VkBuffer g_dispatch_args;
 static VkDeviceSize g_dispatch_offset;
 static struct {   // the current render targets and the open dynamic rendering; clears that come before the pass's first draw become its load actions (a tiler then never reads the old contents)
-    int n; vtex *ct[8]; VkImageView cv[8]; VkFormat cf[8]; vtex *dt; VkImageView dv; uint32_t w, h; int open;
+    int n; vtex *ct[8]; VkImageView cv[8]; VkFormat cf[8]; vtex *dt; VkImageView dv; uint32_t w, h; VkSampleCountFlagBits samples; int incompatible_samples, open;
     uint32_t clv[8], cly[8]; uint8_t cwr[8], cdrawn[8];   // each colour attachment's level and layer, and whether a draw wrote it since its last same-pass snapshot (fb_prepare)
     uint8_t clr_c[8], clr_d, clr_s; VkClearColorValue cc[8]; float cd; uint32_t cs;
 } P;
@@ -1498,11 +1500,12 @@ static void begin_tracked_pass(const rp_desc *d) {
 }
 static int pass_begin(void) {
     if (P.open) return 1;
+    if (P.incompatible_samples) return 0;
     if (!P.n && !P.dt) {
         if (!S.rasterizer_discard) return 0;
         P.w = P.h = 1; // Vertex-only work still needs a valid render area.
     }
-    rp_desc d = {.n = P.n, .w = P.w, .h = P.h, .layout = VK_IMAGE_LAYOUT_GENERAL};
+    rp_desc d = {.n = P.n, .w = P.w, .h = P.h, .samples = P.samples, .layout = VK_IMAGE_LAYOUT_GENERAL};
     for (int i = 0; i < P.n; i++) { d.cv[i] = P.cv[i]; d.cf[i] = P.cf[i]; d.cl[i] = P.clr_c[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; d.cc[i] = P.cc[i]; if (P.clr_c[i]) P.cdrawn[i] = 1; }
     if (P.dt) { d.dv = P.dv; d.df = P.dt->f.f; d.stencil = P.dt->f.stencil; d.dl = P.clr_d ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
                 d.sl = P.clr_s ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; d.dc = (VkClearDepthStencilValue){P.cd, P.cs}; }
@@ -1531,6 +1534,13 @@ static void set_rt(const p_set_rt *r) {
         if (v && v->f.depth) { P.dt = v; P.dv = tex_view(v, r->depth, &r->dview, r->has_dview, -1, 1); uint32_t lv = r->has_dview && r->dview.set_levels ? r->dview.base_level : 0;
                                if ((v->w >> lv) < P.w) P.w = v->w >> lv ? v->w >> lv : 1; if ((v->h >> lv) < P.h) P.h = v->h >> lv ? v->h >> lv : 1; }
     }
+    P.samples = P.dv ? P.dt->samples : 0;
+    for (int i = 0; i < P.n; i++) if (P.cv[i]) {
+        if (P.samples && P.samples != P.ct[i]->samples) P.incompatible_samples = 1;
+        P.samples = P.ct[i]->samples;
+    }
+    if (P.incompatible_samples) RED_ONCE(95, "render target sample counts differ");
+    if (!P.samples) P.samples = VK_SAMPLE_COUNT_1_BIT;
     if (P.w == 0x7fffffff) P.w = P.h = 1;
 }
 
@@ -1648,7 +1658,7 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineRenderingCreateInfo rinfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, NULL, 0, (uint32_t)k->nc, k->cf, k->df, k->stencil ? k->df : VK_FORMAT_UNDEFINED};
     VkRenderPass crp = VK_NULL_HANDLE;
     if (!g_dynrend) { VkAttachmentLoadOp ld[8]; for (int i = 0; i < 8; i++) ld[i] = VK_ATTACHMENT_LOAD_OP_LOAD;
-                      crp = rp_get(k->cf, ld, k->nc, k->df, k->stencil, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_LOAD, VK_IMAGE_LAYOUT_GENERAL); }
+                      crp = rp_get(k->cf, ld, k->nc, k->df, k->stencil, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_LOAD, VK_IMAGE_LAYOUT_GENERAL, ms.rasterizationSamples); }
     VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, g_dynrend ? &rinfo : NULL, 0, k->fs ? 2 : 1, st, &vi, &ia, NULL, &vp, &rs, &ms, &ds, &cb, &dy, pl, crp, 0, VK_NULL_HANDLE, -1};
     VkPipeline p; VkResult r = vkCreateGraphicsPipelines(g_dev, g_pcache, 1, &gi, NULL, &p);
     if (r != VK_SUCCESS) { LOG("[RED] vk: pipeline for %s / %s not created (%d)", k->vs->key, k->fs ? k->fs->key : "-", (int)r); p = VK_NULL_HANDLE; }
@@ -2259,7 +2269,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     k.origin_ll = g_queue_origin_ll;
     k.vs = vs; k.fs = fs; k.prim = prim; k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
     k.nc = P.n; memcpy(k.cf, P.cf, sizeof k.cf); memcpy(k.blend, S.blend, P.n * sizeof *k.blend);
-    k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.ct[0] ? 1 : 1;
+    k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.samples;
     if (P.dt) { k.df = P.dt->f.f; k.stencil = P.dt->f.stencil; k.ds = S.ds; }
     if (g_plog) LOG("plog:  draw vs %s fs %s n %u depth t%d w%d f%d stencil %d f%d ops %d/%d/%d ref %u vm %#x wm %#x blend %#x mask %#x cull %d", vs->key, fs ? fs->key : "-", dw ? dw->count : di->count,
                     S.ds.dt, S.ds.dw, S.ds.df, S.ds.st, S.ds.sf_f, S.ds.fail_f, S.ds.zfail_f, S.ds.zpass_f, S.st_ref[0], S.st_vmask[0], S.st_wmask[0], S.color.blend_en, S.chmask.mask, S.poly.cull);
@@ -2454,7 +2464,6 @@ static shader_t *clear_shader(shader_t *shader, const uint32_t *code, size_t byt
     if (!shader->mod) {
         VkShaderModuleCreateInfo info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, bytes, code};
         VKCHECK(vkCreateShaderModule(g_dev, &info, NULL, &shader->mod));
-        shader->dsl = g_empty_dsl;
     }
     return shader;
 }
@@ -2515,16 +2524,20 @@ static shader_t *clear_fragment(enum clear_type type) {
         {floating, sizeof floating}, {unsigned_int, sizeof unsigned_int}, {signed_int, sizeof signed_int}};
     return clear_shader(&shaders[type], modules[type].code, modules[type].bytes);
 }
-static void draw_clear_color(VkFormat color, VkFormat depth, int stencil, unsigned mask,
-                             VkClearColorValue value, VkRect2D rect, VkExtent2D size) {
+static VkPipelineLayout clear_layout(void) {
     static VkPipelineLayout layout;
     if (!layout) {
-        VkPushConstantRange push = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof value};
+        VkPushConstantRange push = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(VkClearColorValue)};
         VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push};
         VKCHECK(vkCreatePipelineLayout(g_dev, &info, NULL, &layout));
     }
+    return layout;
+}
+static void draw_clear_color(VkFormat color, VkFormat depth, int stencil, VkSampleCountFlagBits samples, unsigned mask,
+                             VkClearColorValue value, VkRect2D rect, VkExtent2D size) {
+    VkPipelineLayout layout = clear_layout();
     pso_key k = {.vs = clear_vertex(), .fs = clear_fragment(clear_color_type(color)), .prim = NVN_DRAW_PRIMITIVE_TRIANGLES,
-                 .nc = 1, .cf = {color}, .df = depth, .stencil = stencil, .chmask = {.mask = mask}};
+                 .nc = 1, .cf = {color}, .df = depth, .stencil = stencil, .samples = samples, .chmask = {.mask = mask}};
     VkPipeline pipeline = pso_get(&k, layout);
     if (!pipeline) return;
     clear_draw_state(pipeline, rect, size, 0);
@@ -2533,18 +2546,18 @@ static void draw_clear_color(VkFormat color, VkFormat depth, int stencil, unsign
 }
 // A single-color pass can address any MRT slot without independentBlend, or
 // any renderable texture slice without disturbing the game's attachment state.
-static void clear_color_view(VkImageView view, VkFormat format, VkExtent2D size, VkRect2D rect,
+static void clear_color_view(VkImageView view, VkFormat format, VkSampleCountFlagBits samples, VkExtent2D size, VkRect2D rect,
                              unsigned mask, VkClearColorValue value) {
     int load_clear = mask == 15 && rect.extent.width == size.width && rect.extent.height == size.height;
     rp_desc d = {.n = 1, .cv = {view}, .cf = {format}, .cl = {load_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD},
-                 .cc = {value}, .w = size.width, .h = size.height, .layout = VK_IMAGE_LAYOUT_GENERAL};
+                 .cc = {value}, .w = size.width, .h = size.height, .samples = samples, .layout = VK_IMAGE_LAYOUT_GENERAL};
     begin_tracked_pass(&d);
     if (!load_clear) {
         if (mask == 15) {
             VkClearRect region = {.rect = rect, .layerCount = 1};
             VkClearAttachment attachment = {VK_IMAGE_ASPECT_COLOR_BIT, 0, {.color = value}};
             vkCmdClearAttachments(C->cb, 1, &attachment, 1, &region);
-        } else draw_clear_color(format, VK_FORMAT_UNDEFINED, 0, mask, value, rect, size);
+        } else draw_clear_color(format, VK_FORMAT_UNDEFINED, 0, samples, mask, value, rect, size);
     }
     rp_end(C->cb);
     barrier_all(C->cb);
@@ -2553,15 +2566,15 @@ static void clear_masked_color(int slot, unsigned mask, VkClearColorValue value,
     VkExtent2D size = {P.w, P.h};
     if (P.n != 1) {
         pass_end();
-        clear_color_view(P.cv[slot], P.cf[slot], size, rect, mask, value);
+        clear_color_view(P.cv[slot], P.cf[slot], P.ct[slot]->samples, size, rect, mask, value);
         if (P.ct[slot]->linrow && !P.clv[slot] && !P.cly[slot]) { lin_writeback(P.ct[slot]); barrier_all(C->cb); }
     } else if (pass_begin()) {
-        draw_clear_color(P.cf[slot], P.dt ? P.dt->f.f : VK_FORMAT_UNDEFINED, P.dt && P.dt->f.stencil, mask, value, rect, size);
+        draw_clear_color(P.cf[slot], P.dt ? P.dt->f.f : VK_FORMAT_UNDEFINED, P.dt && P.dt->f.stencil, P.samples, mask, value, rect, size);
         P.cdrawn[slot] = 1;
     }
 }
 static void clear_color(const p_clear_color *c) {
-    if (c->index < 0 || c->index >= P.n || !P.cv[c->index] || !(c->mask & 15)) return;
+    if (P.incompatible_samples || c->index < 0 || c->index >= P.n || !P.cv[c->index] || !(c->mask & 15)) return;
     VkClearRect r = {.rect = render_scissor(), .layerCount = 1};
     if (!r.rect.extent.width || !r.rect.extent.height) return;
     P.cwr[c->index] = 1;
@@ -2587,12 +2600,12 @@ static void clear_masked_stencil(const p_clear_ds *c, VkRect2D rect, float depth
     ;
     static shader_t fragment = {.key = "clear-stencil", .stage = 1};
     pso_key k = {.vs = clear_vertex(), .fs = clear_shader(&fragment, code, sizeof code),
-        .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .nc = P.n, .df = P.dt->f.f, .stencil = 1};
+        .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .nc = P.n, .df = P.dt->f.f, .stencil = 1, .samples = P.samples};
     memcpy(k.cf, P.cf, sizeof k.cf);
     k.ds = (ds_st){.dt = !!c->depth_mask, .dw = !!c->depth_mask, .df = NVN_COMPARE_FUNC_ALWAYS,
         .st = 1, .sf_f = NVN_COMPARE_FUNC_ALWAYS, .sf_b = NVN_COMPARE_FUNC_ALWAYS,
         .zpass_f = NVN_STENCIL_OP_REPLACE, .zpass_b = NVN_STENCIL_OP_REPLACE};
-    VkPipeline pipeline = pso_get(&k, layout_get(k.vs, k.fs));
+    VkPipeline pipeline = pso_get(&k, clear_layout());
     if (!pipeline || !pass_begin()) return;
     VkCommandBuffer cb = C->cb;
     clear_draw_state(pipeline, rect, (VkExtent2D){P.w, P.h}, depth);
@@ -2716,6 +2729,23 @@ static void copy_t2t(const p_copy_t2t *c) {
         return;
     }
     int same = c->sr.width == c->dr.width && c->sr.height == c->dr.height;
+    if (s->samples != d->samples) {
+        if (!(c->flags & DM_COPY_RESOLVE) || s->samples <= 1 || d->samples != 1 || depth ||
+            !same || s->f.f != d->f.f) {
+            RED_ONCE(96, "unsupported resolve between formats %d/%d with %u/%u samples", s->f.f,d->f.f,s->samples,d->samples);
+            return;
+        }
+        VkImageResolve region = {{VK_IMAGE_ASPECT_COLOR_BIT, sl, sly, 1}, {c->sr.xoffset,c->sr.yoffset,0},
+                                 {VK_IMAGE_ASPECT_COLOR_BIT, dl, dly, 1}, {c->dr.xoffset,c->dr.yoffset,0},
+                                 {(uint32_t)c->sr.width,(uint32_t)c->sr.height,1}};
+        vkCmdResolveImage(C->cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+        barrier_all(C->cb);
+        return;
+    }
+    if (s->samples > 1 && (!same || s->f.f != d->f.f)) {
+        RED_ONCE(96, "multisample image copies require matching extents and formats");
+        return;
+    }
     VkFormatFeatureFlags sf = fmt_feat(s->f.f), df = fmt_feat(d->f.f);
     int lin = (c->flags & 1) && !same, blit_ok = (sf & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && (df & VK_FORMAT_FEATURE_BLIT_DST_BIT) && (!lin || (sf & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) && sa == da;
     if (depth && (lin || getenv("DM_VK_DEPTH_COPY_TRANSFER"))) blit_ok = 0;   // depth blits require NEAREST; the switch exercises the transfer fallback on capable drivers
@@ -2813,7 +2843,7 @@ static void clear_tex(const p_clear_tex *c) {
             slice.min_layer = (uint32_t)first + i;
             VkImageView view = tex_view(v, c->tex, &slice, 1, -1, VIEW_ATTACHMENT);
             if (!view) return;
-            clear_color_view(view, fmt.f, (VkExtent2D){w,h}, rect, mask, value);
+            clear_color_view(view, fmt.f, v->samples, (VkExtent2D){w,h}, rect, mask, value);
         }
     }
     v->gpu = 1;

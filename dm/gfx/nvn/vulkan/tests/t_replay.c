@@ -29,6 +29,7 @@ static prog_t split_program[3] = {{.nstage = 2}, {.nstage = 2}, {.nstage = 2}};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
 static prog_t depth_range_program = {.nstage = 2};
+static prog_t one_sample_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
 static prog_t origin_program = {.nstage = 2};
 static prog_t draw_parameters_program = {.nstage = 2};
@@ -40,6 +41,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
     if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
@@ -783,6 +785,38 @@ static void conditional_rendering(void) {
     mtl_reg_tex(908, NULL, NULL);
     mtl_tex_release(&sampled); mtl_tex_release(&depth); mtl_tex_release(&color); mtl_queue_forget(0x8115);
     puts("Vulkan conditional clears and draws matched all four modes, pending timestamps and unknown reports");
+}
+
+static void multisample_colors(void) {
+    tex_t source = {.serial=0x8120, .d={.width=4,.height=4,.depth=2,.levels=1,.samples=4,
+        .target=NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY,.format=NVN_FORMAT_RGBA8}};
+    tex_t result = source;
+    result.serial++; result.d.target=NVN_TEXTURE_TARGET_2D_ARRAY; result.d.samples=1;
+    nvn_tex_layout(&source.d, &source.L); nvn_tex_layout(&result.d, &result.L);
+    view_t layer = {.set_layers=1,.min_layer=1,.nlayers=1};
+    list_t list = {0};
+    uint8_t pixels[2][4][4][4];
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex=&result,.r={.width=4,.height=4,.depth=2},.mask=15,.c.f={1,0,1,1});
+    RECORD(OP_SET_RT, p_set_rt, .n=1,.color={&source},.has_cview={1},.cview={layer});
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .mask=15,.rgba={0,0,1,1});
+    RECORD(OP_SCISSOR, p_scissor, .w=4,.h=2);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .mask=2,.rgba={1,1,0,0});
+    RECORD(OP_SCISSOR, p_scissor, .x=1,.w=2,.h=4);
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&one_sample_program,.stages=3);
+    RECORD(OP_DRAW, p_draw, .prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_COPY_T2T, p_copy_t2t, .src=&source,.dst=&result,.flags=DM_COPY_RESOLVE,
+           .has_sv=1,.sv=layer,.has_dv=1,.dv=layer,.sr={.width=4,.height=4,.depth=1},.dr={.width=4,.height=4,.depth=1});
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&result,.src=(uintptr_t)pixels,.r={.width=4,.height=4,.depth=2});
+    put(&list, OP_END, NULL, 0); mtl_queue_activate(0x8120);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    for (int z=0; z<2; z++) for (int y=0; y<4; y++) for (int x=0; x<4; x++) {
+        int drawn = z && x >= 1 && x < 3;
+        uint8_t expected[] = {z ? (drawn ? 64 : 0) : 255, z && y < 2 ? (drawn ? 191 : 255) : 0, drawn ? 191 : 255, 255};
+        if (memcmp(expected, pixels[z][y][x], 4)) die("4x resolve layer %d at %d,%d: %u,%u,%u,%u",
+            z,x,y,pixels[z][y][x][0],pixels[z][y][x][1],pixels[z][y][x][2],pixels[z][y][x][3]);
+    }
+    mtl_tex_release(&source); mtl_tex_release(&result); mtl_queue_forget(0x8120);
+    puts("Vulkan 4x resolve averaged one red sample and preserved the adjacent array layer");
 }
 
 static void texture_clear_regions(void) {
@@ -1638,6 +1672,7 @@ static void native_warp_width(unsigned available) {
 int main(void) {
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
+    if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
@@ -1695,5 +1730,6 @@ int main(void) {
     conditional_rendering();
     integer_attachment_clears();
     texture_clear_regions();
+    multisample_colors();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
