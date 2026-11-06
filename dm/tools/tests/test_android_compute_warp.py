@@ -193,6 +193,23 @@ class ComputeWarp(unittest.TestCase):
         subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=result, check=True)
         self.assertNotIn(224, [opcode(i) for i in decode(result)[1]])
 
+    def test_converged_shared_warp_barriers_widen_both_scopes(self):
+        exchange = '%value = OpGroupNonUniformShuffle %uint %scope %id %one'
+        barrier = 'OpControlBarrier %scope %scope %sem'
+        for with_exchange in (False, True):
+            source = assembly().replace('%input =', '%sem = OpConstant %uint 264\n%input =')
+            source = source.replace(exchange, barrier + ('\n' + exchange if with_exchange else ''))
+            raw = self.assemble(source)
+            portable = spv_warp.lower(raw)
+            _, code = decode(portable)
+            constants = {i[2]: i[3] for i in code if opcode(i) == 43}
+            barriers = [(constants[i[1]], constants[i[2]], constants[i[3]]) for i in code if opcode(i) == 224]
+            self.assertEqual(barriers, [(2, 2, 264)] * (3 if with_exchange else 1))
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=portable, check=True)
+        source = assembly(branch=True).replace('%input =', '%sem = OpConstant %uint 264\n%input =').replace(exchange, barrier)
+        raw = self.assemble(source)
+        self.assertEqual(spv_warp.lower(raw), raw)
+
     def test_physical_subgroup_barrier_in_either_scope_keeps_native_path(self):
         source = assembly().replace('%input =', '%wg = OpConstant %uint 2\n%sem = OpConstant %uint 72\n%input =')
         for barrier in ('OpControlBarrier %wg %scope %sem', 'OpControlBarrier %scope %scope %sem', 'OpMemoryBarrier %scope %sem'):
