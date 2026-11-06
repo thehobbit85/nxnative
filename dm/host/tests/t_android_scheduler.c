@@ -13,6 +13,33 @@ uint32_t svc_thread_main_init(void);
 void guest_thread_init(void);
 void thr_counts(int *, int *, int *);
 int thr_limit_used(void);
+void dm_guest_cond_wait_ns(pthread_cond_t *, pthread_mutex_t *, int64_t);
+static pthread_mutex_t poll_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t poll_cond = PTHREAD_COND_INITIALIZER;
+static int poll_ready;
+
+static void *signal_poll(void *unused) {
+    (void)unused;
+    pthread_mutex_lock(&poll_mutex);
+    poll_ready = 1;
+    pthread_cond_signal(&poll_cond);
+    pthread_mutex_unlock(&poll_mutex);
+    return NULL;
+}
+static void check_poll_wait(void) {
+    pthread_mutex_lock(&poll_mutex);
+    uint64_t start = now_ns(), duration = 20000000;
+    dm_guest_cond_wait_ns(&poll_cond, &poll_mutex, duration);
+    assert(now_ns() - start >= duration);
+    pthread_t writer;
+    assert(!pthread_create(&writer, NULL, signal_poll, NULL));
+    start = now_ns();
+    while (!poll_ready) dm_guest_cond_wait_ns(&poll_cond, &poll_mutex, 5000000000);
+    assert(now_ns() - start < 5000000000);
+    pthread_mutex_unlock(&poll_mutex);
+    assert(!pthread_join(writer, NULL));
+}
+
 static _Atomic unsigned phases;
 static uint32_t read_end, write_end, worker, main_thread;
 static uint8_t *stack;
@@ -247,6 +274,7 @@ int main(void) {
     setenv("DM_HITCH_DUMP", "1", 1);
     main_tls = dm_slot_get(g_keytls); main_tlr = dm_slot_get(g_keytlr);
     main_thread = svc_thread_main_init();
+    check_poll_wait();
     int thr_name_of_tid(int, char *, size_t); char sampled_name[96];
     assert(thr_name_of_tid((int)syscall(SYS_gettid), sampled_name, sizeof sampled_name) && strstr(sampled_name, "main thread"));
     assert(!thr_name_of_tid(INT_MAX, sampled_name, sizeof sampled_name));
