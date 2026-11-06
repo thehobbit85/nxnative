@@ -46,7 +46,6 @@ static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; s
 static VkPhysicalDeviceMemoryProperties g_memp; static VkPhysicalDeviceProperties g_props;
 static uint64_t g_timestamp_mask;
 static int g_segment_timestamps, g_cut_draws;
-static uint64_t g_stat_draws;
 static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
 static int g_draw_parameters, g_descriptor_tables;
 static uint32_t g_vertex_divisor_limit = 1;
@@ -180,7 +179,7 @@ typedef struct {
     int timed_reports; uint64_t submitted_ns;
     visibility_queries visibility;
     query_pages time_boundaries;
-    uint64_t cut_draw0;
+    uint64_t raster_draws;
     int cut_copy;
     VkFramebuffer *fb; int nfb, cfb;   // render passes' framebuffers (no dynamic rendering), destroyed when the submission is done
     VkBuffer ring0; VkDeviceMemory ringm0; uint8_t *ringp0;   // the context's own ring; ring / ringp move to extra rings when a submission outgrows it (loading screens upload hundreds of MB)
@@ -1990,12 +1989,12 @@ static int pass_begin(void) {
 // the draw threshold. Vulkan can timestamp that boundary without submitting
 // early or changing when a guest fence sees the reports.
 static void timestamp_cut(void) {
-    if (!C->cut_copy && (g_cut_draws<=0 || g_stat_draws-C->cut_draw0<(uint64_t)g_cut_draws)) return;
+    if (!C->cut_copy && (g_cut_draws<=0 || C->raster_draws<(uint64_t)g_cut_draws)) return;
     uint32_t slot;
     query_page *page=query_slot(&C->time_boundaries,VK_QUERY_TYPE_TIMESTAMP,C->up,&slot);
     vkCmdWriteTimestamp(C->cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,page->pool,slot);
     post_add((post_t){.kind=POST_TIME_BOUNDARY,.samples=&page->samples[slot]});
-    C->cut_draw0=g_stat_draws; C->cut_copy=0;
+    C->raster_draws=0; C->cut_copy=0;
 }
 static void set_rt(const p_set_rt *r) {
     int timing=g_segment_timestamps && C->qp;
@@ -2764,7 +2763,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
     return ds;
 }
 static _Atomic uint64_t g_wait_ns, g_rec_ns, g_pwait_ns;   // time the submit thread waited for the GPU, spent recording, and the present waited for its slot
-static uint64_t g_stat_skip, g_skip_why[8];   // why: 0 no program, 1 shader missing / rejected, 2 no render target, 3 indirect, 4 primitive, 5 pipeline, 6 descriptors
+static uint64_t g_stat_draws, g_stat_skip, g_skip_why[8];   // why: 0 no program, 1 shader missing / rejected, 2 no render target, 3 indirect, 4 primitive, 5 pipeline, 6 descriptors
 #define SKIP(w) do { g_stat_skip++; g_skip_why[w]++; return; } while (0)
 static int draw_begin(uint32_t write_mask) {
     if (!pass_begin()) return 0;
@@ -2980,7 +2979,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
         for (uint32_t i = 0; i < (uint32_t)di->count; i++) { uint32_t v = source_index(isrc,isz,i); if (restart && v == S.restart.index) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
         if (lo <= hi) { vlo = (int64_t)lo + di->base_vertex; vhi = (int64_t)hi + di->base_vertex; }
     }
-    if (vhi < vlo) { g_stat_draws++; return; }
+    if (vhi < vlo) { g_stat_draws++; C->raster_draws++; return; }
     if (vlo < 0) vlo = 0;
     if (vs->draw_push) {
         // The guest sees its original indices even though Vulkan fetches from
@@ -3037,7 +3036,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     g_pass_shader_writes |= mark_image_writes(0);
     if (fs) g_pass_shader_writes |= mark_image_writes(1);
     if (capture.layout) feedback_finish(&capture);
-    g_stat_draws++;
+    g_stat_draws++; C->raster_draws++;
 }
 // CPU range staging and primitive conversion need the actual vertex/index
 // bounds. Resolve only the bytes those operations consume, in submission order.
@@ -3649,7 +3648,7 @@ static void begin_segment(void) {
     pthread_mutex_lock(&g_mu); while (c->fence_val > g_done) pthread_cond_wait(&g_cv, &g_mu); pthread_mutex_unlock(&g_mu);
     atomic_fetch_add(&g_wait_ns, now_ns() - w0);
     C = c; C->used = 0; C->capacity = RING; C->up_used = 0; g_ndc = 0; g_wgen++; C->ring = C->ring0; C->ringp = C->ringp0;
-    C->cut_draw0=g_stat_draws; C->cut_copy=0;
+    C->raster_draws=0; C->cut_copy=0;
     C->dp = C->dp0; VKCHECK(vkResetDescriptorPool(g_dev, C->dp, 0));
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     VKCHECK(vkBeginCommandBuffer(C->cb, &bi)); VKCHECK(vkBeginCommandBuffer(C->up, &bi));

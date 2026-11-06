@@ -1277,7 +1277,8 @@ static void counter_boundaries(void) {
     int interval=cut_env ? atoi(cut_env) : 64;
     if (interval>256) return;
     uint32_t bits; replay_features(NULL,&bits);
-    enum { segments=3 };
+    enum { segments=4 };
+    uint32_t computed=0, sentinel=0x51ab29;
     tex_t target[2]={{.serial=0x8a20,.d={.width=64,.height=64,.depth=1,.samples=1,.levels=1,
         .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}}};
     nvn_tex_layout(&target[0].d,&target[0].L); target[1]=target[0]; target[1].serial++;
@@ -1294,21 +1295,27 @@ static void counter_boundaries(void) {
         uint64_t bottom[]={NVN_COUNTER_TYPE_TIMESTAMP,(uintptr_t)&results[i][1]};
         put(&list,OP_REPORT_COUNTER,top,sizeof top); put(&list,OP_END,NULL,0); mtl_exec(list.bytes);
         list=(list_t){0};
-        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        int repeats=i==1 || i==2 ? 1 : (interval>0 ? interval : 2);
+        if (i==1) {
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&computed,.size=sizeof computed);
+            push_constants(&list,1,240,&sentinel,sizeof sentinel);
+            RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+        } else RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
         put(&list,OP_END,NULL,0);
-        int draws=i==1 ? 1 : (interval>0 ? interval : 2);
-        for (int k=0;k<draws;k++) mtl_exec(list.bytes);
+        for (int k=0;k<repeats;k++) mtl_exec(list.bytes);
         list=(list_t){0}; put(&list,OP_REPORT_COUNTER,bottom,sizeof bottom); put(&list,OP_END,NULL,0);
         mtl_exec(list.bytes);
     }
     assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    assert(computed==sentinel);
     uint64_t latest=nvn_timestamp_from_ns(guest_ns());
     for (int i=0;i<segments;i++) {
         uint64_t a=results[i][0].timestamp, b=results[i][1].timestamp;
         assert(earliest<=a && a<=b && b<=latest);
         assert(results[i][0].counter==(DM_GAME_RENDER_COND ? 0 : a));
         assert(results[i][1].counter==(DM_GAME_RENDER_COND ? 0 : b));
-        if (i && segmented && bits && (i==1 ? interval>0 : interval==1)) {
+        if (i && segmented && bits && ((i==1 && interval>0) || (i==3 && interval==1))) {
             assert(results[i-1][0].timestamp<a && results[i-1][1].timestamp==a && a<b);
         } else if (i) {
             assert(a==results[i-1][0].timestamp && b==results[i-1][1].timestamp);
