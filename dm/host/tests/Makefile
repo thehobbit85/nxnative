@@ -553,11 +553,18 @@ $(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_a
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 $(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox
-$(B)/t_android_avc: t_android_avc.c h264_synthetic.h ../hle_movie_avc.c ../hle_movie_avc.h ../movie_avc_android.inc $(GAME_H) | $(B)
+$(B)/t_android_avc: t_android_avc.c h264_synthetic.h ../hle_movie_avc.c ../hle_movie_avc.h ../movie_avc_android.inc ../movie_mediacodec.h $(GAME_H) | $(B)
 	$(CLANG) -O2 -D_GNU_SOURCE -Wall -Werror -Wno-unused-function -Wno-format -UNDEBUG -I.. $(GINC) \
 	    t_android_avc.c ../hle_movie_avc.c -Wl,-z,max-page-size=16384 -lmediandk -o $@
 $(B)/t_android_avc_metadata: t_android_avc_metadata.c ../hle_movie_avc.c ../hle_movie_avc.h ../movie_avc_android.inc ../movie_mediacodec.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -D_GNU_SOURCE -Wall -Werror -Wno-unused-function -Wno-format -I.. $(GINC) $< -lmediandk -o $@
+
+ANDROID_VPX ?= ../gen/android-arm64/vpx/libvpx.a
+$(B)/t_android_movie_avc: h264_synthetic.h
+$(B)/t_android_movie_aac: aac_synthetic.h
+$(B)/t_android_movie_avc $(B)/t_android_movie_aac: $(B)/%: %.c movie_guest_fixture.h ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../movie_avc_android.inc ../movie_aac_android.inc ../movie_mediacodec.h $(ANDROID_VPX) $(GAME_H) | $(B)
+	$(CLANG) -O1 -D_GNU_SOURCE -Wall -Werror -Wno-unused-function -Wno-format -Wno-tautological-compare -I.. $(GINC) \
+	    -I../../third_party/libvpx -I../../third_party/stb_vorbis $< ../hle_movie_avc.c $(ANDROID_VPX) -lmediandk -lm -o $@
 
 # Pass the NDK compiler (CLANG) and llvm-ar (CODEC_AR) on any build host.
 .PHONY: android-software-video
