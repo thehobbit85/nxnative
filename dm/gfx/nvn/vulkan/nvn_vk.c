@@ -2416,7 +2416,7 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
 typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; VkDeviceSize texel_align; int writable, conflict; } storage_range;
 static storage_range g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
 static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
-typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes; VkBufferUsageFlags single_usage; } texel_range;
+typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes, swizzle; VkBufferUsageFlags single_usage; } texel_range;
 // The staging buffers carry both texel usage bits. Their views must meet
 // both limits, even if this binding only reads. For three-component formats
 // Vulkan uses the component size for its single-texel alignment rule.
@@ -2440,10 +2440,9 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         fmt_t f = fmt_of(format);
         int bw, bh, bytes = nvn_fmt_bpb(format, &bw, &bh);
         uint64_t size = (uint64_t)tr.t.d.width * (unsigned)original_bytes;
-        if (original_bytes <= 0 || original_bw != 1 || original_bh != 1 || bytes <= 0 || bw != 1 || bh != 1 || f.dec || f.depth || f.noalpha || f.f == VK_FORMAT_UNDEFINED ||
+        if (original_bytes <= 0 || original_bw != 1 || original_bh != 1 || bytes <= 0 || bw != 1 || bh != 1 || f.dec || f.depth || f.f == VK_FORMAT_UNDEFINED ||
             !size || size % bytes || size / bytes > g_props.limits.maxTexelBufferElements || size > UINT64_MAX - (uintptr_t)tr.t.mem ||
-            (tr.t.set_swz && tr.t.swz != (2 | 3<<3 | 4<<6 | 5<<9)) ||
-            (tr.has_v && (tr.v.set_swizzle || (tr.v.set_target && tr.v.target != NVN_TEXTURE_TARGET_BUFFER)))) ok = 0;
+            (tr.has_v && tr.v.set_target && tr.v.target!=NVN_TEXTURE_TARGET_BUFFER)) ok=0;
         if (ok && tr.t.pool) {
             uint64_t base = (uintptr_t)tr.t.pool->mem, addr = (uintptr_t)tr.t.mem;
             if (addr < base || addr - base > tr.t.pool->size || size > tr.t.pool->size - (addr - base)) ok = 0;
@@ -2455,6 +2454,14 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         if (!(fp.bufferFeatures & (storage ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT : VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT))) ok=0;
         if (ok) {
             *out=(texel_range){.range={.addr=(uintptr_t)tr.t.mem,.size=size},.format=f.f,.bytes=(uint32_t)bytes};
+            uint8_t sw[4]={2,3,4,5};
+            sampled_swizzle(sw,f,&tr.t,&tr.v,tr.has_v);
+            for (unsigned c=0;c<4;c++) if (sw[c]>5) sw[c]=2+c;
+            uint32_t map=sw[0]|(sw[1]<<3)|(sw[2]<<6)|(sw[3]<<9);
+            if (map!=(2|3<<3|4<<6|5<<9)) {
+                if (storage) ok=0;
+                else out->swizzle=map+1;
+            }
             if ((fp.bufferFeatures & both)!=both)
                 out->single_usage=storage ? VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT : VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
         }
@@ -2513,15 +2520,16 @@ static int shader_texel_biases(const shader_t *s, texel_bias *edits, size_t *cou
             VkBuffer buf; VkDeviceSize offset, prefix; uint8_t *mapped;
             const storage_range *group=prepared_storage(t.range.addr,t.range.size,&buf,&offset,&mapped);
             if (!group) return 0;
-            if (!group->writable || !group->conflict) continue;
-            if (!texel_prefix(&t,offset,&prefix)) return 0;
-            if (prefix) edits[(*count)++]=(texel_bias){b->binding,j,(uint32_t)(prefix/t.bytes)};
+            prefix=0;
+            if (group->writable && group->conflict && !texel_prefix(&t,offset,&prefix)) return 0;
+            if (prefix || t.swizzle) edits[(*count)++]=(texel_bias){b->binding,j,(uint32_t)(prefix/t.bytes),t.swizzle};
         }
     }
     return 1;
 }
 static int prepare_storage(shader_t **first, shader_t **second) {
     g_nstorage = 0;
+    int needs_texel_variant=0;
     if (!prepare_tables(first) || (second && !prepare_tables(second))) return 0;
     shader_t *stages[] = {*first, second ? *second : NULL};
     for (int st = 0; st < 2; st++) {
@@ -2536,6 +2544,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             if (is_texel(b)) {
                 texel_range t; if (!texel_binding(b,s->stage,element,&t)) return 0;
                 u=t.range; if (u.addr) texel_align=texel_alignment(t.bytes);
+                needs_texel_variant|=t.swizzle!=0;
             }
             if (!u.addr || !u.size) continue;
             if (u.size > UINT64_MAX - u.addr) return 0;
@@ -2563,7 +2572,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
         } else g_storage[n++] = *r;
     }
     g_nstorage = n;
-    int writable_conflict=0;
+
     for (size_t i = 0; i < n; i++) {
         storage_range *r = &g_storage[i];
         VkDeviceSize ta=r->texel_align, align=g_props.limits.minStorageBufferOffsetAlignment;
@@ -2574,7 +2583,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             // and reserve space for a possible three-component view prefix.
             prefix=2*ta+r->addr%ta;
             if (align<4*ta) align=4*ta;
-            writable_conflict=1;
+            needs_texel_variant=1;
         }
         if (!prefix && gw_find(r->addr, r->size, align, &r->buf, &r->off, &r->p)) continue;
         VkDeviceSize offset = copy_in_at(r->addr, r->size, align, prefix);
@@ -2593,7 +2602,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
         }
         static texel_bias texels[DM_VK_MAX_BINDINGS*32];
         size_t nt=0;
-        if (writable_conflict && !shader_texel_biases(s,texels,&nt)) return 0;
+        if (needs_texel_variant && !shader_texel_biases(s,texels,&nt)) return 0;
         shader_t *variant=buffer_variant(s,bias,texels,nt);
         if(!variant) return 0;
         if(st) *second=variant;else *first=variant;
