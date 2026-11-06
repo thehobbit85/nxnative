@@ -660,6 +660,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Open:** an upsample that picks its level in the shader (an explicit LOD through a sampler that pins none) still gets the view of the levels below; no game is known to do it.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#rendering), found by the author of PR #1073: its two bloom chains (576×324 R11G11B10F, 5 levels) downsample with `ef18c6eca9b2f991` (sampler LOD n − 1..n − 1) and upsample with `ad1a5991aaad135e` (n + 1..n + 1); a pass dump showed the upsample drawing level 3 through view `0+3` with LOD 4..4. With the rule switched off and on through the Ingot Isle stage intro, the neon letters went fat and filled, then thin, with it.
 
+### Zero far depth in a Vulkan viewport
+
+- **Symptom:** An explicit reversed depth range maps a vertex at clip depth 0.25 to 1.0. A range with both endpoints at zero also produces the wrong fragment depth.
+- **Cause:** The Vulkan draw path treated a recorded far value of zero as a request for the default far value of one.
+- **Fix:** Use the recorded near and far values when setting the Vulkan viewport. Queue initialization already supplies the default range of zero to one.
+- **Found on:** The synthetic ARM64 Android replay draws into an R32F target with normal, reversed and zero ranges. It checks each pixel against 0.25, 0.75 or zero and verifies that pixels outside the viewports retain their clear value.
+
 ### Lower-left window origin
 
 - **Symptom:** text a game renders into textures for the title and the menus comes out upside down, while the scene looks right.

@@ -2250,7 +2250,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     // Vulkan's positive height implements NVN lower-left; upper-left needs a flip.
     float x = 0, y = 0, w = (float)P.w, h = (float)P.h;
     if (S.has_vp) { x = S.vp[0][0]; y = S.vp[0][1]; w = S.vp[0][2]; h = S.vp[0][3]; }
-    VkViewport vv = {x, g_origin_ll ? y : y + h, w, g_origin_ll ? h : -h, S.dr[0], S.dr[1] ? S.dr[1] : 1};
+    VkViewport vv = {x, g_origin_ll ? y : y + h, w, g_origin_ll ? h : -h, S.dr[0], S.dr[1]};
     vkCmdSetViewport(cb, 0, 1, &vv);
     VkRect2D sc = {{0, 0}, {P.w, P.h}};
     if (S.has_sc) {

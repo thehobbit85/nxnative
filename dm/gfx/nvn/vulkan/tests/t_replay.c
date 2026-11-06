@@ -28,6 +28,7 @@ static prog_t uniform_storage_program = {.nstage = 2};
 static prog_t split_program[3] = {{.nstage = 2}, {.nstage = 2}, {.nstage = 2}};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
+static prog_t depth_range_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
 static prog_t origin_program = {.nstage = 2};
 static prog_t draw_parameters_program = {.nstage = 2};
@@ -39,6 +40,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
     if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
     if (p == &c2_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x51 : 0x35; return 1; }
@@ -648,6 +650,51 @@ static void queue_viewport_origin(void) {
     }
     mtl_queue_forget(110); mtl_queue_forget(111);
     puts("Vulkan viewport rectangles address the same memory rows for both origins");
+}
+
+// A nested program binding must reach a draw recorded by the caller. Reading
+// fragment depth into R32F also distinguishes explicit zero from default far.
+static void nested_depth_ranges(void) {
+    tex_t target = {.magic = MAGIC('T','E','X',0), .serial = 0x8102, .d = {.width = 8, .height = 2, .depth = 1,
+        .levels = 1, .samples = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_R32F}};
+    nvn_tex_layout(&target.d, &target.L);
+    list_t inner = {0}, middle = {0}, list = {0};
+    p_bind_program program_bind = {.prog = &depth_range_program, .stages = 3};
+    put(&inner, OP_BIND_PROGRAM, &program_bind, sizeof program_bind);
+    volatile uint32_t event = 0;
+    struct { volatile uint32_t *dst; uint32_t mode, value; } signal = {&event, NVN_EVENT_SIGNAL_MODE_WRITE, 7};
+    put(&inner, OP_SIGNAL_EVENT, &signal, sizeof signal);
+    put(&inner, OP_END, NULL, 0);
+    const uint8_t *child = inner.bytes;
+    put(&middle, OP_CALL, &child, sizeof child);
+    signal.mode = NVN_EVENT_SIGNAL_MODE_ADD; signal.value = 4;
+    put(&middle, OP_SIGNAL_EVENT, &signal, sizeof signal);
+    put(&middle, OP_END, NULL, 0);
+    float pixels[16] = {0};
+    RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&target});
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .mask = 15, .rgba = {0.5f, 0, 0, 1});
+    child = middle.bytes;
+    put(&list, OP_CALL, &child, sizeof child);
+    const float ranges[][2] = {{0,1}, {1,0}, {0,0}};
+    for (int i = 0; i < 3; ++i) {
+        RECORD(OP_VIEWPORTS, p_viewports, .n = 1, .v = {{2*i, 0, 2, 2}});
+        RECORD(OP_DEPTH_RANGE, p_depth_range, .n = ranges[i][0], .f = ranges[i][1]);
+        RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+    }
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &target, .src = (uintptr_t)pixels,
+        .r = {.width = 8, .height = 2, .depth = 1});
+    put(&list, OP_END, NULL, 0);
+    mtl_queue_activate(0x8102);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    assert(event == 11);
+    const float expected[] = {0.25f, 0.75f, 0, 0.5f};
+    for (int i = 0; i < 16; ++i) {
+        float want = expected[(i % 8) / 2];
+        if (pixels[i] != want) die("viewport depth at pixel %d: got %g, expected %g", i, pixels[i], want);
+    }
+    mtl_tex_release(&target);
+    mtl_queue_forget(0x8102);
+    puts("Vulkan nested program binding, reversed depth and zero far depth passed");
 }
 
 // Same expectations as Metal's t_queue_origin: queue-latched raster origin
@@ -1311,6 +1358,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
     if (getenv("DM_VK_TEST_C0")) { compute_driver_constants(); draw_parameters(); return 0; }
@@ -1362,5 +1410,6 @@ int main(void) {
     queue_lifetime();
     origin_facing();
     queue_viewport_origin();
+    nested_depth_ranges();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
