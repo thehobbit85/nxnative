@@ -5,6 +5,7 @@ value per lane for Shuffle, and the four known words of a physical ballot.
 This exercises the exporter's actual index selection and predicate operations
 for 32, 64 and 128 lanes on an emulator whose hardware subgroup has four.
 """
+from itertools import product
 import os
 from pathlib import Path
 import struct
@@ -22,12 +23,12 @@ def predicate(i):
     return i % 2 == 0 if i // 32 == 2 else i // 32 % 2 != 0
 
 
-def physical_inputs(raw, count):
+def physical_inputs(raw, active_lanes):
     module = Module(raw)
     builtins = {i[3]: i[1] for i in module.code if opcode(i) == 71 and i[2] == 11}
     true_ids = {i[2] for i in module.code if opcode(i) == 41}
-    active = [(1 << min(32, max(0, count - start))) - 1 for start in range(0, 128, 32)]
-    votes = [sum(1 << j for j in range(32) if start + j < count and predicate(start + j)) for start in range(0, 128, 32)]
+    active = [sum(1 << (i % 32) for i in active_lanes if i // 32 == warp) for warp in range(4)]
+    votes = [sum(1 << (i % 32) for i in active_lanes if i // 32 == warp and predicate(i)) for warp in range(4)]
     # The guest path reads component zero of Eq/Le; the physical register
     # spans the entire wave. Model the lower word even for lanes above 31.
     masks = {i[2]: kind for i in module.code if opcode(i) == 65 and len(i) == 5
@@ -73,20 +74,25 @@ def generate(directory, negative=False):
     out.mkdir(parents=True, exist_ok=True)
     shader = Path(__file__).with_name('native_warp.comp')
     cases = []
-    for count in (32, 64, 116, 128):
+    for count, sparse in product((32, 64, 116, 128), (False, True)):
         raw = subprocess.check_output([os.environ.get('GLSLC', 'glslc'), '-fshader-stage=comp', '--target-env=vulkan1.1',
-                                       f'-DLANES={count}', shader, '-o', '-'])
+                                       f'-DLANES={count}', f'-DSPARSE={int(sparse)}', shader, '-o', '-'])
         raw = raw if negative else spv_warp_native.lower(raw)
-        data = physical_inputs(raw, count)
+        active_lanes = {i for i in range(count) if not sparse or i % 32 < 4 or (i % 32 // 4 + i // 32) % 3 != 1}
+        data = physical_inputs(raw, active_lanes)
         subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=data, check=True)
-        key = 'native-' + str(count)
+        key = f'native-{count}' + ('-sparse' if sparse else '')
         (out / (key + '.spv')).write_bytes(data)
         expected = []
         for tid in range(count):
+            if tid not in active_lanes:
+                expected.extend([3135106223] * 10)
+                continue
             lane = tid % 32
             first = tid - lane
-            bits = [predicate(i) for i in range(first, min(first + 32, count))]
-            mask = sum(1 << i for i, bit in enumerate(bits) if bit)
+            peers = [i for i in range(first, first + 32) if i in active_lanes]
+            bits = [predicate(i) for i in peers]
+            mask = sum(1 << (i % 32) for i in peers if predicate(i))
             expected.extend((lane, first, first + (lane ^ 3), mask, 0, int(all(bits)), int(any(bits)),
                              int(len(set(bits)) == 1), 1 << lane, (2 << lane) - 1))
         script = [f'#!amber\nSHADER compute guest SPIRV-BIN FILE "{key}.spv"',

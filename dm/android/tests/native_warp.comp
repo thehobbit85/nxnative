@@ -6,6 +6,12 @@ layout(local_size_x = LANES) in;
 layout(set=0, binding=0, std430) buffer Results { uint words[]; };
 void main() {
     uint physical = gl_LocalInvocationIndex;
+#if SPARSE
+    // Keep whole quads so both shuffle donors are active for every checked
+    // invocation. Different warps retain different sets of quads.
+    uint quad = (physical & 31u) >> 2u;
+    if (quad != 0u && (quad + physical / 32u) % 3u == 1u) return;
+#endif
     uint lane = gl_SubgroupInvocationID;
     bool predicate = (physical / 32u == 2u) ? (physical % 2u == 0u) : ((physical / 32u) % 2u != 0u);
     uint i = physical * 10u;
