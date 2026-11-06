@@ -1078,6 +1078,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a shader's interleaved feedback outputs or repeated capture into multiple buffers disappear from Android shader assets. → [Vulkan export retains feedback control layouts](../reference/shaders.md#vulkan-export-retains-feedback-control-layouts)
 - Android export stops with `no guest resource for descriptor 1 ('fp_t_tcb_3A')`. → [Vulkan export removes unused descriptor declarations](../reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations)
 - font strings lose their first glyph or show clipped characters despite a complete, correctly uploaded atlas. Instanced geometry can also disappear. → [Draw parameters on a Vulkan device without the optional feature](../reference/shaders.md#draw-parameters-on-a-vulkan-device-without-the-optional-feature)
+- a compact Maxwell texture instruction returns `0x6408` for the alpha value 1032.75 on Android; the same Apple instruction and a CPU binary16 conversion return `0x6409`. → [Android half-register packing rounds differently from Metal](../reference/shaders.md#android-half-register-packing-rounds-differently-from-metal)
 
 ## Cheats on a Switch
 
