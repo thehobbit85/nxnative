@@ -197,7 +197,7 @@ static void textured_draw(int compact, int split_submit) {
     }
 }
 
-static int astc_supported(void) {
+static VkPhysicalDeviceFeatures replay_features(void) {
     VkInstance instance;
     VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "upload replay", 0, NULL, 0, VK_API_VERSION_1_1};
@@ -210,7 +210,7 @@ static int astc_supported(void) {
     VkPhysicalDeviceFeatures features;
     vkGetPhysicalDeviceFeatures(physical, &features);
     vkDestroyInstance(instance, NULL);
-    return features.textureCompressionASTC_LDR;
+    return features;
 }
 
 // Uploads execute in a separate command buffer before the draw buffer. Queue
@@ -866,6 +866,71 @@ static void multisample_depth(void) {
     mtl_reg_tex(909,NULL,NULL); mtl_tex_release(&source); mtl_tex_release(&resolved); mtl_tex_release(&output);
     mtl_queue_forget(0x8122);
     puts("Vulkan depth resolve selects sample zero, including a scissored depth clear");
+}
+
+static void visibility_reports(void) {
+    tex_t color={.serial=0x8125,.d={.width=8,.height=8,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&color.d,&color.L);
+    tex_t depth=color; depth.serial=0x8127; depth.d.format=NVN_FORMAT_DEPTH32F;
+    nvn_tex_layout(&depth.d,&depth.L);
+    uint64_t reports[7][2] = {{0}}, type=NVN_COUNTER_TYPE_SAMPLES_PASSED;
+    mtl_queue_activate(0x8125);
+    list_t list = {0};
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&color},.depth=&depth);
+    RECORD(OP_CLEAR_DS,p_clear_ds,.depth=0,.depth_mask=1);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_range_program,.stages=3);
+    for (int i=0;i<7;i++) {
+        if (i==0 || i==3) put(&list,OP_RESET_COUNTER,&type,sizeof type);
+        // One visible 4x4 rectangle, then no fragments, then another 4x4.
+        // A masked clear is rasterized internally but adds no guest samples.
+        ds_st ds={.dt=1,.df=i==1 || i==3 ? NVN_COMPARE_FUNC_LESS : NVN_COMPARE_FUNC_ALWAYS};
+        p_bind_state state={.kind=5}; memcpy(state.bytes,&ds,sizeof ds);
+        put(&list, OP_BIND_STATE, &state, sizeof state);
+        RECORD(OP_SCISSOR,p_scissor,.x=2,.y=1,.w=4,.h=4);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_SCISSOR,p_scissor,.w=8,.h=8);
+        RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=1,.rgba={1});
+        uint64_t report[] = {type,(uintptr_t)reports[i]};
+        put(&list,OP_REPORT_COUNTER,report,sizeof report);
+        if (i==1 || i==4 || i==5 || i==6) {
+            put(&list,OP_END,NULL,0); mtl_sub_begin(); mtl_exec(list.bytes);
+            uint64_t fence=mtl_sub_commit();
+            if (i==6) { mtl_queue_forget(0x8125); assert(mtl_wait(fence,UINT64_MAX)); }
+            list=(list_t){0};
+        }
+        if (i==4) mtl_queue_activate(0x8126);
+        if (i==5) mtl_queue_activate(0x8125);
+    }
+    const unsigned expected[] = {16,16,32,0,16,0,32};
+    int precise = replay_features().occlusionQueryPrecise;
+    for (unsigned i=0;i<7;i++)
+        if ((precise ? reports[i][0]!=expected[i] : !!reports[i][0]!=!!expected[i]) || !reports[i][1]) die("visibility report %u: got %llu, expected %u",i,
+            (unsigned long long)reports[i][0],expected[i]);
+    mtl_queue_forget(0x8126);
+    // A busy pass uses a second query page; a recycled submission context
+    // must reset its old slots and read back only the pages used this time.
+    uint64_t many[257][2];
+    mtl_queue_activate(0x8128);
+    for (int round=0;round<4;round++) {
+        unsigned count = round ? 3 : 257;
+        list=(list_t){0};
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&color});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_range_program,.stages=3);
+        RECORD(OP_SCISSOR,p_scissor,.w=1,.h=1);
+        put(&list,OP_RESET_COUNTER,&type,sizeof type);
+        put(&list,OP_END,NULL,0); mtl_sub_begin(); mtl_exec(list.bytes);
+        for (unsigned i=0;i<count;i++) {
+            list=(list_t){0};
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+            uint64_t report[]={type,(uintptr_t)many[i]};
+            put(&list,OP_REPORT_COUNTER,report,sizeof report); put(&list,OP_END,NULL,0); mtl_exec(list.bytes);
+        }
+        assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (unsigned i=0;i<count;i++) assert(precise ? many[i][0] == i+1 : many[i][0] > 0);
+    }
+    mtl_queue_forget(0x8128); mtl_tex_release(&color); mtl_tex_release(&depth);
+    puts("Vulkan visibility counters accumulate only guest samples and survive pass, submission and queue changes");
 }
 
 static void texture_clear_regions(void) {
@@ -1722,6 +1787,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
+    if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
@@ -1758,7 +1824,7 @@ int main(void) {
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);
-    if (astc_supported()) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
+    if (replay_features().textureCompressionASTC_LDR) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
     initial_texture_content();
     uniform_texture_array();
@@ -1781,5 +1847,6 @@ int main(void) {
     texture_clear_regions();
     multisample_colors();
     multisample_depth();
+    visibility_reports();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
