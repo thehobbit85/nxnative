@@ -2751,6 +2751,14 @@ static vtex *depth_copy_scratch(int bytes, int side, uint32_t w, uint32_t h) {
     to_general(C->cb,next->img,VK_IMAGE_ASPECT_COLOR_BIT);
     if(v) tex_free(v); cache[k][side]=next; return next;
 }
+static void mirror_offsets(VkOffset3D offsets[2], int flags) {
+    if (flags & NVN_COPY_FLAGS_MIRROR_X_BIT) {
+        int32_t x=offsets[0].x; offsets[0].x=offsets[1].x; offsets[1].x=x;
+    }
+    if (flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) {
+        int32_t y=offsets[0].y; offsets[0].y=offsets[1].y; offsets[1].y=y;
+    }
+}
 static int depth_copy_scaled(vtex *s, vtex *d, const p_copy_t2t *c, uint32_t sl, uint32_t sly, uint32_t dl, uint32_t dly) {
     VkImageAspectFlags aspects=s->aspect & d->aspect;
     for (unsigned aspect=VK_IMAGE_ASPECT_DEPTH_BIT; aspect<=VK_IMAGE_ASPECT_STENCIL_BIT; aspect<<=1) {
@@ -2768,6 +2776,7 @@ static int depth_copy_scaled(vtex *s, vtex *d, const p_copy_t2t *c, uint32_t sl,
         vkCmdCopyBufferToImage(C->cb,buffer,a->img,VK_IMAGE_LAYOUT_GENERAL,1,&ic); barrier_all(C->cb);
         VkImageBlit bl={{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{{0,0,0},{sr->width,sr->height,1}},
                        {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{{0,0,0},{dr->width,dr->height,1}}};
+        mirror_offsets(bl.srcOffsets,c->flags);
         vkCmdBlitImage(C->cb,a->img,VK_IMAGE_LAYOUT_GENERAL,b->img,VK_IMAGE_LAYOUT_GENERAL,1,&bl,VK_FILTER_NEAREST); barrier_all(C->cb);
         ic.imageExtent=(VkExtent3D){dr->width,dr->height,1};
         vkCmdCopyImageToBuffer(C->cb,b->img,VK_IMAGE_LAYOUT_GENERAL,buffer,1,&ic); barrier_all(C->cb);
@@ -2818,55 +2827,85 @@ static void resolve_depth(const p_copy_t2t *c, vtex *src, vtex *dst, uint32_t sl
     rp_end(C->cb);
     barrier_all(C->cb);
 }
+// A 3D copy advances texels in Z. An array copy advances layers relative
+// to the view, while its Vulkan image offset and extent remain two-dimensional.
+static int texture_copy_region(const vtex *v, const view_t *view, const NVNcopyRegion *r,
+                               VkImageSubresourceLayers *sub, VkOffset3D *off, VkExtent3D *extent) {
+    int volume = v->target == NVN_TEXTURE_TARGET_3D;
+    uint32_t count = r->depth ? (uint32_t)r->depth : 1;
+    uint32_t mip = view && view->set_levels ? view->base_level : 0;
+    int layers = !volume && view && view->set_layers;
+    if (r->width <= 0 || r->height <= 0 || r->depth < 0 || r->zoffset < 0) return 0;
+    if (layers && view->nlayers && (uint64_t)r->zoffset + count > view->nlayers) return 0;
+    *sub = (VkImageSubresourceLayers){v->aspect,mip,volume ? 0 : (layers ? view->min_layer : 0)+(uint32_t)r->zoffset,volume ? 1 : count};
+    *off = (VkOffset3D){r->xoffset,r->yoffset,volume ? r->zoffset : 0};
+    *extent = (VkExtent3D){(uint32_t)r->width,(uint32_t)r->height,volume ? count : 1};
+    return lvl_fits(v,mip,sub->baseArrayLayer,sub->layerCount,off->x,off->y,off->z,extent->width,extent->height,extent->depth);
+}
+static VkOffset3D copy_end(VkOffset3D start, VkExtent3D size) {
+    return (VkOffset3D){start.x+(int32_t)size.width,start.y+(int32_t)size.height,start.z+(int32_t)size.depth};
+}
 static void copy_t2t(const p_copy_t2t *c) {
     if (vk_skip() & SK_T2T) return;
     if (g_plog) LOG("plog:  t2t %llu (fmt %#x) %dx%d → %llu (fmt %#x) %dx%d flags %#x", (unsigned long long)c->src->serial, c->src->d.format, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial, c->dst->d.format, c->dr.width, c->dr.height, c->flags);
     vtex *s = tex_get(c->src, 0), *d = tex_get(c->dst, 1); if (!s || !d) return;
     pass_end();
-    uint32_t sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
-    uint32_t sly=(c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0)+(uint32_t)c->sr.zoffset;
-    uint32_t dly=(c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0)+(uint32_t)c->dr.zoffset;
-    VkImageAspectFlags sa=s->aspect, da=d->aspect;
-    int depth=!!((sa|da)&(VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT));
-    if (depth && s->f.f!=d->f.f) { RED_ONCE(52,"depth copy between different host formats is unsupported"); return; }
-    if (!lvl_fits(s, sl, sly, 1, c->sr.xoffset, c->sr.yoffset, 0, (uint32_t)c->sr.width, (uint32_t)c->sr.height, 1) ||
-        !lvl_fits(d, dl, dly, 1, c->dr.xoffset, c->dr.yoffset, 0, (uint32_t)c->dr.width, (uint32_t)c->dr.height, 1) || !c->sr.width || !c->sr.height || !c->dr.width || !c->dr.height) {
-        static int n; if (n++ < 8) LOG("[RED] vk: texture copy %dx%d at %d,%d (level %u) → %dx%d at %d,%d (level %u) outside its textures (%ux%u, %ux%u): skipped", c->sr.width, c->sr.height, c->sr.xoffset, c->sr.yoffset, sl,
-                                       c->dr.width, c->dr.height, c->dr.xoffset, c->dr.yoffset, dl, s->w, s->h, d->w, d->h);
+    VkImageCopy region;
+    VkExtent3D dest;
+    if (!texture_copy_region(s,c->has_sv ? &c->sv : NULL,&c->sr,&region.srcSubresource,&region.srcOffset,&region.extent) ||
+        !texture_copy_region(d,c->has_dv ? &c->dv : NULL,&c->dr,&region.dstSubresource,&region.dstOffset,&dest)) {
+        RED_ONCE(52,"texture copy region outside its mip or view layers");
         return;
     }
+    VkImageSubresourceLayers src=region.srcSubresource, dst=region.dstSubresource;
+    int depth = s->f.depth || d->f.depth;
+    int mirror = c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT);
     int same = c->sr.width == c->dr.width && c->sr.height == c->dr.height;
+    if (src.layerCount!=dst.layerCount || region.extent.depth!=dest.depth || src.aspectMask!=dst.aspectMask ||
+        (c->flags & ~(DM_COPY_RESOLVE | NVN_COPY_FLAGS_ENGINE_2D_BIT | NVN_COPY_FLAGS_LINEAR_FILTER_BIT |
+                      NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT))) {
+        RED_ONCE(52,"texture copy with incompatible slices, aspects or flags");
+        return;
+    }
+    if (depth && s->f.f!=d->f.f) { RED_ONCE(52,"depth copy between different host formats is unsupported"); return; }
     if (s->samples != d->samples) {
-        if (!(c->flags & DM_COPY_RESOLVE) || s->samples <= 1 || d->samples != 1 ||
-            !same || s->f.f != d->f.f) {
+        if (!(c->flags & DM_COPY_RESOLVE) || s->samples <= 1 || d->samples != 1 || !same || mirror || s->f.f != d->f.f) {
             RED_ONCE(96, "unsupported resolve between formats %d/%d with %u/%u samples", s->f.f,d->f.f,s->samples,d->samples);
             return;
         }
-        if (depth) { resolve_depth(c,s,d,sl,sly,dl,dly); return; }
-        VkImageResolve region = {{VK_IMAGE_ASPECT_COLOR_BIT, sl, sly, 1}, {c->sr.xoffset,c->sr.yoffset,0},
-                                 {VK_IMAGE_ASPECT_COLOR_BIT, dl, dly, 1}, {c->dr.xoffset,c->dr.yoffset,0},
-                                 {(uint32_t)c->sr.width,(uint32_t)c->sr.height,1}};
-        vkCmdResolveImage(C->cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+        if (depth) {
+            for (uint32_t i=0;i<src.layerCount;i++)
+                resolve_depth(c,s,d,src.mipLevel,src.baseArrayLayer+i,dst.mipLevel,dst.baseArrayLayer+i);
+            return;
+        }
+        VkImageResolve resolve = {src,region.srcOffset,dst,region.dstOffset,region.extent};
+        vkCmdResolveImage(C->cb,s->img,VK_IMAGE_LAYOUT_GENERAL,d->img,VK_IMAGE_LAYOUT_GENERAL,1,&resolve);
         barrier_all(C->cb);
         return;
     }
-    if (s->samples > 1 && (!same || s->f.f != d->f.f)) {
-        RED_ONCE(96, "multisample image copies require matching extents and formats");
+    if (same && !mirror && s->f.f==d->f.f) {
+        vkCmdCopyImage(C->cb,s->img,VK_IMAGE_LAYOUT_GENERAL,d->img,VK_IMAGE_LAYOUT_GENERAL,1,&region);
+        barrier_all(C->cb);
         return;
     }
-    VkFormatFeatureFlags sf = fmt_feat(s->f.f), df = fmt_feat(d->f.f);
-    int lin = (c->flags & 1) && !same, blit_ok = (sf & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && (df & VK_FORMAT_FEATURE_BLIT_DST_BIT) && (!lin || (sf & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) && sa == da;
-    if (depth && (lin || getenv("DM_VK_DEPTH_COPY_TRANSFER"))) blit_ok = 0;   // depth blits require NEAREST; the switch exercises the transfer fallback on capable drivers
-    if (same && (!blit_ok || s->f.f == d->f.f) && sa == da) {   // one size: a copy (formats of one size class), which every format supports
-        VkImageCopy ic = {{sa, sl, sly, 1}, {c->sr.xoffset, c->sr.yoffset, 0}, {da, dl, dly, 1}, {c->dr.xoffset, c->dr.yoffset, 0}, {(uint32_t)c->sr.width, (uint32_t)c->sr.height, 1}};
-        vkCmdCopyImage(C->cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
-    } else if (blit_ok) {
-        VkImageBlit b = {{sa, sl, sly, 1}, {{c->sr.xoffset, c->sr.yoffset, 0}, {c->sr.xoffset + c->sr.width, c->sr.yoffset + c->sr.height, 1}},
-                         {da, dl, dly, 1}, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + c->dr.height, 1}}};
-        vkCmdBlitImage(C->cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &b, lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
-    } else if (depth && !lin && c->src->d.samples<=1 && c->dst->d.samples<=1 && depth_copy_scaled(s,d,c,sl,sly,dl,dly)) {
-        // All supported aspects were copied by the transfer fallback.
-    } else { static int n; if (n++ < 8) LOG("[RED] vk: scaled texture copy between formats %d → %d that cannot be blitted: skipped", (int)s->f.f, (int)d->f.f); return; }
+    if (s->samples>1) { RED_ONCE(96,"multisample image copies require matching extents and formats"); return; }
+    VkFormatFeatureFlags sf=fmt_feat(s->f.f), df=fmt_feat(d->f.f);
+    int linear = (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) && !same;
+    int blit = (sf & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && (df & VK_FORMAT_FEATURE_BLIT_DST_BIT) &&
+               clear_color_type(s->f.f)==clear_color_type(d->f.f) &&
+               (!linear || (sf & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
+    if (depth && (linear || getenv("DM_VK_DEPTH_COPY_TRANSFER"))) blit=0;
+    if (blit) {
+        VkImageBlit b = {src,{region.srcOffset,copy_end(region.srcOffset,region.extent)},
+                         dst,{region.dstOffset,copy_end(region.dstOffset,dest)}};
+        mirror_offsets(b.srcOffsets,c->flags);
+        vkCmdBlitImage(C->cb,s->img,VK_IMAGE_LAYOUT_GENERAL,d->img,VK_IMAGE_LAYOUT_GENERAL,1,&b,linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    } else if (depth && !linear && s->target!=NVN_TEXTURE_TARGET_3D && d->target!=NVN_TEXTURE_TARGET_3D) {
+        for (uint32_t i=0;i<src.layerCount;i++)
+            if (!depth_copy_scaled(s,d,c,src.mipLevel,src.baseArrayLayer+i,dst.mipLevel,dst.baseArrayLayer+i)) {
+                RED_ONCE(52,"depth copy has no supported transfer scratch format"); return;
+            }
+    } else { RED_ONCE(52,"no supported texture blit between formats %d and %d",s->f.f,d->f.f); return; }
     barrier_all(C->cb);
 }
 static void copy_t2b(const p_copy_b2t *c) {
