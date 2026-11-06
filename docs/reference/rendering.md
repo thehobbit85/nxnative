@@ -829,6 +829,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 ### Depth clamp
 
 - **Fix:** `SetDepthClamp` is recorded (`OP_DEPTH_CLAMP`) and replayed as Metal's depth clip mode (it used to be ignored).
+- **Vulkan.** On devices with the `depthClamp` feature, the pipeline keeps the guest's clamp setting. A depth attachment readback checks a triangle crossing both planes with clamping on and off and with two depth tests. Devices without the feature currently log the limitation and clip.
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the game turns it on).
 
 ### Telling depth rejection from no rasterization

@@ -32,6 +32,7 @@ static prog_t uniform_storage_program = {.nstage = 2};
 static prog_t split_program[3] = {{.nstage = 2}, {.nstage = 2}, {.nstage = 2}};
 static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
+static prog_t depth_clamp_program = {.nstage = 2};
 static prog_t depth_range_program = {.nstage = 2};
 static prog_t one_sample_program = {.nstage = 2};
 static prog_t blend_mrt_program = {.nstage = 2};
@@ -53,6 +54,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
     if (p == &blend_mrt_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x55 : 0x52; return 1; }
     if (p == &divisor_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x56+stage; return 1; }
+    if (p == &depth_clamp_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x53 : 0x5c; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
     if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
@@ -723,6 +725,50 @@ static void nested_depth_ranges(void) {
     mtl_tex_release(&target);
     mtl_queue_forget(0x8102);
     puts("Vulkan nested program binding, reversed depth and zero far depth passed");
+}
+
+// The triangle crosses both depth planes. At the four sample centres its
+// interpolated depths are -0.25, 0.25, 0.75 and 1.25. Clamping vertices
+// before interpolation would also change the two pixels inside the volume.
+static void depth_clamp(void) {
+    tex_t depth = {.serial=0x8103, .d={.width=4,.height=4,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_DEPTH32F}};
+    nvn_tex_layout(&depth.d, &depth.L);
+    const float vertices[][3] = {{-1,-1,-0.5f},{3,-1,3.5f},{-1,3,-0.5f}};
+    float pixels[16] = {0};
+    list_t list = {0};
+    RECORD(OP_SET_RT,p_set_rt,.depth=&depth);
+    RECORD(OP_CLEAR_DS,p_clear_ds,.depth=0.5f,.depth_mask=1);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_clamp_program,.stages=3);
+    va_st va = {.fmt=NVN_FORMAT_RGB32F};
+    p_bind_vattr attr = {.n=1};
+    memcpy(attr.st, &va, sizeof va);
+    put(&list, OP_BIND_VATTR, &attr, sizeof attr);
+    RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=1,.st={{.stride=12}});
+    RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sizeof vertices,.addr=(uintptr_t)vertices);
+    for (int y=0; y<4; ++y) {
+        RECORD(OP_SCISSOR,p_scissor,.y=y,.w=4,.h=1);
+        RECORD(OP_DEPTH_CLAMP,p_depth_clamp,.on=y==1 || y==2);
+        ds_st ds = {.dt=1, .dw=1, .df=y<2 ? NVN_COMPARE_FUNC_ALWAYS : NVN_COMPARE_FUNC_LESS};
+        p_bind_state state = {.kind=5};
+        memcpy(state.bytes, &ds, sizeof ds);
+        put(&list, OP_BIND_STATE, &state, sizeof state);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    }
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&depth,.src=(uintptr_t)pixels,.r={.width=4,.height=4,.depth=1});
+    put(&list, OP_END, NULL, 0);
+    mtl_queue_activate(0x8103);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    const float expected[][4] = {{.5f,.25f,.75f,.5f},{0,.25f,.75f,1},{0,.25f,.5f,.5f},{.5f,.25f,.5f,.5f}};
+    for (int y=0; y<4; ++y) for (int x=0; x<4; ++x) {
+        float got = pixels[4*y+x];
+        int row = getenv("DM_VK_NO_DEPTH_CLAMP") ? (y < 2 ? 0 : 3) : y;
+        if (got != expected[row][x]) die("depth clamp at (%d,%d): %g expected %g", x,y,got,expected[row][x]);
+    }
+    mtl_tex_release(&depth);
+    mtl_queue_forget(0x8103);
+    puts(getenv("DM_VK_NO_DEPTH_CLAMP") ? "Vulkan unavailable depth clamp uses the reported clip path" :
+         "Vulkan depth clamp preserves interpolated depth, near/far coverage and depth-test ordering");
 }
 
 static void conditional_rendering(void) {
@@ -2282,6 +2328,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
     if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); segment_timestamps(); return 0; }
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
+    if (getenv("DM_VK_TEST_DEPTH_CLAMP")) { depth_clamp(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
@@ -2338,6 +2385,7 @@ int main(void) {
     origin_facing();
     queue_viewport_origin();
     nested_depth_ranges();
+    depth_clamp();
     scissored_attachment_clears();
     conditional_rendering();
     integer_attachment_clears();
