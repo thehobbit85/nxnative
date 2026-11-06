@@ -525,6 +525,35 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 #include "recorded_query_lifetime.h"
 #include "recorded_feedback_control.h"
 
+// Reinitializing a network at the same guest address starts a new temporal
+// history. Commands that were already recorded keep their original identity.
+static void check_dlss_network_identity(NVNdevice *device, NVNmemoryPool *pool) {
+    dlss_net_t network;
+    dlss_builder_t builder={.w=256,.h=128,.flags=DLSS_F_DEPTH_INVERTED};
+    dlss_params_t params={.iw=128,.ih=64};
+    __typeof__(&h_nvnDlssNetworkInitialize) init=bootstrap("nvnDlssNetworkInitialize");
+    __typeof__(&h_nvnDlssNetworkFinalize) fini=bootstrap("nvnDlssNetworkFinalize");
+    __typeof__(&h_nvnCommandBufferEvaluateDlss) eval=bootstrap("nvnCommandBufferEvaluateDlss");
+    NVNcommandBuffer cb;
+    assert(API(nvnCommandBufferInitialize)(&cb,device));
+    API(nvnCommandBufferAddCommandMemory)(&cb,pool,0,0x4000);
+    const p_dlss *records[3];
+    for (int i=0;i<3;i++) {
+        if (i==2) { fini(&network); builder.w=384; }
+        if (i!=1) assert(init(&network,&builder));
+        API(nvnCommandBufferBeginRecording)(&cb);
+        eval(&cb,&network,&params);
+        const op_hdr *head=(const op_hdr *)API(nvnCommandBufferEndRecording)(&cb);
+        assert(head->op==OP_DLSS);
+        records[i]=(const p_dlss *)(head+1);
+    }
+    assert(records[0]->net && records[0]->net==records[1]->net && records[1]->net!=records[2]->net);
+    assert(records[0]->ow==256 && records[2]->ow==384 && records[2]->iw==128);
+    fini(&network);
+    API(nvnCommandBufferFinalize)(&cb);
+    puts("Reusing an NVN2 network address preserves the identities and sizes of earlier recordings");
+}
+
 int main(void) {
     load_bootstrap();
     enum { pool_size = 0x10000, cmd_size = 0x4000, tex_offset = 0x4000, dst_offset = 0x8000,
@@ -678,6 +707,7 @@ int main(void) {
     check_sparse_textures(&device, &queue);
     check_query_lifetimes(&device,&queue,&qb);
     check_feedback_controls(&device, &queue);
+    check_dlss_network_identity(&device,&pool);
 #ifdef DM_VK_PUBLIC_BINDINGS
     check_linear_transfer(&device, &queue, &pool, storage);
     check_packed_texels(&device, &queue, &pool, storage);

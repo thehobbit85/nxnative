@@ -3512,6 +3512,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     } else { RED_ONCE(52,"no supported texture blit between formats %d and %d",s->f.f,d->f.f); return; }
     barrier_all(C->cb);
 }
+#include "temporal_upscale.inc"
 // NVN2's reconstruction command can still produce its spatial output when a
 // temporal scaler or its depth/motion inputs are unavailable. Use the sampled
 // draw for float/HDR destinations even on drivers with no native linear blit.
@@ -3537,13 +3538,15 @@ static void dlss_eval(const p_dlss *job) {
         !texture_copy_region(dst,NULL,&copy.dr,&sub,&off,&extent)) {
         RED_ONCE(118, "DLSS rectangle lies outside its color image"); return;
     }
-    if (!draw_image_slice(&copy,src,dst,0,0,0,0,1)) {
-        RED_ONCE(118, "DLSS spatial scaling failed for the bound color formats"); return;
+    if (!temporal_eval(job,&copy,src,dst)) {
+        if (!draw_image_slice(&copy,src,dst,0,0,0,0,1)) {
+            RED_ONCE(118, "DLSS spatial scaling failed for the bound color formats"); return;
+        }
+        RED_ONCE(118, "DLSS temporal reconstruction unavailable; scaled the input color bilinearly");
     }
     dst->gpu=1;
     if (dst->linrow) { lin_writeback(dst); barrier_all(C->cb); }
     for (int i=0;i<P.n;i++) if (P.ct[i]==dst) P.cwr[i]=1;
-    RED_ONCE(118, "DLSS temporal reconstruction unavailable; scaled the input color bilinearly");
 }
 
 static void clear_tex(const p_clear_tex *c) {
