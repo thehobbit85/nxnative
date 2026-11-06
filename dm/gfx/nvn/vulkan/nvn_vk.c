@@ -631,6 +631,9 @@ static VkFormat depth24_stencil8(void) {
                                          VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
         VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(g_pd, VK_FORMAT_D24_UNORM_S8_UINT, &p);
         chosen = (p.optimalTilingFeatures & need) == need ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT;
+#ifdef DM_VK_PUBLIC_BINDINGS
+        if (getenv("DM_VK_TEST_D24_AS_D32")) chosen = VK_FORMAT_D32_SFLOAT_S8_UINT;
+#endif
         vkGetPhysicalDeviceFormatProperties(g_pd, chosen, &p);
         if ((p.optimalTilingFeatures & need) != need) die("Vulkan: no sampled depth/stencil attachment format with transfer support");
         LOG("vk: depth24/stencil8 uses %s", chosen == VK_FORMAT_D24_UNORM_S8_UINT ? "D24_UNORM_S8_UINT" : "D32_SFLOAT_S8_UINT");

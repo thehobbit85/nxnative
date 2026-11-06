@@ -2,6 +2,13 @@
 
 The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## CPU access to Vulkan depth and stencil textures
+
+- **Symptom:** public NVN texture reads on a GPU-written depth/stencil target return the wrong packed bytes, or a CPU edit loses the neighboring pixel.
+- **Cause:** Vulkan copies depth and stencil through separate buffer aspects. The Maxwell Z24S8 layout stores stencil in the low byte. ZF32_X24S8 stores a float followed by the stencil byte. Some Vulkan devices back 24-bit depth with a 32-bit float. See [deko3d's Maxwell formats](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/format_traits.inc) and [Nouveau's packed depth formats](https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/src/gallium/drivers/nouveau/nv50/nv50_formats.c).
+- **Fix:** transfer the selected aspects into separate staging ranges, convert between the guest and device depth representations, and copy only the requested bytes of each guest row.
+- **Found on:** the public Vulkan recorder fixture reads GPU clears and edits a subregion for S8, D24, D24/S8 and D32F/S8. It checks native D24 and a D32F fallback with both dynamic and legacy rendering.
+
 ## Vulkan linear texture row padding
 
 - **Symptom:** a CPU-written linear texture samples padding from the second row onward, or a render pass overwrites the bytes between guest rows. Publishing a readback into a protected guest pool can also fault on the completion thread.

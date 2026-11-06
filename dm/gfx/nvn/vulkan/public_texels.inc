@@ -69,30 +69,92 @@ static int storage_texels(const tex_t *t, unsigned level, uint8_t *dst, size_t r
     return 1;
 }
 
+// Vulkan transfers depth and stencil as separate buffer planes. Maxwell
+// Z24S8 stores stencil in bits 0..7; ZF32_X24S8 stores float depth first.
+// D24 can be backed by a D32F/S8 image on devices without native D24/S8.
+static void packed_texel_row(const vtex *v, uint8_t *depth, uint8_t *stencil, const uint8_t *src, uint8_t *dst, size_t pixels) {
+    if (!depth) {
+        if (src) memcpy(stencil, src, pixels); else memcpy(dst, stencil, pixels);
+        return;
+    }
+    int guest_float = v->nvn_fmt == NVN_FORMAT_DEPTH32F_STENCIL8;
+    size_t bytes = guest_float ? 8 : 4;
+    for (size_t x = 0; x < pixels; ++x) {
+        if (src) {
+            uint32_t word; memcpy(&word, src + bytes * x, 4);
+            if (guest_float) memcpy(depth + 4 * x, &word, 4);
+            else {
+                word >>= 8;
+                if (v->f.f == VK_FORMAT_D24_UNORM_S8_UINT) memcpy(depth + 4 * x, &word, 4);
+                else { float z = (float)((double)word / 16777215.0); memcpy(depth + 4 * x, &z, 4); }
+            }
+            if (stencil) stencil[x] = src[bytes * x + (guest_float ? 4 : 0)];
+        } else {
+            uint32_t word; memcpy(&word, depth + 4 * x, 4);
+            if (guest_float) {
+                uint32_t s = stencil[x];
+                memcpy(dst + bytes * x + 4, &s, 4);
+            } else {
+                if (v->f.f != VK_FORMAT_D24_UNORM_S8_UINT) {
+                    float z; memcpy(&z, &word, 4);
+                    word = (uint32_t)(fmin(1.0, fmax(0.0, z)) * 16777215.0 + 0.5);
+                }
+                word = (word << 8) | (stencil ? stencil[x] : 0);
+            }
+            memcpy(dst + bytes * x, &word, 4);
+        }
+    }
+}
+
+static void transfer_rows(const vtex *v, texel_extent ext, size_t pixels, const uint8_t *src, uint8_t *dst,
+                          size_t row, size_t img, uint8_t *mapped, size_t depth_bytes, int stencil) {
+    for (uint32_t z = 0; z < ext.nz; ++z) for (size_t y = 0; y < ext.rows; ++y) {
+        size_t guest = z * img + y * row, line = z * ext.rows + y;
+        if (v->f.stencil) {
+            size_t first = line * pixels;
+            packed_texel_row(v, depth_bytes ? mapped + 4 * first : NULL, stencil ? mapped + depth_bytes + first : NULL,
+                             src ? src + guest : NULL, dst ? dst + guest : NULL, pixels);
+        } else if (src) memcpy(mapped + line * ext.bytes, src + guest, ext.bytes);
+        else memcpy(dst + guest, mapped + line * ext.bytes, ext.bytes);
+    }
+}
+
 // The public API may be called by a guest worker. One-time commands have
 // their own command pool and use the same ordered VkQueue as submissions.
 // Keep the image registry locked through completion so retirement cannot free it.
 static int gpu_texels(const vtex *v, unsigned level, const NVNcopyRegion *r, const uint8_t *src, uint8_t *dst,
                       size_t row, size_t img, texel_extent ext) {
-    if (v->f.dec || v->f.stencil || v->samples != VK_SAMPLE_COUNT_1_BIT) return 0;
-    size_t slice = ext.bytes * ext.rows;
+    if (v->f.dec || v->samples != VK_SAMPLE_COUNT_1_BIT) return 0;
+    size_t pixels = (size_t)r->width * ext.rows * ext.nz;
+    int depth = v->f.stencil && v->nvn_fmt != NVN_FORMAT_STENCIL8;
+    int stencil = v->f.stencil && v->nvn_fmt != NVN_FORMAT_DEPTH24;
+    size_t depth_bytes = depth ? pixels * 4 : 0;
+    size_t size = v->f.stencil ? depth_bytes + (stencil ? pixels : 0) : ext.bytes * ext.rows * ext.nz;
     VkDeviceMemory mem;
     void *mapped;
-    VkBuffer buffer = buf_new(slice * ext.nz, src ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : VK_BUFFER_USAGE_TRANSFER_DST_BIT, &mem, &mapped);
-    if (src) for (uint32_t z = 0; z < ext.nz; ++z) for (size_t y = 0; y < ext.rows; ++y)
-        memcpy((uint8_t *)mapped + z * slice + y * ext.bytes, src + z * img + y * row, ext.bytes);
-    VkBufferImageCopy copy = {0, 0, 0, {v->aspect, level, ext.volume ? 0 : ext.layer, ext.volume ? 1 : ext.nz},
-                              {r->xoffset, r->yoffset, ext.volume ? (int32_t)ext.layer : 0},
-                              {(uint32_t)r->width, (uint32_t)r->height, ext.volume ? ext.nz : 1}};
+    VkBuffer buffer = buf_new(size, src ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : VK_BUFFER_USAGE_TRANSFER_DST_BIT, &mem, &mapped);
+    if (src) transfer_rows(v, ext, r->width, src, NULL, row, img, mapped, depth_bytes, stencil);
+    VkBufferImageCopy region = {0, 0, 0, {v->aspect, level, ext.volume ? 0 : ext.layer, ext.volume ? 1 : ext.nz},
+                                {r->xoffset, r->yoffset, ext.volume ? (int32_t)ext.layer : 0},
+                                {(uint32_t)r->width, (uint32_t)r->height, ext.volume ? ext.nz : 1}};
+    VkBufferImageCopy copies[2] = {region, region};
+    uint32_t count = 1;
+    if (v->f.stencil) {
+        copies[0].imageSubresource.aspectMask = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT;
+        if (depth && stencil) {
+            copies[1].bufferOffset = depth_bytes;
+            copies[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+            count = 2;
+        }
+    }
     VkCommandBuffer cb = once_begin();
     barrier_all(cb);
     if (src) {
-        vkCmdCopyBufferToImage(cb, buffer, v->img, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        vkCmdCopyBufferToImage(cb, buffer, v->img, VK_IMAGE_LAYOUT_GENERAL, count, copies);
         barrier_all(cb);
-    } else vkCmdCopyImageToBuffer(cb, v->img, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &copy);
+    } else vkCmdCopyImageToBuffer(cb, v->img, VK_IMAGE_LAYOUT_GENERAL, buffer, count, copies);
     once_end(cb);
-    if (dst) for (uint32_t z = 0; z < ext.nz; ++z) for (size_t y = 0; y < ext.rows; ++y)
-        memcpy(dst + z * img + y * row, (const uint8_t *)mapped + z * slice + y * ext.bytes, ext.bytes);
+    if (dst) transfer_rows(v, ext, r->width, NULL, dst, row, img, mapped, depth_bytes, stencil);
     vkUnmapMemory(g_dev, mem);
     vkDestroyBuffer(g_dev, buffer, NULL);
     vkFreeMemory(g_dev, mem, NULL);
