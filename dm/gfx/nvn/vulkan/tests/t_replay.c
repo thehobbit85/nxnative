@@ -38,6 +38,7 @@ static prog_t feedback_program = {.nstage = 2};
 static prog_t depth_clamp_program = {.nstage = 2};
 static prog_t offset_program = {.nstage=2};
 static prog_t alpha_program[3] = {{.nstage=2},{.nstage=2},{.nstage=2}};
+static prog_t logic_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t depth_range_program = {.nstage = 2};
 static prog_t one_sample_program = {.nstage = 2};
 static prog_t blend_mrt_program = {.nstage = 2};
@@ -57,6 +58,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    for (int i=0;i<2;++i) if (p==&logic_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x64+i : 0x52; return 1; }
     for (int i=0;i<3;++i) if (p==&alpha_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x61+i : 0x52; return 1; }
     if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
     if (p == &blend_mrt_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x55 : 0x52; return 1; }
@@ -1522,7 +1524,8 @@ static void blend_constants(void) {
                         .eq_rgb=NVN_BLEND_EQUATION_ADD,.eq_a=NVN_BLEND_EQUATION_ADD};
         p_bind_state state={.kind=0}; memcpy(state.bytes,&blend,sizeof blend); put(&list,OP_BIND_STATE,&state,sizeof state);
     }
-    color_st enable={.blend_en=3}; p_bind_state state={.kind=1}; memcpy(state.bytes,&enable,sizeof enable); put(&list,OP_BIND_STATE,&state,sizeof state);
+    color_st enable={.blend_en=3,.logic_op=NVN_LOGIC_OP_COPY,.alpha_func=NVN_ALPHA_FUNC_ALWAYS};
+    p_bind_state state={.kind=1}; memcpy(state.bytes,&enable,sizeof enable); put(&list,OP_BIND_STATE,&state,sizeof state);
     RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&blend_mrt_program,.stages=3);
     for (int i=0;i<2;i++) {
         put(&list,OP_BLEND_COLOR,&constants[i],sizeof constants[i]);
@@ -2631,6 +2634,7 @@ static void typed_graphics(void) {
 }
 #include "uniform_storage.inc"
 #include "alpha.inc"
+#include "logic.inc"
 #include "split_handle.inc"
 #include "driver_c2.inc"
 #include "resource_shapes.inc"
@@ -2658,6 +2662,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); return 0; }
     if (getenv("DM_VK_TEST_ALPHA")) { alpha_references(); return 0; }
     if (getenv("DM_VK_TEST_DIVISORS")) { instance_divisors(); return 0; }
     if (getenv("DM_VK_TEST_BLEND_CONSTANTS")) { blend_constants(); return 0; }
@@ -2740,6 +2745,7 @@ int main(void) {
     depth_clamp();
     polygon_offset(&offset_program);
     alpha_references();
+    logic_operations();
     scissored_attachment_clears();
     conditional_rendering();
     integer_attachment_clears();
