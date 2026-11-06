@@ -2851,6 +2851,21 @@ static NVNcopyRegion whole_mip(const vtex *v, const view_t *view) {
     unsigned w=v->w >> level, h=v->h >> level;
     return (NVNcopyRegion){.width=w ? (int)w : 1, .height=h && v->target!=NVN_TEXTURE_TARGET_1D_ARRAY ? (int)h : 1, .depth=1};
 }
+// D32 and D32/S8 expose the same four depth bytes in a buffer transfer.
+// Copy that aspect alone, so the destination's stencil remains intact.
+static void copy_float_depth_plane(vtex *s, vtex *d, VkImageCopy r) {
+    VkDeviceSize bytes=(VkDeviceSize)r.extent.width*r.extent.height*r.extent.depth*r.srcSubresource.layerCount*sizeof(float);
+    VkDeviceSize offset=ring_alloc(bytes,16);
+    if (offset==VK_WHOLE_SIZE) return;
+    r.srcSubresource.aspectMask=r.dstSubresource.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
+    VkBufferImageCopy transfer={offset,0,0,r.srcSubresource,r.srcOffset,r.extent};
+    vkCmdCopyImageToBuffer(C->cb,s->img,VK_IMAGE_LAYOUT_GENERAL,C->ring,1,&transfer);
+    barrier_all(C->cb);
+    transfer.imageSubresource=r.dstSubresource;
+    transfer.imageOffset=r.dstOffset;
+    vkCmdCopyBufferToImage(C->cb,C->ring,d->img,VK_IMAGE_LAYOUT_GENERAL,1,&transfer);
+    barrier_all(C->cb);
+}
 static void copy_t2t(const p_copy_t2t *c) {
     if (vk_skip() & SK_T2T) return;
     if (g_plog) LOG("plog:  t2t %llu (fmt %#x) %dx%d → %llu (fmt %#x) %dx%d flags %#x", (unsigned long long)c->src->serial, c->src->d.format, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial, c->dst->d.format, c->dr.width, c->dr.height, c->flags);
@@ -2874,10 +2889,18 @@ static void copy_t2t(const p_copy_t2t *c) {
     int depth = s->f.depth || d->f.depth;
     int mirror = c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT);
     int same = c->sr.width == c->dr.width && c->sr.height == c->dr.height;
-    if (src.layerCount!=dst.layerCount || region.extent.depth!=dest.depth || src.aspectMask!=dst.aspectMask ||
+    if (src.layerCount!=dst.layerCount || region.extent.depth!=dest.depth ||
         (c->flags & ~(DM_COPY_RESOLVE | NVN_COPY_FLAGS_ENGINE_2D_BIT | NVN_COPY_FLAGS_LINEAR_FILTER_BIT |
                       NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT))) {
-        RED_ONCE(52,"texture copy with incompatible slices, aspects or flags");
+        RED_ONCE(52,"texture copy with incompatible slices or flags");
+        return;
+    }
+    if (src.aspectMask!=dst.aspectMask) {
+        if (same && !mirror && s->samples==1 && d->samples==1 &&
+            ((s->f.f==VK_FORMAT_D32_SFLOAT && d->f.f==VK_FORMAT_D32_SFLOAT_S8_UINT) ||
+             (s->f.f==VK_FORMAT_D32_SFLOAT_S8_UINT && d->f.f==VK_FORMAT_D32_SFLOAT)))
+            copy_float_depth_plane(s,d,region);
+        else RED_ONCE(52,"texture copy between incompatible aspects or formats");
         return;
     }
     if (depth && s->f.f!=d->f.f) { RED_ONCE(52,"depth copy between different host formats is unsupported"); return; }
