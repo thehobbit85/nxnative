@@ -8,8 +8,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-enum { BLOCK = 240, CAPTURE = 24 * BLOCK };
-static int16_t heard[2 * CAPTURE];
+enum { BLOCK = 240, SHORT_CAPTURE = 24 * BLOCK, LONG_CAPTURE = 1200 * BLOCK };
+static int capture_frames = SHORT_CAPTURE;
+static int16_t heard[2 * LONG_CAPTURE];
 static _Atomic int max_frames;
 static _Atomic int heard_frames, skip_leading_silence, reject_channels;
 static AAudioStream_dataCallback render_callback;
@@ -19,7 +20,7 @@ static aaudio_data_callback_result_t monitor(AAudioStream *s, void *a, void *dat
     if (frames > atomic_load(&max_frames)) atomic_store(&max_frames, frames);
     int n = atomic_load(&heard_frames);
     int16_t *pcm = data;
-    for (int i = 0; i < frames && n < CAPTURE; i++) {
+    for (int i = 0; i < frames && n < capture_frames; i++) {
         if (!n && atomic_load(&skip_leading_silence) && !pcm[2*i] && !pcm[2*i+1]) continue;
         heard[2*n] = pcm[2*i]; heard[2*n+1] = pcm[2*i+1]; n++;
     }
@@ -154,6 +155,58 @@ static void test_reconnect(void) {
     puts("AAudio: rejected channel mismatch, reopened, delivered 8 FIFO blocks across injected disconnect, resumed device callbacks after suspend");
 }
 
+// Keep numbered PCM queued while ownership transfers between the device callback
+// and the silent sink. Both consumers must return every guest buffer exactly once.
+static void test_transition_fifo(void) {
+    enum { TOTAL = 640, AHEAD = 16 };
+    static int16_t samples[TOTAL][BLOCK][2];
+    static gbuf blocks[TOTAL];
+    for (int i = 0; i < TOTAL; i++) {
+        blocks[i] = (gbuf){samples[i], sizeof samples[i], sizeof samples[i]};
+        for (int j = 0; j < BLOCK; j++) {
+            samples[i][j][0] = i + 1; samples[i][j][1] = j;
+        }
+    }
+    atomic_store(&heard_frames, 0);
+    void *out = dm_pcmout_open(2);
+    aout *a = ao(out);
+    for (int i = 0; i < AHEAD; i++) assert(dm_pcmout_append(out, &blocks[i]));
+    dm_pcmout_start(out);
+    uint64_t deadline = now_ns() + 10000000000ull;
+    for (int i = 0; i < TOTAL; i++) {
+        gbuf *b;
+        while (!(b = dm_pcmout_released(out))) {
+            assert(now_ns() < deadline);
+            dm_pcmout_wait(out, 20);
+        }
+        assert(b == &blocks[i]);
+        if (i + AHEAD < TOTAL) assert(dm_pcmout_append(out, &blocks[i + AHEAD]));
+        if (i == 40 || i == 520) { dm_audio_suspend(1); wait_backend(a, BK_NULL); }
+        if (i == 96 || i == 530) { dm_audio_suspend(0); wait_backend(a, BK_AU); }
+        if (i == 128) {
+            pthread_mutex_lock(&g_aos_lock);
+            assert(a->backend == BK_AU); error_callback(a->au, a, AAUDIO_ERROR_DISCONNECTED);
+            pthread_mutex_unlock(&g_aos_lock);
+            wait_backend(a, BK_NULL);
+        }
+        if (i == 480) wait_backend(a, BK_AU);
+    }
+    assert(!dm_pcmout_released(out));
+    dm_pcmout_close(out);
+    int last = -1, gaps = 0, audible = 0;
+    for (int i = 0; i < atomic_load(&heard_frames); i++) {
+        int block = heard[2*i], frame = heard[2*i+1];
+        if (!block) { assert(!frame); continue; }
+        assert(block <= TOTAL && block > 0 && frame >= 0 && frame < BLOCK);
+        int ordinal = (block-1)*BLOCK + frame;
+        if (ordinal != last + 1) gaps++;
+        assert(ordinal > last);
+        last = ordinal; audible++;
+    }
+    assert(last == TOTAL*BLOCK - 1 && gaps >= 2 && audible > TOTAL*BLOCK/4);
+    printf("AAudio: %d FIFO releases across live route changes, %d ordered device samples\n", TOTAL, audible);
+}
+
 // Minimal SDK side for the public renderer open and close. Its manual execute
 // supplies a different two-channel DeviceSink command payload every 5 ms.
 static int32_t mix[2 * BLOCK]; static int sdk_frames;
@@ -166,6 +219,9 @@ static void sdk_exec(void *obj, void *state) {
     *(uint32_t *)cmd = 0xcafebabe; cmd[4] = 1; cmd[5] = 0x13;
     *(uint16_t *)(cmd+6) = 0x148; *(uint32_t *)(cmd+0x130) = 2; *(uint16_t *)(cmd+0x136) = 1;
     int amplitude = ++sdk_frames;
+    // A cold SDK can take longer to prepare its fourth block than one device
+    // callback. Starting with only three blocks strands silence in the first burst.
+    if (capture_frames == LONG_CAPTURE && amplitude == 4) usleep(80000);
     for (int i = 0; i < BLOCK; i++) { mix[i] = amplitude; mix[BLOCK+i] = -amplitude; }
     assert(t_ar && t_ar->handle[0] == obj);
     t_ar->frame_n = capture(t_ar, cl, sizeof cl, t_ar->frame);
@@ -197,20 +253,49 @@ static void test_renderer(void) {
     *(uint32_t *)param = 48000; *(uint32_t *)(param+4) = BLOCK; *(uint32_t *)(param+P_DEVICE) = 1;
     void *handle[2];
     assert(h_ar_Open0(handle, param, work, sizeof work) == RES_OK);
-    wait_for(&heard_frames, CAPTURE); h_ar_Close(handle[0], handle[1]);
-    for (int i = 0; i < CAPTURE; i++) {
+    // Add the expected duration to the normal watchdog allowance for a sustained run.
+    uint64_t deadline = now_ns() + (uint64_t)capture_frames * 1000000000 / 48000 + 5000000000;
+    while (atomic_load(&heard_frames) < capture_frames) { assert(now_ns() < deadline); usleep(1000); }
+    h_ar_Close(handle[0], handle[1]);
+    for (int i = 0; i < capture_frames; i++) {
         int amplitude = i / BLOCK + 1;
         if (heard[2*i] != amplitude || heard[2*i+1] != -amplitude) {
             fprintf(stderr, "renderer sample %d expected %d / %d, got %d / %d, max callback %d frames, produced %d blocks\n", i, amplitude, -amplitude, heard[2*i], heard[2*i+1], atomic_load(&max_frames), sdk_frames);
             abort();
         }
     }
-    assert(!key && sdk_frames >= CAPTURE / BLOCK);
-    printf("AudioRenderer: %d consecutive 5 ms DeviceSink blocks (%d stereo frames) at AAudio callback\n", CAPTURE / BLOCK, CAPTURE);
+    assert(!key && sdk_frames >= capture_frames / BLOCK);
+    printf("AudioRenderer: %d consecutive 5 ms DeviceSink blocks (%d stereo frames) at AAudio callback, max callback %d\n",
+           capture_frames / BLOCK, capture_frames, atomic_load(&max_frames));
 }
-int main(void) {
+static _Atomic int loading;
+static void *cpu_load(void *unused) {
+    (void)unused;
+    uint32_t x = 1;
+    while (atomic_load_explicit(&loading, memory_order_relaxed)) {
+        for (int i = 0; i < 256; i++) x = x * 1664525u + 1013904223u;
+        __asm__ volatile("" : "+r"(x));
+    }
+    return NULL;
+}
+int main(int argc, char **argv) {
+    int stress = argc == 2 && !strcmp(argv[1], "--stress");
+    assert(argc == 1 || stress);
+    pthread_t load[2];
+    if (stress) {
+        capture_frames = LONG_CAPTURE;
+        atomic_store(&loading, 1);
+        for (int i = 0; i < 2; i++) assert(!pthread_create(&load[i], NULL, cpu_load, NULL));
+    }
     unsetenv("DM_AUDIO"); unsetenv("DM_AUDIO_MUTE");
-    test_guest(); test_reconnect(); test_renderer();
+    test_guest();
+    for (int i = 0; i < (stress ? 3 : 1); i++) test_reconnect();
+    if (stress) test_transition_fifo();
+    test_renderer();
+    if (stress) {
+        atomic_store(&loading, 0);
+        for (int i = 0; i < 2; i++) assert(!pthread_join(load[i], NULL));
+    }
     printf("PASS (%llu device callbacks)\n", (unsigned long long)dm_audio_render_calls());
     return 0;
 }
