@@ -68,6 +68,83 @@ static void check_sparse_alias(NVNmemoryPoolBuilder *builder) {
 }
 #endif
 
+typedef struct {
+    NVNmemoryPool *pool;
+    int calls;
+} refill_context;
+
+static void refill(NVNcommandBuffer *cb, NVNcommandBufferMemoryEvent reason, size_t need, void *user) {
+    refill_context *ctx = user;
+    assert(reason == NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY && need <= 256);
+    assert(++ctx->calls == 1);
+    API(nvnCommandBufferAddCommandMemory)(cb, ctx->pool, 0x3000, 256);
+}
+
+static NVNcommandHandle record_value(NVNcommandBuffer *cb, NVNbufferAddress dst, uint32_t value) {
+    API(nvnCommandBufferBeginRecording)(cb);
+    API(nvnCommandBufferReportValue)(cb, value, dst);
+    return API(nvnCommandBufferEndRecording)(cb);
+}
+
+static void check_event_lists(NVNdevice *device, NVNqueue *queue, NVNmemoryPool *pool, uint8_t *storage) {
+    enum { results = 0xb000, segment = 0x2000 };
+    const uint32_t guard = 0xa5a5a5a5;
+    uint32_t *words = (uint32_t *)(storage + results);
+    NVNbufferAddress addr = API(nvnMemoryPoolGetBufferAddress)(pool) + results;
+    for (int i = 0; i < 8; ++i) words[i] = guard;
+    NVNeventBuilder builder;
+    NVNevent event;
+    API(nvnEventBuilderSetDefaults)(&builder);
+    API(nvnEventBuilderSetStorage)(&builder, pool, results + 4);
+    assert(API(nvnEventInitialize)(&event, &builder));
+    NVNcommandBuffer cb;
+    assert(API(nvnCommandBufferInitialize)(&cb, device));
+    API(nvnCommandBufferAddCommandMemory)(&cb, pool, 0x1000, 256);
+    API(nvnCommandBufferBeginRecording)(&cb);
+    API(nvnCommandBufferSignalEvent)(&cb, &event, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 7);
+    NVNcommandHandle first = API(nvnCommandBufferEndRecording)(&cb);
+    API(nvnCommandBufferBeginRecording)(&cb);
+    API(nvnCommandBufferSignalEvent)(&cb, &event, NVN_EVENT_SIGNAL_MODE_ADD, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 4);
+    NVNcommandHandle inner = API(nvnCommandBufferEndRecording)(&cb);
+    NVNcommandHandle after_end = record_value(&cb, addr + 20, 51);
+    assert(after_end == inner + 24 + sizeof(op_hdr));
+
+    // Seed an executable write at the stale fall-through address. The first
+    // segment fits REPORT (24), CALL (16) and the refill JUMP (16).
+    API(nvnCommandBufferAddCommandMemory)(&cb, pool, segment + 56, 128);
+    NVNcommandHandle after_jump = record_value(&cb, addr + 24, 61);
+    refill_context ctx = {pool, 0};
+    API(nvnCommandBufferSetMemoryCallbackData)(&cb, &ctx);
+    API(nvnCommandBufferSetMemoryCallback)(&cb, refill);
+    API(nvnCommandBufferAddCommandMemory)(&cb, pool, segment, 72);
+    API(nvnCommandBufferBeginRecording)(&cb);
+    API(nvnCommandBufferReportValue)(&cb, 17, addr + 12);
+    API(nvnCommandBufferCallCommands)(&cb, 1, &inner);
+    API(nvnCommandBufferReportValue)(&cb, 23, addr + 16);
+    NVNsync fence;
+    assert(API(nvnSyncInitialize)(&fence, device));
+    API(nvnCommandBufferFenceSync)(&cb, &fence, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+    NVNcommandHandle outer = API(nvnCommandBufferEndRecording)(&cb);
+    assert(ctx.calls == 1 && after_jump == outer + 56);
+    assert(API(nvnEventGetValue)(&event) == guard);
+    API(nvnQueueSubmitCommands)(queue, 1, &first);
+    API(nvnQueueSubmitCommands)(queue, 1, &outer);
+    NVNsyncWaitResult waited = API(nvnSyncWait)(&fence, 5000000000ull);
+    assert(waited == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED || waited == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+    const uint32_t expected[] = {guard, 11, guard, 17, 23, guard, guard, guard};
+    assert(API(nvnEventGetValue)(&event) == 11 && !memcmp(words, expected, sizeof expected));
+
+    // Positive controls: both writes skipped above really do write when submitted.
+    NVNcommandHandle controls[] = {after_end, after_jump};
+    API(nvnQueueSubmitCommands)(queue, 2, controls);
+    API(nvnQueueFinish)(queue);
+    assert(words[5] == 51 && words[6] == 61);
+    API(nvnSyncFinalize)(&fence);
+    API(nvnCommandBufferFinalize)(&cb);
+    API(nvnEventFinalize)(&event);
+    puts("Public NVN event lists: 7 + 4 at the fence, refill and nested return preserved both guards");
+}
+
 int main(void) {
     load_bootstrap();
     enum { pool_size = 0x10000, cmd_size = 0x4000, tex_offset = 0x4000, dst_offset = 0x8000,
@@ -173,6 +250,7 @@ int main(void) {
     API(nvnTexturePoolRegisterTexture)(&descriptors, 256, &tex, NULL);
     API(nvnTexturePoolFinalize)(&descriptors);
     API(nvnQueueFinish)(&queue);
+    check_event_lists(&device, &queue, &pool, storage);
     API(nvnQueueFinalize)(&queue);
     API(nvnSyncFinalize)(&sync);
     API(nvnCommandBufferFinalize)(&cb);
