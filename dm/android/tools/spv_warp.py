@@ -22,6 +22,32 @@ def _workgroup_size(code):
     return size if size <= 1024 else 0
 
 
+def _scratch_fits(module, size):
+    # Vulkan guarantees 16 KiB of compute shared memory. The guest compiler
+    # emits plain 32-bit words or a fixed array of them for each shared arena.
+    # Leave other layouts (including explicit/aliased layouts) to the driver.
+    words = size
+    for inst in module.code:
+        op = opcode(inst)
+        if op == 17 and inst[1] in (4428, 4429, 4430):
+            return False
+        if op != 59 or inst[3] != 4:
+            continue
+        ty = module.types[module.types[inst[1]][3]]
+        count = 1
+        if opcode(ty) == 28:
+            if module.decorations[ty[1]].get(6, (4,)) != (4,):
+                return False
+            count = module.constants.get(ty[3])
+            if count is None:
+                return False
+            ty = module.types[ty[2]]
+        if opcode(ty) not in (21, 22) or ty[2] != 32:
+            return False
+        words += count
+    return words <= 16384 // 4
+
+
 def _qualifies(module, lane, exchanges):
     # A branch or early return that excludes even one warp would make a
     # workgroup barrier invalid. Accept single-block functions and callees.
@@ -44,10 +70,6 @@ def _qualifies(module, lane, exchanges):
                 return False
             seen_label = True
         if lane in pointer_operands(inst) and (op != 61 or inst[3] != lane or inst[1] != module.uint):
-            return False
-        if exchanges and op == 59 and inst[3] == 4:
-            # Preserve the guest's shared-memory budget. With no other
-            # Workgroup allocation, our scratch occupies at most 4 KiB.
             return False
         if op in (73, 74, 75, 332, 5632, 5633):
             # Built-ins and other decorations can be applied indirectly to
@@ -76,7 +98,7 @@ class _Exchange:
         self.size = size
         self.index = index
         self.pointer = module.ty(32, 4, module.uint)
-        self.scratch = module.variable(module.ty(28, module.uint, module.const(size)), 4)
+        self.scratch = module.variable(module.aggregate(28, module.uint, module.const(size)), 4)
         self.scope = module.const(2)
         self.barrier = instruction(224, self.scope, self.scope, module.const(0x108))  # AcquireRelease | WorkgroupMemory
 
@@ -154,6 +176,8 @@ def lower(data):
     # A WorkgroupSize built-in takes precedence over LocalSize. Its value
     # may be specialized at pipeline creation, after we allocate the array.
     if 25 in builtins or set(range(36, 41)).intersection(builtins) or not _qualifies(module, lane, exchanges):
+        return data
+    if exchanges and not _scratch_fits(module, size):
         return data
     masks = spv_warp_masks.inputs(module, builtins)
     if masks is None:

@@ -85,11 +85,31 @@ class ComputeWarp(unittest.TestCase):
                 self.assertEqual(sum(opcode(i) == 71 and i[2:4] == (11, 29) for i in code), 1)
                 self.assertEqual(spv_warp.lower(result), result)
 
-    def test_divergence_shared_memory_and_specialized_group_sizes_keep_native_path(self):
-        for option in ('branch', 'shared', 'specialize_size'):
+    def test_divergence_and_specialized_group_sizes_keep_native_path(self):
+        for option in ('branch', 'specialize_size'):
             with self.subTest(option=option):
                 raw = self.module(**{option: True})
                 self.assertEqual(spv_warp.lower(raw), raw)
+
+    def test_shared_words_fit_within_the_vulkan_minimum(self):
+        template = assembly(shared=True).replace('%wg = OpTypePointer Workgroup %uint',
+            '%count = OpConstant %uint COUNT\n%words = OpTypeArray %uint %count\n%wg = OpTypePointer Workgroup %words')
+        # The local size is 64. Its extra 64 scratch words must fit beside the guest arena.
+        for count, lowered in ((4032, True), (4033, False)):
+            raw = self.assemble(template.replace('COUNT', str(count)))
+            portable = spv_warp.lower(raw)
+            self.assertEqual(portable != raw, lowered)
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=portable, check=True)
+
+    def test_shared_scratch_uses_its_own_array_layout(self):
+        source = assembly().replace('%input =', '%n = OpConstant %uint 64\n%wide = OpTypeArray %uint %n\n%input =')
+        source = source.replace('%void =', 'OpDecorate %wide ArrayStride 16\n%void =')
+        result = spv_warp.lower(self.assemble(source))
+        _, code = decode(result)
+        decorated = {i[1] for i in code if opcode(i) == 71 and i[2] == 6}
+        self.assertTrue(decorated)
+        self.assertFalse(any(i[3] in decorated for i in code if opcode(i) == 32 and i[2] == 4))
+        subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=result, check=True)
 
     def test_subgroup_mask_and_shuffle_keep_a_consistent_width(self):
         for mask in ('SubgroupEqMask', 'SubgroupGeMask', 'SubgroupGtMask', 'SubgroupLeMask', 'SubgroupLtMask'):
