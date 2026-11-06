@@ -353,7 +353,7 @@ static void *completion_thread(void *a) {
 }
 
 // ---------- Device ----------
-static int g_has_u8, g_storage_ms, g_precise_visibility;
+static int g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp;
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -463,6 +463,7 @@ static void vk_init_(void) {
     g_draw_parameters = dv >= VK_API_VERSION_1_2 ? f11.shaderDrawParameters : sdp.shaderDrawParameters;
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     g_precise_visibility = f2.features.occlusionQueryPrecise;
+    g_depth_clamp = f2.features.depthClamp && !getenv("DM_VK_NO_DEPTH_CLAMP");
     f13.robustImageAccess = VK_FALSE;
     const char *ext[7]; uint32_t next = 0;
     g_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
@@ -1660,7 +1661,7 @@ static struct {
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     visibility_counter *visibility;
-    p_prim_restart restart; p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc, rasterizer_discard;
+    p_prim_restart restart; p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; p_scissor sc; int has_sc, rasterizer_discard;
     uint8_t vp_sw[16][4];   // component selectors XOR the identity, as recorded by NVN
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
     float blend_color[4]; int64_t copy_stride, copy_img_stride;
@@ -1768,7 +1769,7 @@ typedef struct {
     shader_t *vs, *fs; int prim;
     va_st attr[32]; int nattr; vs_st stream[16]; int nstream, split_instances;
     blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples;
-    VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll, rasterizer_discard;
+    VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll, rasterizer_discard, depth_clamp;
 } pso_key;
 typedef struct { pso_key k; uint64_t h; VkPipeline p; } pso_ent;
 static pso_ent *g_pso; static int g_npso, g_cpso;
@@ -1860,6 +1861,7 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL};
     VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.rasterizerDiscardEnable = k->rasterizer_discard;
+    rs.depthClampEnable = k->depth_clamp;
     rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = (VkCullModeFlags)k->poly.cull; rs.frontFace = k->poly.front ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     if (k->origin_ll) rs.frontFace = rs.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     rs.depthBiasEnable = k->poly.offset_en != 0; rs.lineWidth = 1;
@@ -2543,6 +2545,8 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     if (!prepare_storage(&vs, &fs)) SKIP(6);
     pso_key k; memset(&k, 0, sizeof k);
     k.rasterizer_discard = S.rasterizer_discard;
+    k.depth_clamp = S.depth_clamp && g_depth_clamp;
+    if (S.depth_clamp && !g_depth_clamp) RED_ONCE(109, "depth clamp unavailable on this device; using depth clipping");
     k.origin_ll = g_queue_origin_ll;
     k.vs = vs; k.fs = fs; k.prim = replay_topology(prim,restart); k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
     for (int i=0;i<k.nattr;i++) if ((vs->vin_mask >> i & 1) && k.attr[i].stream<(unsigned)k.nstream) {
@@ -3510,6 +3514,7 @@ static void mtl_exec_(const uint8_t *p) {
                 break;
             }
             case OP_DEPTH_RANGE: { const p_depth_range *b = (const p_depth_range *)a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
+            case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on != 0; break;
             case OP_PUSH_CONST: {
                 const p_push_const *b = (const p_push_const *)a;
                 if (h.size < sizeof h + sizeof *b || b->size > h.size - sizeof h - sizeof *b ||
