@@ -78,6 +78,7 @@ static _Atomic int g_menu_request;
 static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER;
 #include "controllers_android.h"
 #include "motion_android.h"
+#include "haptics_android.h"
 
 static void back_to_menu(void);
 static void *latch_thread(void *a) {
@@ -275,9 +276,9 @@ static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a;
 static void on_window_resized(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; atomic_fetch_add(&g_win_gen, 1); }
 static void on_input_created(ANativeActivity *a, AInputQueue *q) { (void)a; g_iq = q; AInputQueue_attachLooper(q, ALooper_forThread(), 1, input_cb, NULL); }
 static void on_input_destroyed(ANativeActivity *a, AInputQueue *q) { (void)a; AInputQueue_detachLooper(q); g_iq = NULL; }
-static void on_resume(ANativeActivity *a) { (void)a; pthread_mutex_lock(&g_pmu); g_resumed = 1; pthread_mutex_unlock(&g_pmu); dm_gfx_suspend(0); dm_focus_set(1); dm_audio_suspend(0); LOG("front end: resumed"); }
+static void on_resume(ANativeActivity *a) { (void)a; pthread_mutex_lock(&g_pmu); g_resumed = 1; pthread_mutex_unlock(&g_pmu); dm_haptics_suspend(DM_HAPTICS_INACTIVE, 0); dm_gfx_suspend(0); dm_focus_set(1); dm_audio_suspend(0); LOG("front end: resumed"); }
 static void on_pause(ANativeActivity *a) {
-    (void)a; dm_audio_suspend(1); dm_focus_set(3); dm_gfx_suspend(1);
+    (void)a; dm_haptics_suspend(DM_HAPTICS_INACTIVE, 1); dm_audio_suspend(1); dm_focus_set(3); dm_gfx_suspend(1);
     pthread_mutex_lock(&g_pmu);
     g_resumed = 0; cancel_pads(); atomic_store(&g_ovl_on, 0);
     pthread_mutex_unlock(&g_pmu); LOG("front end: paused");
@@ -287,11 +288,13 @@ static void on_focus(ANativeActivity *a, int f) {
     g_focused = f;
     if (!f) { cancel_pads(); atomic_store(&g_ovl_on, 0); }
     pthread_mutex_unlock(&g_pmu);
+    dm_haptics_suspend(DM_HAPTICS_INTERRUPTED, !f);
     if (f) immersive(a);
     if (f || !atomic_load(&g_keyboard_requests)) dm_focus_set(f ? 1 : 2);
 }
 static void on_destroy(ANativeActivity *a) {
     pthread_mutex_lock(&g_wmu); if (a == g_act) g_keyboard_live = 0; pthread_mutex_unlock(&g_wmu);
+    rumble_close();
     dm_host_shutdown("activity destroyed");
 }
 
@@ -305,7 +308,7 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     a->callbacks->onResume = on_resume; a->callbacks->onPause = on_pause; a->callbacks->onWindowFocusChanged = on_focus; a->callbacks->onDestroy = on_destroy;
     ANativeActivity_setWindowFlags(a, 0x80 /* KEEP_SCREEN_ON */ | 0x400 /* FULLSCREEN */, 0);
     immersive(a);
-    static int booted; if (booted++) return;   // the activity can be made again (rotation, a return): the host runs once per process
+    static int booted; if (booted++) { rumble_open(a); return; }   // the activity can be made again (rotation, a return): the host runs once per process
     snprintf(g_files, sizeof g_files, "%s", a->internalDataPath);
     JNIEnv *env = a->env;
     jclass cls = (*env)->GetObjectClass(env, a->clazz);
@@ -318,6 +321,7 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     (*env)->DeleteLocalRef(env, hk); (*env)->DeleteLocalRef(env, pk); (*env)->DeleteLocalRef(env, ic);
     (*env)->DeleteLocalRef(env, intent); (*env)->DeleteLocalRef(env, cls);
     boot_env(a->internalDataPath, a->externalDataPath, handoff, previous);
+    rumble_open(a);
     pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 16 << 20);
     pthread_t th; if (pthread_create(&th, &at, boot_thread, NULL)) die("front end: cannot start the host");
     pthread_attr_destroy(&at);

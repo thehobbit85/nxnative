@@ -46,6 +46,9 @@ static void sleep_frame(void) {
     __asm__ volatile("svc #0x0b" : "+r"(x0) : : "memory");
 }
 static void require(int ok) { if (!ok) { NOTE("APP_FIXTURE_FAILED\n"); for (;;) sleep_frame(); } }
+#ifdef APP_HAPTICS
+#include "app_haptics.h"
+#endif
 #ifdef APP_MOTION
 #include "app_motion.h"
 #endif
@@ -213,7 +216,7 @@ void nnMain(void) {
     API(nvnWindowBuilderSetPresentInterval)(&wb, 1);
     require(API(nvnWindowInitialize)(&window, &wb));
     NVNcommandBuffer cb; require(API(nvnCommandBufferInitialize)(&cb, &device));
-#ifdef APP_CONTROLLERS
+#if defined(APP_CONTROLLERS) || defined(APP_HAPTICS)
     uint32_t ids[] = {32, 0, 1};
     hid_ids(ids, 3);
 #endif
@@ -229,6 +232,9 @@ void nnMain(void) {
         require(hid_read(&state, 1, &id) == 1);
         if (state.buttons && state.buttons != last_buttons) NOTE("APP_FIXTURE_BUTTON_DOWN\n");
         if (!state.buttons && last_buttons) NOTE("APP_FIXTURE_BUTTON_UP\n");
+#ifdef APP_HAPTICS
+        if (state.buttons && state.buttons != last_buttons) send_haptics(state.buttons);
+#endif
         last_buttons = state.buttons;
 #ifdef APP_CONTROLLERS
         report_pad(0, &state);

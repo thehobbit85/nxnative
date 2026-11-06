@@ -8,10 +8,17 @@ import java.util.HashMap;
 final class GameControllers implements InputManager.InputDeviceListener {
     private final InputManager input;
     private final GameMotion motion;
+    private final GameHaptics haptics;
     private boolean closed;
-    private final HashMap<Integer, String> attached = new HashMap<>();
+    private static final class Pad {
+        final String descriptor;
+        final int player;
+        Pad(InputDevice device, int player) { this.descriptor = device.getDescriptor(); this.player = player; }
+    }
+    private final HashMap<Integer, Pad> attached = new HashMap<>();
 
-    GameControllers(GameActivity activity, GameMotion motion) {
+    GameControllers(GameActivity activity, GameMotion motion, GameHaptics haptics) {
+        this.haptics = haptics;
         this.motion = motion;
         input = activity.getSystemService(InputManager.class);
         input.registerInputDeviceListener(this, null);
@@ -28,7 +35,8 @@ final class GameControllers implements InputManager.InputDeviceListener {
         // Retire devices first. A ninth controller can take a slot when one opens.
         for (int id : new java.util.ArrayList<>(attached.keySet())) {
             InputDevice d = input.getInputDevice(id);
-            if (d == null || !isController(d.getSources()) || !attached.get(id).equals(d.getDescriptor())) {
+            if (d == null || !isController(d.getSources()) || !attached.get(id).descriptor.equals(d.getDescriptor())) {
+                haptics.controller(attached.get(id).player, null);
                 motion.remove(id);
                 GameActivity.nativePadDetach(id);
                 attached.remove(id);
@@ -37,9 +45,11 @@ final class GameControllers implements InputManager.InputDeviceListener {
         for (int id : input.getInputDeviceIds()) {
             if (attached.containsKey(id)) continue;
             InputDevice d = input.getInputDevice(id);
-            if (d != null && !d.isVirtual() && isController(d.getSources()) &&
-                GameActivity.nativePadAttach(id, d.getDescriptor())) {
-                attached.put(id, d.getDescriptor());
+            if (d == null || d.isVirtual() || !isController(d.getSources())) continue;
+            int player = GameActivity.nativePadAttach(id, d.getDescriptor());
+            if (player >= 0) {
+                attached.put(id, new Pad(d, player));
+                haptics.controller(player, d);
                 motion.controller(d);
             }
         }
@@ -47,10 +57,13 @@ final class GameControllers implements InputManager.InputDeviceListener {
 
     @Override public void onInputDeviceAdded(int id) { refresh(); }
     @Override public void onInputDeviceChanged(int id) {
-        String previous = attached.get(id);
+        Pad previous = attached.get(id);
         refresh();
         InputDevice d = input.getInputDevice(id);
-        if (d != null && previous != null && previous.equals(attached.get(id))) motion.controller(d);
+        if (d != null && previous != null && previous == attached.get(id)) {
+            motion.controller(d);
+            haptics.controller(previous.player, d);
+        }
     }
     @Override public void onInputDeviceRemoved(int id) { refresh(); }
 

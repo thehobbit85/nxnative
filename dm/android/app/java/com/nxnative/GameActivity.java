@@ -17,13 +17,19 @@ public final class GameActivity extends NativeActivity {
     private final GameKeyboard keyboard = new GameKeyboard(this);
     private GameControllers controllers;
     private GameMotion motion;
+    private GameHaptics haptics;
+    static native void nativeHapticRoute(int player, boolean available, boolean controller);
+
+    public void applyHaptics(int player, float li, float ls, float ri, float rs, float mi, float ms) {
+        if (haptics != null) haptics.apply(player, li, ls, ri, rs, mi, ms);
+    }
     static native int nativeMotionModes();
     static native long nativeMotionClockOffset();
     static native void nativeMotionSample(int device, int orientation, long time, float ax, float ay, float az,
                                          float wx, float wy, float wz);
     static native void nativeMotionClear(int device);
     private OfflineWeb web;
-    static native boolean nativePadAttach(int id, String descriptor);
+    static native int nativePadAttach(int id, String descriptor);
     static native void nativePadDetach(int id);
     private boolean paused;
     static native void nativeWebEvent(long id, int kind, int reason, byte[] message);
@@ -64,15 +70,17 @@ public final class GameActivity extends NativeActivity {
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved); // NativeActivity registers the native input methods here.
         motion = new GameMotion(this);
-        controllers = new GameControllers(this, motion);
+        haptics = new GameHaptics(this);
+        controllers = new GameControllers(this, motion, haptics);
     }
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
         if (motion != null) motion.focus(focused);
+        if (!focused && haptics != null) haptics.stop();
     }
-    @Override protected void onPause() { paused = true; if (motion != null) motion.resume(false); keyboard.pause(true); if (web != null) web.pause(true); super.onPause(); }
+    @Override protected void onPause() { paused = true; if (haptics != null) haptics.stop(); if (motion != null) motion.resume(false); keyboard.pause(true); if (web != null) web.pause(true); super.onPause(); }
     @Override protected void onResume() { super.onResume(); paused = false; if (motion != null) motion.resume(true); keyboard.pause(false); if (web != null) web.pause(false); }
-    @Override protected void onDestroy() { if (motion != null) motion.resume(false); keyboard.pause(true); if (controllers != null) controllers.close(); if (web != null) { web.close(); web = null; } super.onDestroy(); }
+    @Override protected void onDestroy() { if (motion != null) motion.resume(false); keyboard.pause(true); if (controllers != null) controllers.close(); if (haptics != null) haptics.stop(); if (web != null) { web.close(); web = null; } super.onDestroy(); }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if (web != null && web.active()) {
             if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) { if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) web.back(); return true; }

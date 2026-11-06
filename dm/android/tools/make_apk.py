@@ -83,6 +83,7 @@ def check_library(path):
 MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{pkg}" android:versionCode="{vc}" android:versionName="{vn}">
   <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="33"/>
+  <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true"/>
   <application android:label="{label}" android:icon="@mipmap/icon" android:hasCode="true" android:extractNativeLibs="true" android:isGame="true"
                android:appCategory="game" android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
