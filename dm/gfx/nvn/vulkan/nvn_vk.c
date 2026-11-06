@@ -2451,18 +2451,65 @@ static void clear_color(const p_clear_color *c) {
     vkCmdClearAttachments(C->cb, 1, &a, 1, &r);
     P.cdrawn[c->index] = 1;
 }
+static shader_t *clear_shader(shader_t *shader, const uint32_t *code, size_t bytes) {
+    if (!shader->mod) {
+        VkShaderModuleCreateInfo info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, bytes, code};
+        VKCHECK(vkCreateShaderModule(g_dev, &info, NULL, &shader->mod));
+        shader->dsl = g_empty_dsl;
+    }
+    return shader;
+}
+static shader_t *clear_vertex(void) {
+    static const uint32_t code[] =
+#include "clear.vert.inc"
+    ;
+    static shader_t shader = {.key = "clear-vertex"};
+    return clear_shader(&shader, code, sizeof code);
+}
+// vkCmdClearAttachments replaces all eight stencil bits. A rasterized
+// REPLACE applies the guest's write mask and leaves every color target alone.
+static void clear_masked_stencil(const p_clear_ds *c, VkRect2D rect, float depth) {
+    static const uint32_t code[] =
+#include "clear_stencil.frag.inc"
+    ;
+    static shader_t fragment = {.key = "clear-stencil", .stage = 1};
+    pso_key k = {.vs = clear_vertex(), .fs = clear_shader(&fragment, code, sizeof code),
+        .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .nc = P.n, .df = P.dt->f.f, .stencil = 1};
+    for (int i = 0; i < P.n; i++) k.cf[i] = P.cv[i] ? P.ct[i]->f.f : VK_FORMAT_UNDEFINED;
+    k.ds = (ds_st){.dt = !!c->depth_mask, .dw = !!c->depth_mask, .df = NVN_COMPARE_FUNC_ALWAYS,
+        .st = 1, .sf_f = NVN_COMPARE_FUNC_ALWAYS, .sf_b = NVN_COMPARE_FUNC_ALWAYS,
+        .zpass_f = NVN_STENCIL_OP_REPLACE, .zpass_b = NVN_STENCIL_OP_REPLACE};
+    VkPipeline pipeline = pso_get(&k, layout_get(k.vs, k.fs));
+    if (!pipeline || !pass_begin()) return;
+    VkCommandBuffer cb = C->cb;
+    VkViewport viewport = {0, 0, (float)P.w, (float)P.h, depth, depth};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdSetViewport(cb, 0, 1, &viewport);
+    vkCmdSetScissor(cb, 0, 1, &rect);
+    vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+    vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, (uint32_t)c->stencil_mask & 0xff);
+    vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, (uint32_t)c->stencil & 0xff);
+    vkCmdSetDepthBias(cb, 0, 0, 0);
+    vkCmdSetBlendConstants(cb, (const float[4]){0});
+    vkCmdDraw(cb, 3, 1, 0, 0);
+}
 static void clear_ds(const p_clear_ds *c) {
     if (!P.dt) return;
     VkClearRect r = {.rect = render_scissor(), .layerCount = 1};
     VkImageAspectFlags asp = (c->depth_mask ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (P.dt->f.stencil && (c->stencil_mask & 0xff) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
     if (!asp || !r.rect.extent.width || !r.rect.extent.height) return;
+    float depth = c->depth > 0 ? fminf(c->depth, 1) : 0;
+    if ((asp & VK_IMAGE_ASPECT_STENCIL_BIT) && (c->stencil_mask & 0xff) != 0xff) {
+        clear_masked_stencil(c, r.rect, depth);
+        return;
+    }
     if (!P.open && r.rect.extent.width == P.w && r.rect.extent.height == P.h) {
-        if (asp & VK_IMAGE_ASPECT_DEPTH_BIT) { P.clr_d = 1; P.cd = c->depth; }
+        if (asp & VK_IMAGE_ASPECT_DEPTH_BIT) { P.clr_d = 1; P.cd = depth; }
         if (asp & VK_IMAGE_ASPECT_STENCIL_BIT) { P.clr_s = 1; P.cs = (uint32_t)c->stencil; }
         return;
     }
     if (!pass_begin()) return;
-    VkClearAttachment a = {asp, 0, {.depthStencil = {c->depth, (uint32_t)c->stencil}}};
+    VkClearAttachment a = {asp, 0, {.depthStencil = {depth, (uint32_t)c->stencil}}};
     vkCmdClearAttachments(C->cb, 1, &a, 1, &r);
 }
 // Copies and blits are checked against the image before they are recorded: a region past a level's extent, a level or layer the image lacks, or a blit the format does not support

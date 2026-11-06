@@ -10,6 +10,11 @@ CPPFLAGS += -D_GNU_SOURCE -I$(HOST) -I$(HOST)/gen/$(GAME) -I../../../games/$(GAM
 CFLAGS += -O1 -Wall -Werror -Wno-unused-function
 REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
+CLEAR_SRC := .
+CLEAR_GEN := $(B)/clear-shaders
+include clear_shaders.mk
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS)
+CPPFLAGS += -I$(CLEAR_GEN)
 .PHONY: geometry-topology-fixture
 geometry-topology-fixture: $(B)/t_geometry_topology $(B)/topology.spv
 $(B)/t_geometry_topology: tests/t_geometry_topology.c

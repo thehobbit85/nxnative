@@ -38,6 +38,12 @@ codecs:
 CLI_OBJ := $(patsubst %,$(OUT)/obj/android/%.o,cli/front_cli.c)
 $(CLI_OBJ): CFLAGS += -DDM_ANDROID_CLI
 .DEFAULT_GOAL := $(OUT)/libdmhost.so
+GLSLC ?= $(NDK)/shader-tools/$(NDK_HOST)/glslc
+CLEAR_SRC := ../gfx/nvn/vulkan
+CLEAR_GEN := $(OUT)/clear-shaders
+include $(CLEAR_SRC)/clear_shaders.mk
+$(OUT)/obj/gfx/nvn/vulkan/nvn_vk.c.o: $(CLEAR_HEADERS)
+$(OUT)/obj/gfx/nvn/vulkan/nvn_vk.c.o: CFLAGS += -I$(CLEAR_GEN)
 .PHONY: profile clean FORCE
 profile: $(GAME_GEN)/game_profile.h
 $(GAME_GEN)/game_profile.h: FORCE
