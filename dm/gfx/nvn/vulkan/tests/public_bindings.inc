@@ -69,6 +69,124 @@ static void check_deferred_cubes(NVNdevice *device, NVNqueue *queue, NVNcommandB
     puts("Public deferred cube binds: six faces from both slots, refreshed after recording in both pools");
 }
 
+typedef struct {
+    NVNqueue *queue;
+    NVNcommandHandle commands;
+} pool_draw;
+
+static void *repeat_pool_draw(void *arg) {
+    pool_draw *draw = arg;
+    for (int i = 0; i < 4; ++i) API(nvnQueueSubmitCommands)(draw->queue, 1, &draw->commands);
+    return NULL;
+}
+
+// Both queues use the same local texture ID and sampler ID in a uniform
+// buffer. Only the nested pool selections distinguish their pictures.
+static void check_nested_pools(NVNdevice *device, NVNqueue *first, NVNcommandBuffer *cb, NVNmemoryPool *pool,
+                               NVNtexturePool tp[2], NVNsamplerPool sp[2], const NVNtexture *first_target,
+                               const NVNshaderData *stages) {
+    NVNprogram program;
+    assert(API(nvnProgramInitialize)(&program, device));
+    assert(API(nvnProgramSetShaders)(&program, 2, stages));
+    NVNqueueBuilder qb;
+    API(nvnQueueBuilderSetDevice)(&qb, device); API(nvnQueueBuilderSetDefaults)(&qb);
+    NVNqueue second;
+    assert(API(nvnQueueInitialize)(&second, &qb));
+    NVNqueue *queues[] = {first, &second};
+    NVNtextureBuilder tb;
+    API(nvnTextureBuilderSetDefaults)(&tb); API(nvnTextureBuilderSetDevice)(&tb, device);
+    API(nvnTextureBuilderSetTarget)(&tb, NVN_TEXTURE_TARGET_2D);
+    API(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA8);
+    API(nvnTextureBuilderSetSize2D)(&tb, 4, 1);
+    API(nvnTextureBuilderSetStorage)(&tb, pool, 0x1d000);
+    NVNtexture second_target;
+    assert(API(nvnTextureInitialize)(&second_target, &tb));
+    const NVNtexture *targets[] = {first_target, &second_target};
+    uint8_t *memory = API(nvnMemoryPoolMap)(pool);
+    NVNbufferAddress addr = API(nvnMemoryPoolGetBufferAddress)(pool);
+    enum { handle_offset = 0x30300, result_offset = 0x31200 };
+    uint32_t handles[] = {256, 256u << 20};
+    memcpy(memory + handle_offset, handles, sizeof handles);
+    NVNcommandHandle select[2];
+    for (int p = 0; p < 2; ++p) {
+        API(nvnCommandBufferBeginRecording)(cb);
+        API(nvnCommandBufferSetTexturePool)(cb, &tp[p]);
+        API(nvnCommandBufferSetSamplerPool)(cb, &sp[1-p]);
+        select[p] = API(nvnCommandBufferEndRecording)(cb);
+    }
+    pool_draw draw[2];
+    NVNcopyRegion row = {0,0,0,4,1,1};
+    for (int q = 0; q < 2; ++q) {
+        API(nvnCommandBufferBeginRecording)(cb);
+        API(nvnCommandBufferSetRenderTargets)(cb, 1, &targets[q], NULL, NULL, NULL);
+        API(nvnCommandBufferSetViewport)(cb, 0, 0, 4, 1);
+        API(nvnCommandBufferSetScissor)(cb, 0, 0, 4, 1);
+        API(nvnCommandBufferBindProgram)(cb, &program, 3);
+        API(nvnCommandBufferBindUniformBuffer)(cb, NVN_SHADER_STAGE_FRAGMENT, 7, addr + handle_offset, sizeof handles);
+        API(nvnCommandBufferBindUniformBuffer)(cb, NVN_SHADER_STAGE_FRAGMENT, 8, addr + handle_offset, sizeof handles);
+        API(nvnCommandBufferCallCommands)(cb, 1, &select[q]);
+        NVNcommandHandle setup = API(nvnCommandBufferEndRecording)(cb);
+        API(nvnQueueSubmitCommands)(queues[q], 1, &setup);
+        API(nvnCommandBufferBeginRecording)(cb);
+        API(nvnCommandBufferDrawArrays)(cb, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3);
+        API(nvnCommandBufferCopyTextureToBuffer)(cb, targets[q], NULL, &row, addr + result_offset + 32*q, 0);
+        draw[q] = (pool_draw){queues[q], API(nvnCommandBufferEndRecording)(cb)};
+    }
+    for (int swap = 0; swap <= 1; ++swap) {
+        // Switching just the child list must preserve each caller's other
+        // state (program, target, uniforms and viewport) in later submissions.
+        if (swap) for (int q = 0; q < 2; ++q) {
+            API(nvnCommandBufferBeginRecording)(cb);
+            API(nvnCommandBufferCallCommands)(cb, 1, &select[1-q]);
+            NVNcommandHandle change = API(nvnCommandBufferEndRecording)(cb);
+            API(nvnQueueSubmitCommands)(queues[q], 1, &change);
+        }
+        memset(memory + result_offset, 0xcc, 64);
+        pthread_t workers[2];
+        for (int q = 0; q < 2; ++q) assert(!pthread_create(&workers[q], NULL, repeat_pool_draw, &draw[q]));
+        for (int q = 0; q < 2; ++q) {
+            assert(!pthread_join(workers[q], NULL));
+            API(nvnQueueFinish)(queues[q]);
+            int p = q ^ swap;
+            for (int x = 0; x < 4; ++x) {
+                uint8_t red = p ? 64 + 96*(x&1) : (x ? 96 : 24);
+                const uint8_t expected[] = {red,0,0,255};
+                uint8_t *got = memory + result_offset + 32*q + 4*x;
+                if (memcmp(got,expected,4)) die("nested pool queue %d selection %d pixel %d: red %u expected %u",q,p,x,got[0],red);
+            }
+            for (int x=16;x<32;++x) assert(memory[result_offset+32*q+x]==0xcc);
+        }
+        // Record a consumer on the other queue before the producer runs.
+        // The queued fence/wait orders both its pixels and guest writeback.
+        NVNsync ready;
+        assert(API(nvnSyncInitialize)(&ready, device));
+        int producer = swap, consumer = 1 - producer;
+        size_t peer_result = result_offset + 64;
+        memset(memory + peer_result, 0xcc, 32);
+        API(nvnCommandBufferBeginRecording)(cb);
+        API(nvnCommandBufferCopyTextureToBuffer)(cb, targets[producer], NULL, &row, addr + peer_result, 0);
+        NVNcommandHandle read_peer = API(nvnCommandBufferEndRecording)(cb);
+        // Overwrite with a contrasting color so that reading the old image
+        // would differ from reading the producer's subsequent draw.
+        API(nvnCommandBufferBeginRecording)(cb);
+        float blue[4] = {0,0,1,1};
+        API(nvnCommandBufferClearColor)(cb, 0, blue, 15);
+        NVNcommandHandle clear = API(nvnCommandBufferEndRecording)(cb);
+        API(nvnQueueSubmitCommands)(queues[producer], 1, &clear);
+        API(nvnQueueFinish)(queues[producer]);
+        API(nvnQueueSubmitCommands)(queues[producer], 1, &draw[producer].commands);
+        API(nvnQueueFenceSync)(queues[producer], &ready, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        assert(API(nvnQueueWaitSync)(queues[consumer], &ready));
+        API(nvnQueueSubmitCommands)(queues[consumer], 1, &read_peer);
+        API(nvnQueueFinish)(queues[consumer]);
+        assert(!memcmp(memory + peer_result, memory + result_offset + 32*producer, 16));
+        for (int x=16;x<32;++x) assert(memory[peer_result+x]==0xcc);
+        API(nvnSyncFinalize)(&ready);
+    }
+    API(nvnQueueFinalize)(&second); API(nvnTextureFinalize)(&second_target); API(nvnProgramFinalize)(&program);
+    puts("Public concurrent queues inherited different uniform texture and sampler pools across nested selections");
+}
+
 static void check_texture_bindings(NVNdevice *device, NVNqueue *queue) {
     enum { pool_size = 0x50000, source_offset = 0x30000, result_offset = 0x31000 };
     static _Alignas(16384) uint8_t memory[pool_size];
@@ -188,6 +306,9 @@ static void check_texture_bindings(NVNdevice *device, NVNqueue *queue) {
             assert(following == 1234);
         }
     }
+    memory[source_offset + 71] = 7;
+    NVNshaderData uniform_stages[] = {{addr + source_offset + 64, control}, {addr + source_offset + 71, control}};
+    check_nested_pools(device, queue, &cb, &pool, tp, sp, &textures[4], uniform_stages);
     check_deferred_cubes(device, queue, &cb, &pool, tp, sp, &programs[2]);
     API(nvnCommandBufferFinalize)(&cb);
     for (int p = 0; p < 2; ++p) {
