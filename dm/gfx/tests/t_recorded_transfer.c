@@ -145,6 +145,10 @@ static void check_event_lists(NVNdevice *device, NVNqueue *queue, NVNmemoryPool 
     puts("Public NVN event lists: 7 + 4 at the fence, refill and nested return preserved both guards");
 }
 
+#ifdef DM_VK_PUBLIC_BINDINGS
+#include "../nvn/vulkan/tests/public_bindings.inc"
+#endif
+
 int main(void) {
     load_bootstrap();
     enum { pool_size = 0x10000, cmd_size = 0x4000, tex_offset = 0x4000, dst_offset = 0x8000,
@@ -243,6 +247,9 @@ int main(void) {
         if (storage[dst_offset + i] != expected[i])
             die("recorded transfer at byte %zu: got %#x, expected %#x", i, storage[dst_offset + i], expected[i]);
     }
+#ifdef DM_VK_PUBLIC_BINDINGS
+    if (getenv("DM_VK_DIR")) check_texture_bindings(&device, &queue);
+#endif
     NVNtexturePool descriptors;
     assert(API(nvnTexturePoolInitialize)(&descriptors, &pool, 0xc000, 257));
     API(nvnTexturePoolRegisterImage)(&descriptors, 256, &tex, &view);
