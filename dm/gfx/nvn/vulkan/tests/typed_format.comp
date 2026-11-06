@@ -1,0 +1,11 @@
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=0) uniform samplerBuffer source;
+layout(set=0,binding=1,std430) coherent buffer Raw { uint words[]; } raw;
+layout(set=0,binding=2,std430) buffer Results { uvec4 samples[]; } results;
+void main() {
+    int i=int(gl_GlobalInvocationID.x);
+    vec4 sampled=texelFetch(source,i);
+    uint value=packUnorm4x8(sampled);
+    results.samples[i]=uvec4(value,atomicExchange(raw.words[i],value),textureSize(source),0);
+}
