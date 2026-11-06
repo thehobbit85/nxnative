@@ -65,6 +65,8 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Android integration
 
+**Verified on llvmpipe, 2026-11-06.** A fresh ARM64 Android 15 install with the renderer at `9d35f040` played from the title screen through file selection, Marin's opening dialogue, movement, Tarin's shield and the exit to Mabe Village. Link, the hearts, the shield acquisition text and the outdoor scenery rendered. The installed shader and reflection files match the production export of 9,698 validated stages. The test supplied the standard and controller-symbol fonts through the Android packager.
+
 **Verified, 2026-11-04:** the ARM64 Android 15 / API 35 emulator with SwiftShader renders the opening room, Link, Marin, Tarin, hearts, complete menu and dialogue text, inventory and item effects. Scripted input advances the opening conversation, moves Link, talks to Tarin, obtains the shield and raises it with R. Leaving the house reaches Mabe Village with its scenery and location text visible. These checks use the original exported shaders and the production renderer, without diagnostic shader replacements.
 
 Save check: the System menu's Save operation completes with the house location and timestamp. After force-stopping and restarting the Android process, File 1 retains that save; loading it restores the room and the acquired shield, and movement and shield input still work. Clear the `DM_CTL` command file while the app is stopped before restarting a test: its reader starts at byte zero each process, so retaining old commands would replay them and confound the reload check.
