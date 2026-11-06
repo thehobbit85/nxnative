@@ -1201,6 +1201,51 @@ static void texture_copy_regions(void) {
     puts("Vulkan texture copies preserve 3D slices and array layers, convert RGBA to RG and mirror both axes");
 }
 
+static void downsample_view(void) {
+    tex_t src = {.serial=0x8160,.d={.width=8,.height=8,.depth=2,.levels=2,.target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA8}};
+    tex_t dst = src; dst.serial++; dst.d.width=dst.d.height=4; dst.d.format=NVN_FORMAT_RG8;
+    nvn_tex_layout(&src.d,&src.L); nvn_tex_layout(&dst.d,&dst.L);
+    view_t view = {.set_levels=1,.base_level=1,.nlevels=1,.set_layers=1,.min_layer=1,.nlayers=1};
+    uint8_t input[4][4][4], pixels[2][2][2][2];
+    for (int y=0;y<4;y++) for (int x=0;x<4;x++)
+        for (int ch=0;ch<4;ch++) input[y][x][ch]=16*x+32*y+3*ch;
+    list_t list={0};
+    RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&dst,.has_view=1,.view={.set_levels=1,.base_level=1,.nlevels=1},
+           .r={.width=2,.height=2,.depth=2},.mask=15,.c.f={1,1,1,1});
+    RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&src,.has_view=1,.view=view,.src=(uintptr_t)input,.r={.width=4,.height=4,.depth=1});
+    // The public DownsampleTextureView recorder writes the base dimensions.
+    RECORD(OP_COPY_T2T,p_copy_t2t,.src=&src,.dst=&dst,.flags=DM_COPY_RESOLVE,.has_sv=1,.sv=view,.has_dv=1,.dv=view,
+           .sr={.width=8,.height=8,.depth=1},.dr={.width=4,.height=4,.depth=1});
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&dst,.has_view=1,.view={.set_levels=1,.base_level=1,.nlevels=1},
+           .r={.width=2,.height=2,.depth=2},.src=(uintptr_t)pixels);
+    put(&list,OP_END,NULL,0); mtl_queue_activate(0x8160);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for (int z=0;z<2;z++) for (int y=0;y<2;y++) for (int x=0;x<2;x++) for (int ch=0;ch<2;ch++) {
+        int want=z ? 24+32*x+64*y+3*ch : 255;
+        if (pixels[z][y][x][ch]!=want) die("downsample view layer %d at %d,%d got %u, expected %d",z,x,y,pixels[z][y][x][ch],want);
+    }
+    mtl_tex_release(&src); mtl_tex_release(&dst); mtl_queue_forget(0x8160);
+}
+
+static void depth_copy_filter(void) {
+    tex_t src={.serial=0x8162,.d={.width=5,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_DEPTH32F}};
+    tex_t dst=src; dst.serial++; dst.d.width=3;
+    nvn_tex_layout(&src.d,&src.L); nvn_tex_layout(&dst.d,&dst.L);
+    float input[]={.125f,.25f,.625f,.875f,1}, pixels[3]={0};
+    list_t list={0};
+    RECORD(OP_COPY_B2T,p_copy_b2t,.src=(uintptr_t)input,.tex=&src,.r={.width=5,.height=1,.depth=1});
+    RECORD(OP_COPY_T2T,p_copy_t2t,.src=&src,.dst=&dst,.flags=NVN_COPY_FLAGS_LINEAR_FILTER_BIT|NVN_COPY_FLAGS_MIRROR_X_BIT,
+           .sr={.width=5,.height=1,.depth=1},.dr={.width=3,.height=1,.depth=1});
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&dst,.src=(uintptr_t)pixels,.r={.width=3,.height=1,.depth=1});
+    put(&list,OP_END,NULL,0); mtl_queue_activate(0x8162);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    // Metal's depth copy uses an unfiltered read at the mapped texel even
+    // when color copies would filter. Bilinear interpolation differs at both ends.
+    for (int i=0;i<3;i++) if (pixels[i]!=input[4-2*i])
+        die("depth copy with the linear flag: pixel %d got %g, expected %g",i,pixels[i],input[4-2*i]);
+    mtl_tex_release(&src); mtl_tex_release(&dst); mtl_queue_forget(0x8162);
+}
+
 static void depth_copies(void) {
     const NVNformat formats[] = {NVN_FORMAT_DEPTH32F, NVN_FORMAT_DEPTH16, NVN_FORMAT_DEPTH24_STENCIL8, NVN_FORMAT_DEPTH32F_STENCIL8};
     for (unsigned k=0;k<sizeof formats/sizeof *formats;k++) for (int scale=0;scale<2;scale++) {
@@ -1855,7 +1900,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
-    if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); return 0; }
+    if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
@@ -1892,7 +1937,7 @@ int main(void) {
     buffer_range_lifetime();
     ordered_buffers();
     draw_parameters();
-    texture_copy_regions(); depth_copies();
+    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_copies();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);

@@ -2845,11 +2845,24 @@ static int texture_copy_region(const vtex *v, const view_t *view, const NVNcopyR
 static VkOffset3D copy_end(VkOffset3D start, VkExtent3D size) {
     return (VkOffset3D){start.x+(int32_t)size.width,start.y+(int32_t)size.height,start.z+(int32_t)size.depth};
 }
+static NVNcopyRegion whole_mip(const vtex *v, const view_t *view) {
+    unsigned level = view && view->set_levels ? view->base_level : 0;
+    if (level >= v->levels) return (NVNcopyRegion){0};
+    unsigned w=v->w >> level, h=v->h >> level;
+    return (NVNcopyRegion){.width=w ? (int)w : 1, .height=h && v->target!=NVN_TEXTURE_TARGET_1D_ARRAY ? (int)h : 1, .depth=1};
+}
 static void copy_t2t(const p_copy_t2t *c) {
     if (vk_skip() & SK_T2T) return;
     if (g_plog) LOG("plog:  t2t %llu (fmt %#x) %dx%d → %llu (fmt %#x) %dx%d flags %#x", (unsigned long long)c->src->serial, c->src->d.format, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial, c->dst->d.format, c->dr.width, c->dr.height, c->flags);
     vtex *s = tex_get(c->src, 0), *d = tex_get(c->dst, 1); if (!s || !d) return;
     pass_end();
+    p_copy_t2t whole;
+    if (c->flags & DM_COPY_RESOLVE) {
+        whole=*c;
+        whole.sr=whole_mip(s,c->has_sv ? &c->sv : NULL);
+        whole.dr=whole_mip(d,c->has_dv ? &c->dv : NULL);
+        c=&whole;
+    }
     VkImageCopy region;
     VkExtent3D dest;
     if (!texture_copy_region(s,c->has_sv ? &c->sv : NULL,&c->sr,&region.srcSubresource,&region.srcOffset,&region.extent) ||
@@ -2890,11 +2903,12 @@ static void copy_t2t(const p_copy_t2t *c) {
     }
     if (s->samples>1) { RED_ONCE(96,"multisample image copies require matching extents and formats"); return; }
     VkFormatFeatureFlags sf=fmt_feat(s->f.f), df=fmt_feat(d->f.f);
-    int linear = (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) && !same;
+    int linear = !depth && !same && ((c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) ||
+                 ((c->flags & DM_COPY_RESOLVE) && clear_color_type(s->f.f)==CLEAR_FLOAT));
     int blit = (sf & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && (df & VK_FORMAT_FEATURE_BLIT_DST_BIT) &&
                clear_color_type(s->f.f)==clear_color_type(d->f.f) &&
                (!linear || (sf & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
-    if (depth && (linear || getenv("DM_VK_DEPTH_COPY_TRANSFER"))) blit=0;
+    if (depth && getenv("DM_VK_DEPTH_COPY_TRANSFER")) blit=0;
     if (blit) {
         VkImageBlit b = {src,{region.srcOffset,copy_end(region.srcOffset,region.extent)},
                          dst,{region.dstOffset,copy_end(region.dstOffset,dest)}};
