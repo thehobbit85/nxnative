@@ -1062,6 +1062,8 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ### Transform feedback captured by a vertex entry point
 
+- **Control ordering:** Begin initializes four byte offsets and the indirect draw arguments. Pause and End can save the 32 bytes, and Resume can immediately restore a block filled by an earlier GPU copy. The Android Vulkan backend keeps the control in a per-queue buffer and publishes each save to later GPU commands and to the guest on completion. Metal tracks the internal control and guest ranges in its blit hazard tracker. Omitting the internal range let an End following Resume save the old count. The public recorder fixture checks the eight words and guards on both backends. Capturing shader output into the Vulkan feedback streams is a separate operation.
+
 - **Symptom:** characters collapsed into one thin spike (vertex streams read from feedback buffers that were never written); a character covered by a solid box while it moves (its fur shells pulled toward lagged positions that were never written); a pass dump shows draws with a vertex shader and no fragment shader (`fs=-`) before the draws that read them, and `Y tf begin … written 0/0/0/0` with no `T … tf capture` line.
 - **Cause:** a game that skins on the GPU with transform feedback: a vertex-only program runs under `SetRasterizerDiscard` between `BeginTransformFeedback` / `EndTransformFeedback` and writes into feedback buffers that later draws read as vertex streams. The host ignored all of it, so the streams kept whatever was there. Metal has no feedback stage.
 - **Fix:**
