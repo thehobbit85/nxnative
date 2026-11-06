@@ -17,6 +17,7 @@ static int test_nvn2;
 int dm_sdk_ounce(void) { return test_nvn2; }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
 static prog_t packed_program={.nstage=2};
+static prog_t capture_program={.nstage=1};
 static prog_t restart_program={.nstage=2};
 static prog_t table_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t warp_program[2] = {{.nstage = 1}, {.nstage = 1}};
@@ -64,6 +65,7 @@ int nvn_dpool_base(const void *pool, int texture) {
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (int i=0;i<2;++i) if (p==&typed_border_program[i]) { assert(stage==0); memset(key,0,8); key[7]=0x69+i; return 1; }
+    if (p==&capture_program) { assert(stage==0); const uint8_t k[8]={0xde,0x21,0x67,0x83,0xc4,0xf7,0x06,0x05}; memcpy(key,k,8); return 1; }
     if (p==&mixed_color_program) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x67 : 0x52; return 1; }
     for (int i=0;i<2;++i) if (p==&logic_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x64+i : 0x52; return 1; }
     for (int i=0;i<3;++i) if (p==&alpha_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x61+i : 0x52; return 1; }
@@ -2727,6 +2729,7 @@ static void typed_graphics(void) {
     puts("Shared vertex/fragment typed-buffer atomics, GPU-produced uniform handles, ordered updates and compute consumers passed");
 }
 #include "uniform_storage.inc"
+#include "feedback_capture.inc"
 #include "alpha.inc"
 #include "logic.inc"
 #include "split_handle.inc"
@@ -2756,6 +2759,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }
     if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); sparse_mrt_outputs(); mixed_integer_outputs(); return 0; }
     if (getenv("DM_VK_TEST_ALPHA_COVERAGE")) { alpha_coverage(&logic_program[0],1); alpha_coverage(&logic_program[0],4); return 0; }
     if (getenv("DM_VK_TEST_ALPHA")) { alpha_references(); return 0; }
@@ -2824,6 +2828,7 @@ int main(void) {
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
     initial_texture_content();
     uniform_texture_array(0,STOCK_BORDER); uniform_texture_array(1,STOCK_BORDER); uniform_texture_array(2,STOCK_BORDER);
+    feedback_capture();
     custom_borders();
     compute_driver_constants();
     many_resource_bindings();

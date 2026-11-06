@@ -53,6 +53,9 @@ static void check_feedback_controls(NVNdevice *device, NVNqueue *queue) {
         }
         for (size_t j = written; j < stride; j++) assert(data[i * stride + j] == 0xa5);
     }
+#ifdef DM_VK_PUBLIC_BINDINGS
+    check_feedback_streams(device, queue, &cb, addr, data);
+#endif
     API(nvnCommandBufferFinalize)(&cb);
     API(nvnMemoryPoolFinalize)(&pool);
     puts("Public NVN transform feedback controls: GPU-ordered begin, pause, resume and end with guarded indirect arguments");

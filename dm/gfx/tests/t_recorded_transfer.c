@@ -516,6 +516,7 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 #ifdef DM_VK_PUBLIC_BINDINGS
 #include "../nvn/vulkan/tests/public_bindings.inc"
 #include "../nvn/vulkan/tests/public_buffers.inc"
+#include "../nvn/vulkan/tests/public_feedback.inc"
 #endif
 
 #include "recorded_draw_texture.h"

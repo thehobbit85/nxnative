@@ -12,11 +12,11 @@ REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h ../../tests/recorded_sampler_reduction.h ../../tests/recorded_sparse_texture.h ../../tests/recorded_query_lifetime.h ../../tests/recorded_feedback_control.h
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sampler_pairs.inc ../nvn_border.h spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
-$(B)/t_replay: ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/logic.inc
+$(B)/t_replay: ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/logic.inc tests/feedback_capture.inc
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
 include clear_shaders.mk
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS) render_condition.h visibility.h uniform_table.inc attachment_feedback.inc buffer_image_transfer.inc stored_transfer.inc image_copy_draw.inc draw_texture.inc packed_depth.inc public_texels.inc sparse_upload.inc primitive_replay.h ../nvn_primitive.h
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS) transform_feedback.inc feedback_gather.h render_condition.h visibility.h uniform_table.inc attachment_feedback.inc buffer_image_transfer.inc stored_transfer.inc image_copy_draw.inc draw_texture.inc packed_depth.inc public_texels.inc sparse_upload.inc primitive_replay.h ../nvn_primitive.h
 CPPFLAGS += -I$(CLEAR_GEN)
 .PHONY: geometry-topology-fixture
 geometry-topology-fixture: $(B)/t_geometry_topology $(B)/topology.spv
@@ -83,6 +83,13 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/0000000000000064.spv $(B)/shaders/0000000000000065.spv $(B)/shaders/0000000000000066.spv $(B)/shaders/0000000000000067.spv $(B)/shaders/0000000000000068.spv $(B)/shaders/0000000000000069.spv $(B)/shaders/000000000000006a.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
 # Public recorder keys hash a 0x880-byte guest control section and one code byte per fixture stage.
+fixture: $(B)/shaders/de216783c4f70605.vc.spv
+$(B)/shaders/de216783c4f70605.spv: tests/feedback_capture.vert
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage vs\nb 0 ssbo 1 sbuf 3 -1 - -1\ntf 0 20 0 3 3 1 0 1\ntf 2 8 0 2\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/de216783c4f70605.vc.spv: $(B)/shaders/de216783c4f70605.spv tests/feedback_capture_shader.py ../../../android/tools/spv_capture.py
+	python3 tests/feedback_capture_shader.py $< $@
 $(B)/shaders/be5c489b134ec370.spv: $(B)/shaders/0000000000000035.spv
 	cp $< $@
 	cp $(<:.spv=.vk.txt) $(@:.spv=.vk.txt)
@@ -294,7 +301,7 @@ recorded-transfer-test: $(B)/t_recorded_transfer fixture
 	DM_VK_DIR="$(abspath $(B)/shaders)" $(B)/t_recorded_transfer
 recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
-$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c tests/public_bindings.inc tests/public_buffers.inc ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
+$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c tests/public_bindings.inc tests/public_buffers.inc tests/public_feedback.inc ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) -DDM_NVN_VULKAN -DDM_VK_PUBLIC_BINDINGS $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
 
