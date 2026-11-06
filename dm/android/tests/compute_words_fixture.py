@@ -23,7 +23,7 @@ def export_cases(work, programs, *, initial_words=None, metal_transform=None):
         path = work / (key + '.bin')
         path.write_bytes(binary)
         jobs.append(dict(key=key, stage='cs', code=str(path), local=local, **control))
-        cases.append(dict(key=key, local=local, expected=expected))
+        cases.append(dict(key=key, local=local, expected=expected, c1=control.get('c1', '')))
     translator = os.environ.get('DMSH_TEST_XLATE', ROOT / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate')
     for target in ('apple', 'vulkan'):
         directory = work / target
@@ -47,14 +47,26 @@ def export_cases(work, programs, *, initial_words=None, metal_transform=None):
         if res['notes']:
             raise ValueError(res['notes'])
         bindings = NS['reflect'](key, 'cs', msl, res)
-        if len(bindings) != 1 or bindings[0]['kind'] != 'sbuf_ubo' or bindings[0]['off'] != 56:
+        constants = bytes.fromhex(case.pop('c1', ''))
+        by_kind = {binding['kind']: binding for binding in bindings}
+        if len(by_kind) != len(bindings) or set(by_kind) != ({'sbuf_ubo', 'c1'} if constants else {'sbuf_ubo'}):
             raise ValueError(bindings)
-        case['metal_slot'] = bindings[0]['arg_id']
+        output = by_kind['sbuf_ubo']
+        if output['off'] != 56:
+            raise ValueError(output)
+        if constants:
+            if len(constants) % 4 or len(constants) > 65536:
+                raise ValueError('invalid compute fixture constant bank')
+            case['c1_slot'] = by_kind['c1']['arg_id']
+            (work / (key + '.c1')).write_bytes(constants)
+        case['metal_slot'] = output['arg_id']
         reflection = dict(stage='cs', threadgroup_size=case['local'], bindings=bindings)
         spv_android.write_stage(key, (work/'vulkan'/apple.name).read_bytes(), reflection, out,
                                 shutil.which('spirv-val'), shutil.which('spirv-opt'))
         records = [line.split() for line in (out/(key+'.vk.txt')).read_text().splitlines() if line.startswith('b ')]
-        if len(records) != 1 or records[0][2:7] != ['ssbo', '1', 'sbuf_ubo', '0', '56']:
+        output_records = [r for r in records if r[2:7] == ['ssbo', '1', 'sbuf_ubo', '0', '56']]
+        c1_records = [r for r in records if r[2:5] == ['ubo', '1', 'c1']]
+        if len(output_records) != 1 or len(c1_records) != bool(constants) or len(records) != len(bindings):
             raise ValueError(records)
         words = case.pop('expected')
         (work/(key+'.expected')).write_bytes(struct.pack(f'<{len(words)}I', *words))
@@ -68,8 +80,12 @@ def export_cases(work, programs, *, initial_words=None, metal_transform=None):
             buffer = 'BUFFER out DATA_TYPE uint32 DATA ' + ' '.join(map(str, initial)) + ' END'
         script = [f'#!amber\nSHADER compute guest SPIRV-BIN FILE "{key}.spv"',
                   buffer, 'PIPELINE compute check',
-                  '  ATTACH guest', f'  BIND BUFFER out AS storage DESCRIPTOR_SET 0 BINDING {records[0][1]}',
+                  '  ATTACH guest', f'  BIND BUFFER out AS storage DESCRIPTOR_SET 0 BINDING {output_records[0][1]}',
                   'END', 'RUN check 1 1 1', 'EXPECT out IDX 0 EQ ' + ' '.join(map(str, words))]
+        if constants:
+            values = struct.unpack(f'<{len(constants) // 4}I', constants)
+            script.insert(1, 'BUFFER bank DATA_TYPE uint32 DATA ' + ' '.join(map(str, values)) + ' END')
+            script.insert(script.index('END'), f'  BIND BUFFER bank AS uniform DESCRIPTOR_SET 0 BINDING {c1_records[0][1]}')
         (out/(key+'.amber')).write_text('\n'.join(script) + '\n')
     (work/'cases.json').write_text(json.dumps(cases, indent=2) + '\n')
     (out/'cases.list').write_text(''.join(case['key'] + '.amber\n' for case in cases))
