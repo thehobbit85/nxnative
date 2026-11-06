@@ -167,7 +167,9 @@ static void sdk_exec(void *obj, void *state) {
     *(uint16_t *)(cmd+6) = 0x148; *(uint32_t *)(cmd+0x130) = 2; *(uint16_t *)(cmd+0x136) = 1;
     int amplitude = ++sdk_frames;
     for (int i = 0; i < BLOCK; i++) { mix[i] = amplitude; mix[BLOCK+i] = -amplitude; }
-    g_frame_n = capture(cl, sizeof cl, g_frame); assert(g_frame_n == BLOCK);
+    assert(t_ar && t_ar->handle[0] == obj);
+    t_ar->frame_n = capture(t_ar, cl, sizeof cl, t_ar->frame);
+    assert(t_ar->frame_n == BLOCK);
 }
 static Result sdk_open(void **h, const uint8_t *p, void *w, size_t sz) {
     assert(*(int32_t *)(p + P_DEVICE) == 1 && *(int32_t *)(p + P_MODE) == 1 && sz == WORK_PAGE);
@@ -183,10 +185,10 @@ void *guest_sym(const char *name) {
     return NULL;
 }
 static pthread_t render_thread;
-static void *run_renderer(void *unused) { (void)unused; render_main(NULL); return NULL; }
+static void *run_renderer(void *arg) { render_main(arg); return NULL; }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack) {
-    assert(fn == render_main && !arg && prio == 9 && stack >= 0x10000);
-    assert(!pthread_create(&render_thread, NULL, run_renderer, NULL)); return &render_thread;
+    assert(fn == render_main && arg && prio == 9 && stack >= 0x10000);
+    assert(!pthread_create(&render_thread, NULL, run_renderer, arg)); return &render_thread;
 }
 void dm_guest_thread_join(void *t) { assert(t == &render_thread && !pthread_join(render_thread, NULL)); }
 static void test_renderer(void) {
