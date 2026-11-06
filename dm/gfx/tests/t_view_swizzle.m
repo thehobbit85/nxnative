@@ -183,8 +183,40 @@ static void depth_red_case(int tid, int depth_format, int red_format) {
     check_depth_red(red, (float[4]){.75,0,0,1});
     check_depth_red(mapped, (float[4]){0,.75,1,0});
 }
+// A shader that expects floats sees an integer image's IEEE words, even
+// when its descriptor selects another layer, mip, format and channel order.
+static void float_integer_views(void) {
+    const int floats[]={NVN_FORMAT_R32F,NVN_FORMAT_RG32F,NVN_FORMAT_RGBA32F};
+    for (int n=0;n<3;n++) for (int sign=0;sign<2;sign++) for (int override=0;override<2;override++) {
+        int tid=480+n*4+sign*2+override,integer=floats[n]+1+sign,channels=1<<n;
+        tex_t t={.magic=MAGIC('T','E','X',0),.serial=99000+tid,.d={.target=NVN_TEXTURE_TARGET_2D_ARRAY,
+                 .width=4,.height=2,.depth=2,.levels=2,.samples=1,.format=override ? floats[n] : integer}};
+        MTLTextureDescriptor *d=tex_desc(&t,1);
+        d.storageMode=MTLStorageModeShared; d.usage|=MTLTextureUsagePixelFormatView;
+        id<MTLTexture> base=[g_dev newTextureWithDescriptor:d];
+        float pixels[8],expected[8]={0};
+        for (int i=0;i<2;i++) {
+            float source[4]={0,0,0,1};
+            for (int c=0;c<channels;c++) pixels[i*channels+c]=source[c]=i ? 4*c+9 : 2*c-5;
+            for (int c=0;c<4;c++) expected[4*i+c]=source[3-c];
+        }
+        [base replaceRegion:MTLRegionMake2D(0,0,2,1) mipmapLevel:1 slice:1 withBytes:pixels
+                bytesPerRow:2*channels*sizeof(float) bytesPerImage:0];
+        serial_put(t.serial,base);
+        view_t desc={.set_target=1,.target=NVN_TEXTURE_TARGET_2D,.set_format=override,.format=integer,
+                     .set_levels=1,.base_level=1,.nlevels=1,.set_layers=1,.min_layer=1,.nlayers=1,.set_swizzle=1,.swz={5,4,3,2}};
+        mtl_reg_tex(tid,&t,&desc);
+        os_unfair_lock_lock(&g_rmu);
+        id<MTLTexture> source=tex_by_id(tid); uint64_t rid=0;
+        id<MTLTexture> fitted=tex_float_fit(tid,source,&rid);
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(fitted!=nil && rid,"float view of integer image created");
+        if (fitted) read_check(tid,fitted,expected,0);
+    }
+}
 int main(void) { @autoreleasepool {
     mtl_init();
+    float_integer_views();
     uint16_t pixels[2] = {0x001f, 0xf800};
     uint8_t rgb1[4] = {NVN_SWZ_R, NVN_SWZ_G, NVN_SWZ_B, NVN_SWZ_ONE};
     uint8_t map[4] = {NVN_SWZ_B, NVN_SWZ_R, NVN_SWZ_ONE, NVN_SWZ_ZERO};

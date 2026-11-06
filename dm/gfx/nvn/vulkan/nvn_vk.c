@@ -2384,6 +2384,16 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
 }
 #include "uniform_table.inc"
 #include "attachment_feedback.inc"
+// A float declaration on these integer formats reads the stored IEEE words,
+// including denormals used as indices. Match Metal's tbuf_view_format.
+static NVNformat float_word_format(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT: return NVN_FORMAT_R32F;
+        case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT: return NVN_FORMAT_RG32F;
+        case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: return NVN_FORMAT_RGBA32F;
+        default: return NVN_FORMAT_NONE;
+    }
+}
 static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *sampled) {
     VkImageView dummy = sampled_dummy(b->view, b->num);
     int tid = (int)(h & 0xfffff);
@@ -2409,6 +2419,13 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
         tr.has_v = tr.v.set_levels = tr.v.set_layers = 1;
         tr.v.base_level = tr.v.min_layer = 0;
         tr.v.nlevels = tr.v.nlayers = 1;
+    }
+    if (b->num == 0) {
+        NVNformat fit = float_word_format(view_format(v, &tr.v, tr.has_v).f);
+        if (fit != NVN_FORMAT_NONE) {
+            tr.has_v = tr.v.set_format = 1;
+            tr.v.format = fit;
+        }
     }
     VkImageView view = tex_view(v, &tr.t, &tr.v, tr.has_v, b->view, 0);
     if (view && sampled) *sampled = sampler_view(v,&tr);
@@ -2479,6 +2496,8 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         fmt_t f = fmt_of(format);
         int swap_rb=0;
         if (b->type!=BT_STB) {
+            NVNformat fit = b->num == 0 ? float_word_format(f.f) : NVN_FORMAT_NONE;
+            if (fit != NVN_FORMAT_NONE) f.f = fmt_of(fit).f;
             // These views read guest bytes directly. NVN's RGB family puts
             // red in the low bits, and the BGR family puts blue there.
             switch (format) {

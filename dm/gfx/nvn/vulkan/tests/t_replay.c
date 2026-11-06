@@ -526,6 +526,44 @@ static void typed_sampler_border(int native, int separate) {
     mtl_pool_del(&result);
 }
 
+// The float declaration asks for the IEEE bits stored in the registered
+// 32-bit integer texture. Filtering happens after choosing that float view.
+static void float_image_views(void) {
+    const int base_formats[]={NVN_FORMAT_R32F,NVN_FORMAT_RG32F,NVN_FORMAT_RGBA32F};
+    samp_par linear={.minf=NVN_MIN_FILTER_LINEAR,.magf=NVN_MAG_FILTER_LINEAR,
+                     .ws=NVN_WRAP_MODE_CLAMP_TO_EDGE,.wt=NVN_WRAP_MODE_CLAMP_TO_EDGE};
+    mtl_reg_samp(1417,&linear);
+    for (int group=0;group<3;group++) for (int sign=0;sign<2;sign++) for (int override=0;override<2;override++) {
+        int integer_format=base_formats[group]+1+sign, channels=1<<group;
+        tex_t t={.serial=0x17100+group*4+sign*2+override,.d={.width=2,.height=4,.depth=2,.levels=2,.samples=1,
+                 .target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=override ? base_formats[group] : integer_format}};
+        nvn_tex_layout(&t.d,&t.L);
+        view_t view={.set_levels=1,.base_level=1,.nlevels=1,.set_layers=1,.min_layer=1,.nlayers=1,
+                     .set_format=override,.format=integer_format,.set_swizzle=1,.swz={5,4,3,2}};
+        mtl_reg_tex(1412,&t,&view);
+        float pixels[8], expected[4]={0,0,0,1};
+        for (int c=0;c<channels;c++) {
+            pixels[c]=(float)(2*c-5); pixels[channels+c]=(float)(4*c+9);
+            expected[c]=(pixels[c]+pixels[channels+c])*0.5f;
+        }
+        struct { int32_t s[4]; uint32_t u[4]; float f[4]; } result={0};
+        list_t list={0};
+        RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&t,.src=(uintptr_t)pixels,.view=view,.has_view=1,
+               .r={.width=1,.height=2,.depth=1});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&typed_border_program[0],.stages=0x20);
+        for (int i=0;i<2;i++) RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=i,.h=0);
+        RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=2,.h=(1417ull<<20)|1412);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&result,.size=sizeof result);
+        RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+        put(&list,OP_END,NULL,0); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (int c=0;c<4;c++) if (result.f[c]!=expected[3-c])
+            die("float shader on integer texture %#x override%d channel%d: %g expected %g",
+                integer_format,override,c,result.f[c],expected[3-c]);
+        mtl_reg_tex(1412,NULL,NULL); mtl_tex_release(&t);
+    }
+    puts("Float sampling of 32-bit integer textures preserves filtering, mip, array layer and swizzle");
+}
+
 static void custom_borders(void) {
     int native;
     replay_features(&native,NULL);
@@ -2881,6 +2919,34 @@ static void read_float_views(float_texel_results result[2]) {
     put(&list,OP_END,NULL,0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
 }
 
+static void float_word_texels(void) {
+    // The bit-preserving reads include a signed zero, NaN payloads and the
+    // denormal encodings that games use as small integer indices.
+    const uint32_t words[16]={0,1,5,0x7fffff,0x80000000,0x7f800001,0x7fc00123,0xffffffff,
+                              0x3f800000,0xc1200000,0x41880000,0x000af111,0x89abcdef,0xbf800001,0x7f800000,0xff800000};
+    const int formats[]={NVN_FORMAT_R32UI,NVN_FORMAT_RG32UI,NVN_FORMAT_RGBA32UI};
+    for (int group=0;group<3;group++) for (int sign=0;sign<2;sign++) {
+        int channels=1<<group;
+        tex_t t={.serial=0x12b00+group*2+sign,.mem=(uint8_t *)words,.d={.width=4,.height=1,.depth=1,.levels=1,
+                 .target=NVN_TEXTURE_TARGET_BUFFER,.format=formats[group]+sign}};
+        nvn_tex_layout(&t.d,&t.L);
+        view_t map={.set_swizzle=1,.swz={5,4,3,2}};
+        mtl_reg_tex(990,&t,NULL); mtl_reg_tex(991,&t,&map);
+        float_texel_results result[2]; read_float_views(result);
+        for (int sw=0;sw<2;sw++) {
+            assert(result[sw].size==4);
+            for (int i=0;i<4;i++) for (int c=0;c<4;c++) {
+                int lane=sw ? 3-c : c;
+                uint32_t expected=lane<channels ? words[i*channels+lane] : lane==3 ? 0x3f800000 : 0;
+                uint32_t actual; memcpy(&actual,&result[sw].values[i][c],sizeof actual);
+                if (actual!=expected) die("float texel format %#x value %d.%d: %#x expected %#x",t.d.format,i,c,actual,expected);
+            }
+        }
+        mtl_reg_tex(990,NULL,NULL); mtl_reg_tex(991,NULL,NULL); mtl_queue_forget(990);
+    }
+    puts("Float shader reads of signed/unsigned texel words preserve payloads, padding and swizzles");
+}
+
 static void packed_buffer_texels(void) {
     uint16_t words[4]; memcpy(words,packed_texel_words,sizeof words);
     for (size_t i=0;i<sizeof packed_texels/sizeof *packed_texels;i++) {
@@ -2937,6 +3003,7 @@ static void scaled_texels(void) {
     puts("Signed and unsigned scaled texels preserve their integer values, units and missing channels");
 }
 static void typed_buffers(void) {
+    float_word_texels();
     packed_buffer_texels();
     scaled_texels();
     empty_texels();
@@ -3127,6 +3194,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DISCARD")) { graphics_storage(); return 0; }
     if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
+    if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
     if (getenv("DM_VK_TEST_CUSTOM_BORDER")) { custom_borders(); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features(NULL,NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_OFFSET")) { polygon_offset(&offset_program); return 0; }
@@ -3179,6 +3247,7 @@ int main(void) {
     uniform_texture_array(0,STOCK_BORDER); uniform_texture_array(1,STOCK_BORDER); uniform_texture_array(2,STOCK_BORDER);
     dlss_spatial_corpus(1); dlss_temporal_corpus();
     feedback_capture();
+    float_image_views();
     custom_borders();
     compute_driver_constants();
     many_resource_bindings();
