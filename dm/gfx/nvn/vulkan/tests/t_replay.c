@@ -15,6 +15,7 @@ uint64_t guest_ns(void) { return now_ns(); }
 static int test_nvn2;
 int dm_sdk_ounce(void) { return test_nvn2; }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
+static prog_t restart_program={.nstage=2};
 static prog_t table_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t warp_program[2] = {{.nstage = 1}, {.nstage = 1}};
 static prog_t driver_program = {.nstage = 1};
@@ -67,6 +68,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &output_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x33 + stage; return 1; }
     if (p == &driver_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x32; return 1; }
     if (p == &compute || p == &groups) { assert(stage == 0); memset(key, 0, 8); key[7] = p == &groups ? 4 : 3; return 1; }
+    if (p == &restart_program) { assert(stage < 2); memset(key,0,8); key[7]=stage ? 0x38 : 0x5a; return 1; }
     if (p == &table_program[0] || p == &table_program[1]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x58 + (p == &table_program[1]) : 1; return 1; }
     if (p == &bindless_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x31 : 1; return 1; }
     assert((p == &program || p == &numeric_program) && stage < 2);
@@ -1556,6 +1558,60 @@ static void gpu_draw_words(list_t *list, uint32_t *out, const uint32_t values[4]
     put(list,OP_BIND_PROGRAM,&program,sizeof program); put(list,OP_BIND_SSBO,&buffer,sizeof buffer);
     put(list,OP_DISPATCH,&dispatch,sizeof dispatch);
 }
+static void primitive_restart(void) {
+    tex_t out={.serial=0x3951,.d={.width=32,.height=16,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&out.d,&out.L);
+    uint8_t indices[96]; uint32_t args[5];
+    mtl_pool_add(indices,sizeof indices);mtl_pool_add(args,sizeof args);
+    for (unsigned type=0; type<3; type++) for (int custom=0; custom<2; custom++)
+    for (int shape=0; shape<3; shape++) for (int mode=0; mode<5; mode++) {
+        if (mode>=3 && shape==2) continue;
+        unsigned width=1u<<type;
+        uint32_t max=type==0 ? UINT8_MAX : type==1 ? UINT16_MAX : UINT32_MAX;
+        uint32_t marker=custom ? 23 : max;
+        int primitive=(int[]){NVN_DRAW_PRIMITIVE_TRIANGLE_FAN,NVN_DRAW_PRIMITIVE_QUADS,NVN_DRAW_PRIMITIVE_TRIANGLE_STRIP}[shape];
+        // Two incomplete slices and adjoining restart markers before two complete polygons.
+        uint32_t pattern[]={marker,9,10,marker,marker,9,10,11,12,marker,13,14,15,16,marker};
+        uint32_t used=sizeof pattern/sizeof *pattern;
+        if (shape==2) { pattern[7]=12; pattern[8]=11; pattern[12]=16; pattern[13]=15; }
+        if (mode>=2) {
+            for (int i=0;i<4;i++) pattern[i]=max-3u+(uint32_t)i;
+            if (shape==2) { pattern[2]=max; pattern[3]=max-1; }
+            used=4; marker=max; // Disabled: the maximum value is an ordinary right-rectangle vertex.
+        }
+        int indirect=mode==1;
+        memset(indices,0xcc,sizeof indices);
+        for (uint32_t i=0;i<used;i++) memcpy(indices+(i+1)*width,pattern+i,width);
+        list_t list={0}; uint8_t pixels[32*16*4]={0};
+        if (indirect) {
+            gpu_draw_words(&list,args,(uint32_t[]){used,1,1,(uint32_t)-9},4);
+            args[4]=7;
+        }
+        if (mode==4) gpu_draw_words(&list,args,(uint32_t[]){4,1,12,7},4);
+        RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&out,.r={.width=32,.height=16,.depth=1},.mask=15,.c.f={0,0,1,1});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&out});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&restart_program,.stages=3);
+        RECORD(OP_PRIM_RESTART,p_prim_restart,.on=mode<2,.index=marker);
+        if (mode>=3) { // Direct and GPU-indirect nonindexed fans and quads.
+            RECORD(OP_DRAW,p_draw,.prim=primitive,.first=12,.count=4,.ind=mode==4 ? (uintptr_t)args : 0);
+        } else RECORD(OP_DRAW_IDX,p_draw_idx,.prim=primitive,.itype=(int)type,.count=(int)used,.base_vertex=mode<2 ? -9 : 0,
+            .ibuf=(uintptr_t)indices+(indirect ? 0 : width),.ind=indirect ? (uintptr_t)args : 0);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&out,.src=(uintptr_t)pixels,.r={.width=32,.height=16,.depth=1});
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for(unsigned y=3;y<13;y++) for(unsigned x=0;x<32;x++) {
+            const uint8_t *p=pixels+4*(32*y+x);
+            int lit=(mode<2 && x>=2 && x<11) || (x>=21 && x<30);
+            if ((p[2]==0)!=lit || (lit && p[0]+p[1]!=255) || p[3]!=255) {
+                fprintf(stderr,"restart width%u custom%d shape%d mode%d pixel%u,%u: %u,%u,%u\n",
+                    width,custom,shape,mode,x,y,p[0],p[1],p[2]);abort();
+            }
+        }
+    }
+    mtl_pool_del(indices);mtl_pool_del(args);mtl_tex_release(&out);
+    puts("NVN restart markers split strips, fans and quads across every index width and indirect draws");
+}
+
 static void indirect_draws(void) {
     tex_t output={.serial=0x3950,.d={.width=4,.height=4,.depth=1,.levels=1,
         .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
@@ -2150,6 +2206,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DIVISORS")) { instance_divisors(); return 0; }
     if (getenv("DM_VK_TEST_BLEND_CONSTANTS")) { blend_constants(); return 0; }
     if (getenv("DM_VK_TEST_STENCIL_FACES")) { stencil_faces(); return 0; }
+    if (getenv("DM_VK_TEST_RESTART")) { primitive_restart(); return 0; }
     if (getenv("DM_VK_TEST_INDIRECT_DRAWS")) { indirect_draws(); return 0; }
     if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
@@ -2173,6 +2230,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DESCRIPTOR_POOLS")) { descriptor_lifetime(); return 0; }
     descriptor_lifetime();
     if(getenv("DM_VK_TEST_SEPARATE")) { separate_descriptors();return 0; }
+    primitive_restart();
     indirect_draws();
     separate_descriptors();
     if(getenv("DM_VK_TEST_RETIRE")) { retired_texture_pool();return 0; }

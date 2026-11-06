@@ -13,7 +13,7 @@ SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswiz
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
 include clear_shaders.mk
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS) render_condition.h visibility.h uniform_table.inc
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS) render_condition.h visibility.h uniform_table.inc primitive_replay.h ../nvn_primitive.h
 CPPFLAGS += -I$(CLEAR_GEN)
 .PHONY: geometry-topology-fixture
 geometry-topology-fixture: $(B)/t_geometry_topology $(B)/topology.spv
@@ -72,8 +72,12 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/000000000000004b.spv $(B)/shaders/000000000000004c.spv \
          $(B)/shaders/000000000000004d.spv $(B)/shaders/000000000000004e.spv $(B)/shaders/000000000000004f.spv $(B)/shaders/0000000000000050.spv $(B)/shaders/0000000000000051.spv \
          $(B)/shaders/0000000000000052.spv $(B)/shaders/0000000000000053.spv $(B)/shaders/0000000000000054.spv $(B)/shaders/0000000000000055.spv \
-         $(B)/shaders/0000000000000056.spv $(B)/shaders/0000000000000057.spv $(B)/shaders/0000000000000058.spv $(B)/shaders/0000000000000059.spv
+         $(B)/shaders/0000000000000056.spv $(B)/shaders/0000000000000057.spv $(B)/shaders/0000000000000058.spv $(B)/shaders/0000000000000059.spv $(B)/shaders/000000000000005a.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
+$(B)/shaders/000000000000005a.spv: tests/restart.vert
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	echo 'stage vs' > $(@:.spv=.vk.txt)
 $(B)/shaders/0000000000000059.spv: $(B)/shaders/0000000000000058.spv tests/handle_table_driver.vk.txt
 	cp $< $@
 	cp tests/handle_table_driver.vk.txt $(@:.spv=.vk.txt)

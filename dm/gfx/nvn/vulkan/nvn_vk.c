@@ -479,7 +479,7 @@ static void vk_init_(void) {
         if (dv < VK_API_VERSION_1_3) ext[next++] = VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
     }
     if (has_sc && g_has_surface) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-    if (has_u8 && u8.indexTypeUint8) { ext[next++] = VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME; g_has_u8 = 1; }
+    if (has_u8 && u8.indexTypeUint8 && !getenv("DM_VK_NO_INDEX_UINT8")) { ext[next++] = VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME; g_has_u8 = 1; }
     g_dynrend = dv >= VK_API_VERSION_1_3 ? f13.dynamicRendering : has_dr && dr.dynamicRendering;
     if (getenv("DM_VK_NO_DYNREND")) g_dynrend = 0;   // diagnostics: the render pass path of GPUs without dynamic rendering, on one that has it
     if (g_dynrend && dv < VK_API_VERSION_1_3) ext[next++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
@@ -1609,7 +1609,7 @@ static struct {
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     visibility_counter *visibility;
-    p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc, rasterizer_discard;
+    p_prim_restart restart; p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc, rasterizer_discard;
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
     float blend_color[4]; int64_t copy_stride, copy_img_stride;
     int tex_base, samp_base;
@@ -2458,6 +2458,7 @@ static VkRect2D render_scissor(void) {
     return S.has_sc ? clipped_rect(S.sc, P.w, P.h) : (VkRect2D){{0, 0}, {P.w, P.h}};
 }
 
+#include "primitive_replay.h"
 static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_index) {
     g_nwb = 0;
     if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
@@ -2481,11 +2482,13 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     if (!pass_begin()) SKIP(2);
     int prim = dw ? dw->prim : di->prim;
     if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP || prim == NVN_DRAW_PRIMITIVE_PATCHES) { RED_ONCE(31, "primitive %d not implemented yet", prim); SKIP(4); }
+    int restart = di && S.restart.on;
+    if (restart && prim > NVN_DRAW_PRIMITIVE_QUADS) { RED_ONCE(31,"primitive restart on topology %d requires adjacency/patch replay",prim); SKIP(4); }
     if (!prepare_storage(&vs, &fs)) SKIP(6);
     pso_key k; memset(&k, 0, sizeof k);
     k.rasterizer_discard = S.rasterizer_discard;
     k.origin_ll = g_queue_origin_ll;
-    k.vs = vs; k.fs = fs; k.prim = prim; k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
+    k.vs = vs; k.fs = fs; k.prim = replay_topology(prim,restart); k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
     for (int i=0;i<k.nattr;i++) if ((vs->vin_mask >> i & 1) && k.attr[i].stream<(unsigned)k.nstream) {
         vs_st stream=k.stream[k.attr[i].stream];
         if (stream.stride && stream.divisor>g_vertex_divisor_limit) k.split_instances=1;
@@ -2527,12 +2530,11 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     uint32_t inst = dw ? (dw->instances ? (uint32_t)dw->instances : 1) : (di->instances ? (uint32_t)di->instances : 1);
     uint32_t isz = di ? (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4) : 0;
     const uint8_t *isrc = di ? (const uint8_t *)(uintptr_t)di->ibuf : NULL;
-    #define IDX(i) (isz == 1 ? isrc[i] : isz == 2 ? ((const uint16_t *)isrc)[i] : ((const uint32_t *)isrc)[i])
     int64_t vlo = 0, vhi = -1;
     if (dw) { vlo = (uint32_t)dw->first; vhi = vlo + (uint32_t)dw->count - 1; }
     else if (di->count) {
-        uint32_t lo = UINT32_MAX, hi = 0, restart = isz == 1 ? 0xff : isz == 2 ? 0xffff : 0xffffffffu;
-        for (uint32_t i = 0; i < (uint32_t)di->count; i++) { uint32_t v = IDX(i); if (v == restart) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
+        uint32_t lo = UINT32_MAX, hi = 0;
+        for (uint32_t i = 0; i < (uint32_t)di->count; i++) { uint32_t v = source_index(isrc,isz,i); if (restart && v == S.restart.index) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
         if (lo <= hi) { vlo = (int64_t)lo + di->base_vertex; vhi = (int64_t)hi + di->base_vertex; }
     }
     if (vhi < vlo) { g_stat_draws++; return; }
@@ -2563,33 +2565,25 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
         if (emulate) split[nsplit++]=(instance_stream){(uint32_t)s,(uint32_t)stride,divisor,b,o,b!=g_zero_buf && to>from ? to-from : 0};
         else vkCmdBindVertexBuffers(cb, (uint32_t)s, 1, &b, &o);
     }
-    int indexed=di!=NULL || prim==NVN_DRAW_PRIMITIVE_QUADS;
+    int convert = restart || prim==NVN_DRAW_PRIMITIVE_QUADS || prim==NVN_DRAW_PRIMITIVE_TRIANGLE_FAN;
+    int indexed = di || convert;
     uint32_t count=(uint32_t)(dw ? dw->count : di->count);
     int32_t first=(int32_t)((dw ? dw->first : di->base_vertex)-vlo);
-    if (dw) {
-        if (prim == NVN_DRAW_PRIMITIVE_QUADS) {   // quads as two triangles each, through indices made here
-            uint32_t nq = (uint32_t)dw->count / 4; if (!nq) return;
-            VkDeviceSize o = ring_alloc((VkDeviceSize)nq * 24, 16); if (o == VK_WHOLE_SIZE) return;
-            uint32_t *ix = (uint32_t *)(C->ringp + o);
-            for (uint32_t q = 0; q < nq; q++) { uint32_t b = q * 4; uint32_t v[6] = {b, b + 1, b + 2, b, b + 2, b + 3}; memcpy(ix + 6 * q, v, 24); }
-            vkCmdBindIndexBuffer(cb, C->ring, o, VK_INDEX_TYPE_UINT32);
-            count=nq*6;
-        }
-    } else {
-        if (prim == NVN_DRAW_PRIMITIVE_QUADS || (isz == 1 && !g_has_u8)) {   // quads, or 8-bit indices without the extension: widened to 32 bits on the CPU
-            uint32_t n = (uint32_t)di->count, nq = prim == NVN_DRAW_PRIMITIVE_QUADS ? n / 4 : 0, out = nq ? nq * 6 : n;
-            VkDeviceSize o = ring_alloc((VkDeviceSize)out * 4, 16); if (o == VK_WHOLE_SIZE) return;
-            uint32_t *ix = (uint32_t *)(C->ringp + o);
-            if (nq) for (uint32_t q = 0; q < nq; q++) { uint32_t b = 4 * q; uint32_t v[6] = {IDX(b), IDX(b + 1), IDX(b + 2), IDX(b), IDX(b + 2), IDX(b + 3)}; memcpy(ix + 6 * q, v, 24); }
-            else for (uint32_t i = 0; i < n; i++) ix[i] = IDX(i);
-            vkCmdBindIndexBuffer(cb, C->ring, o, VK_INDEX_TYPE_UINT32);
-            count=out;
-        } else {
-            VkDeviceSize o = copy_in(di->ibuf, (uint64_t)(uint32_t)di->count * isz, 16); if (o == VK_WHOLE_SIZE) return;
-            vkCmdBindIndexBuffer(cb, C->ring, o, isz == 1 ? VK_INDEX_TYPE_UINT8_EXT : isz == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-        }
+    if (convert || (isz==1 && !g_has_u8)) {
+        int converted_prim=convert ? prim : NVN_DRAW_PRIMITIVE_POINTS;
+        uint64_t needed=replay_indices(NULL,isrc,isz,count,converted_prim,restart,S.restart.index);
+        if (!needed) return;
+        if (needed>UINT32_MAX) { RED_ONCE(31,"expanded primitive exceeds the Vulkan draw count"); return; }
+        VkDeviceSize offset=ring_alloc(needed*4,16);
+        if (offset==VK_WHOLE_SIZE) return;
+        replay_indices((uint32_t *)(C->ringp+offset),isrc,isz,count,converted_prim,restart,S.restart.index);
+        vkCmdBindIndexBuffer(cb,C->ring,offset,VK_INDEX_TYPE_UINT32);
+        count=(uint32_t)needed;
+    } else if (di) {
+        VkDeviceSize offset=copy_in(di->ibuf,(uint64_t)count*isz,16);
+        if (offset==VK_WHOLE_SIZE) return;
+        vkCmdBindIndexBuffer(cb,C->ring,offset,isz==1 ? VK_INDEX_TYPE_UINT8_EXT : isz==2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     }
-    #undef IDX
     if (!draw_begin()) SKIP(2);
     emit_instances(cb,indexed,count,first,g_draw_base_instance,inst,split,nsplit);
     for (int i = 0; i < g_nwb; i++) {
@@ -3439,6 +3433,7 @@ static void mtl_exec_(const uint8_t *p) {
                 break;
             }
             case OP_STENCIL: { const p_stencil *b = (const p_stencil *)a; for (int f = 0; f < 2; f++) if (b->face & (1 << f)) { if (b->which == 0) S.st_vmask[f] = b->value_mask; else if (b->which == 1) S.st_wmask[f] = b->mask; else S.st_ref[f] = b->ref; } break; }
+            case OP_PRIM_RESTART: S.restart = *(const p_prim_restart *)a; break;
             case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
             case OP_RAST_DISCARD: S.rasterizer_discard = ((const p_rast_discard *)a)->on != 0; break;
             case OP_VIEWPORTS: { const p_viewports *b = (const p_viewports *)a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
