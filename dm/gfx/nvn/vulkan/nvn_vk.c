@@ -21,6 +21,7 @@
 #include "spv_buffer_bias.h"
 #include "shader_contract.h"
 #include "uniform_address.h"
+#include "present_rect.h"
 #include "split_handle.h"
 #include "driver_c2.h"
 #include "driver_c0.h"
@@ -2890,6 +2891,10 @@ static void rt_dump(uint64_t n) {
 static double g_fps_shown;
 static _Atomic uint64_t g_presents;
 
+static _Atomic uint64_t g_layer_shape, g_screen_shape;
+void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, vk_present_shape(w, h)); }
+void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, vk_present_shape(w, h)); }
+
 // ---------- Android window ----------
 #ifdef __ANDROID__
 __attribute__((weak)) void *front_native_window(int *gen) { *gen = 0; return NULL; }   // app/front_android.c; none in the adb front end
@@ -3011,9 +3016,10 @@ static void win_present(const tex_t *t, const int crop[4]) {
     vkCmdClearColorImage(cb, W.img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rr);
     int32_t sx = crop ? crop[0] : 0, sy = crop ? crop[1] : 0, sw = crop && crop[2] ? crop[2] : (int32_t)v->w, sh = crop && crop[3] ? crop[3] : (int32_t)v->h;
     static int stretch = -1; if (stretch < 0) { const char *e = getenv("DM_SCREEN_FIT"); stretch = e && !strcmp(e, "stretch"); }
-    int32_t dw = (int32_t)W.ext.width, dh = (int32_t)W.ext.height, dx = 0, dy = 0;
-    if (!stretch) { if ((int64_t)dw * sh > (int64_t)dh * sw) { dw = (int32_t)((int64_t)dh * sw / sh); dx = ((int32_t)W.ext.width - dw) / 2; } else { dh = (int32_t)((int64_t)dw * sh / sw); dy = ((int32_t)W.ext.height - dh) / 2; } }
-    VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{sx, sy, 0}, {sx + sw, sy + sh, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
+    vk_present_rect dst = vk_present_fit(atomic_load(&g_screen_shape), atomic_load(&g_layer_shape),
+                                         v->w, v->h, W.ext.width, W.ext.height, stretch);
+    VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{sx, sy, 0}, {sx + sw, sy + sh, 1}},
+                     {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dst.x, dst.y, 0}, {dst.x + dst.w, dst.y + dst.h, 1}}};
     // Lower-left images keep their bottom row first; flip only the displayed crop,
     // as Metal does, leaving copies, sampled textures and fragment coordinates alone.
     if (g_origin_ll) { b.srcOffsets[0].y = sy + sh; b.srcOffsets[1].y = sy; }
@@ -3121,6 +3127,9 @@ typedef struct { const uint8_t *mem; uint64_t size; } pool_range;
 static pool_range *g_pool;
 static size_t g_npool, g_cpool;
 static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
+// The Vulkan buffer paths resolve each referenced guest address against registered
+// extents at binding time. Taking an address does not create or pin a GPU buffer.
+void mtl_pool_addressed(const void *mem, uint64_t size) { (void)mem; (void)size; }
 void mtl_pool_add(const void *mem, uint64_t size) {
     if (size > UINT64_MAX - (uintptr_t)mem) die("Vulkan: memory pool address overflow");
     pthread_mutex_lock(&g_pool_mu);
