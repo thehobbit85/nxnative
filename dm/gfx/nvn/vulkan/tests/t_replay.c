@@ -1928,6 +1928,66 @@ static void attachment_feedback(void) {
     puts("Vulkan sparse MRT feedback preserved both attachments across the guest barrier");
 }
 
+static void layered_feedback(void) {
+    tex_t array = {.serial=0xb193,.d={.width=4,.height=4,.depth=3,.levels=2,
+        .target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA8}};
+    tex_t depth = {.serial=0xb194,.d={.width=2,.height=2,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_DEPTH32F}};
+    nvn_tex_layout(&array.d,&array.L);
+    nvn_tex_layout(&depth.d,&depth.L);
+    view_t slice = {.set_target=1,.target=NVN_TEXTURE_TARGET_2D,.set_levels=1,.base_level=1,.nlevels=1,
+        .set_layers=1,.min_layer=1,.nlayers=1};
+    view_t first=slice, second=slice, other=slice, base=slice;
+    first.set_swizzle=1;
+    memcpy(first.swz,(uint8_t[]){3,2,4,5},4);   // sample green, red, blue, alpha
+    second.min_layer=2; second.set_format=1; second.format=NVN_FORMAT_BGRA8;
+    other.min_layer=0;
+    base.base_level=0;
+    mtl_reg_tex(983,&array,&first);
+    mtl_reg_tex(984,&array,&second);
+    mtl_reg_tex(985,&array,&other);
+    uint8_t guard[16], retained[2][16], pixels[2][2][16];
+    for (int i=0;i<4;++i) memcpy(guard+4*i,(uint8_t[]){7,17,27,255},4);
+    list_t list={0};
+    RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&array,.has_view=1,.view=other,.src=(uintptr_t)guard,.r={.width=2,.height=2,.depth=1});
+    RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&array,.has_view=1,.view=base,.src=(uintptr_t)guard,.r={.width=2,.height=2,.depth=1});
+    p_set_rt targets={.n=3,.color={[0]=&array,[2]=&array},.has_cview={[0]=1,[2]=1},.cview={[0]=slice,[2]=second}};
+    put(&list, OP_SET_RT, &targets, sizeof targets);
+    RECORD(OP_CLEAR_COLOR,p_clear_color,.index=0,.mask=15,.rgba={16/255.f,32/255.f,48/255.f,1});
+    RECORD(OP_CLEAR_COLOR,p_clear_color,.index=2,.mask=15,.rgba={64/255.f,80/255.f,96/255.f,1});
+    RECORD(OP_SET_RT,p_set_rt,.depth=&depth);
+    RECORD(OP_CLEAR_DS,p_clear_ds,.depth=.25f,.depth_mask=1);
+    put(&list, OP_SET_RT, &targets, sizeof targets);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&feedback_program,.stages=3);
+    RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1,.slot=1,.h=984);
+    for (int draw=0;draw<2;++draw) {
+        // First read the swapped view of attachment zero, then sample a
+        // different layer of that same image which neither attachment writes.
+        RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1,.slot=0,.h=draw?985:983);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&array,.has_view=1,.view=slice,.src=(uintptr_t)pixels[draw][0],.r={.width=2,.height=2,.depth=1});
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&array,.has_view=1,.view=second,.src=(uintptr_t)pixels[draw][1],.r={.width=2,.height=2,.depth=1});
+    }
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&array,.has_view=1,.view=other,.src=(uintptr_t)retained[0],.r={.width=2,.height=2,.depth=1});
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&array,.has_view=1,.view=base,.src=(uintptr_t)retained[1],.r={.width=2,.height=2,.depth=1});
+    float z[4]={0};
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&depth,.src=(uintptr_t)z,.r={.width=2,.height=2,.depth=1});
+    put(&list,OP_END,NULL,0);
+    mtl_queue_activate(0xb193);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+    const uint8_t want[2][2][4]={{{64,32,16,255},{80,64,16,255}},{{16,7,17,255},{64,16,17,255}}};
+    for (int draw=0;draw<2;++draw) for (int i=0;i<2;++i) for (int p=0;p<4;++p) {
+        uint8_t *got=pixels[draw][i]+4*p;
+        if (memcmp(got,want[draw][i],4)) die("layer feedback draw %d slot %d pixel %d: %u/%u/%u expected %u/%u/%u",
+            draw,2*i,p,got[0],got[1],got[2],want[draw][i][0],want[draw][i][1],want[draw][i][2]);
+    }
+    assert(!memcmp(guard,retained[0],16) && !memcmp(guard,retained[1],16));
+    for (int i=0;i<4;++i) assert(z[i]==.25f);
+    for (int i=983;i<=985;++i) mtl_reg_tex(i,NULL,NULL);
+    mtl_tex_release(&array); mtl_tex_release(&depth); mtl_queue_forget(0xb193);
+    puts("Vulkan feedback views preserved separate layers, mip guards, BGRA format and component swizzle");
+}
+
 static void graphics_storage(void) {
     tex_t target={.serial=0xb100,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&target.d,&target.L);
@@ -2370,7 +2430,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
     if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); segment_timestamps(); return 0; }
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
-    if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); return 0; }
+    if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_CLAMP")) { depth_clamp(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
@@ -2403,6 +2463,7 @@ int main(void) {
     graphics_storage_alias();
     simultaneous_aliases();
     attachment_feedback();
+    layered_feedback();
     graphics_storage();
     readback_gpu_consumer();
     buffer_range_lifetime();

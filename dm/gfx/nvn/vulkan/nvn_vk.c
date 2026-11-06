@@ -2064,9 +2064,10 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     return (handle & 0xfffff) | sid << 20;
 }
 #include "uniform_table.inc"
-static VkImageView tex_slot(uint64_t h, const sbind *b, int *ok, vtex **vo) {
+#include "attachment_feedback.inc"
+static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, int *ok) {
     VkImageView dummy = sampled_dummy(b->view, b->num);
-    int tid = (int)(h & 0xfffff); *ok = 0; if (vo) *vo = NULL;
+    int tid = (int)(h & 0xfffff); *ok = 0;
     if (!tid) { g_tex_miss[0]++; return dummy; }
     treg_t tr; vtex *v = registered_texture(tid, &tr);
     if (!tr.ok) { g_tex_miss[1]++; return dummy; }
@@ -2080,88 +2081,20 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int *ok, vtex **vo) {
         if (one != want_one || (v->target == NVN_TEXTURE_TARGET_3D) != (b->view == VK_IMAGE_VIEW_TYPE_3D)) return dummy;
         if ((b->view == VK_IMAGE_VIEW_TYPE_CUBE || b->view == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) && (v->layers < 6 || v->w != v->h)) return dummy;
     }
-    if (vo) *vo = v;
+    int a = stage == 1 ? fb_slot(v, &tr, b, g_fb_mask) : -1;
+    if (a >= 0) {
+        // Recreate the sampled format and channel mapping on the copied
+        // subresource. Its selected mip and layer are now at (0, 0).
+        v = g_fb_active[a]->image;
+        if (!tr.has_v) tr.v = (view_t){0};
+        tr.has_v = tr.v.set_levels = tr.v.set_layers = 1;
+        tr.v.base_level = tr.v.min_layer = 0;
+        tr.v.nlevels = tr.v.nlayers = 1;
+    }
     VkImageView view = tex_view(v, &tr.t, &tr.v, tr.has_v, b->view, 0);
     *ok = view != VK_NULL_HANDLE;
     if (!view) g_tex_miss[3]++;
     return view ? view : dummy;
-}
-// Same-pass feedback: a draw that samples a colour attachment of its own pass. On the Switch it reads what was there before the draw; Vulkan leaves it undefined, and the Mali-G57
-// returned garbage (Super Mario Odyssey's final pass, agl's post-effect program sampling the image it writes, drew yellow, green and red blotches over the picture; the Metal host
-// needs the same for 3D World and Captain Toad, profile key feedback_snap). Here it holds for every game: the pass is split before such a draw, the attachment's level and layer
-// copied into a snapshot image (reused between draws of the same format and size), and the draw samples the snapshot. Not done when the draw's colour mask leaves that attachment alone, nor again
-// while no draw has written the attachment since its last snapshot. A 3D attachment is left as it was
-typedef struct { VkFormat f; uint32_t w, h; VkImage img; VkDeviceMemory m; VkImageView view; uint64_t serial; uint32_t lv, ly; } fbsnap_t;
-static fbsnap_t g_fbs[16]; static int g_nfbs;
-static vtex *g_fb_src[8]; static VkImageView g_fb_view[8]; static int g_fb_n;
-static uint64_t g_fb_copies;
-static fbsnap_t *fb_cached(int slot) {
-    for (int k = 0; k < g_nfbs; ++k) {
-        fbsnap_t *e = &g_fbs[k];
-        if (e->serial == P.ct[slot]->serial && e->lv == P.clv[slot] && e->ly == P.cly[slot]) return e;
-    }
-    return NULL;
-}
-static fbsnap_t *fb_snap_for(vtex *v, int i, fbsnap_t *e, unsigned reserved) {
-    uint32_t lv = P.clv[i], ly = P.cly[i], w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
-    if (e && !P.cwr[i]) return e;
-    // Equal-shaped sources sampled by the same draw need distinct images.
-    if (!e) for (int k = 0; k < g_nfbs; ++k) {
-        if (!(reserved & (1u << k)) && g_fbs[k].f == v->f.f && g_fbs[k].w == w && g_fbs[k].h == h) {
-            e = &g_fbs[k]; break;
-        }
-    }
-    if (!e) {
-        if (g_nfbs == 16) { RED_ONCE(40, "same-pass feedback: more than 16 snapshot shapes; the draw samples its attachment directly"); return NULL; }
-        e = &g_fbs[g_nfbs]; memset(e, 0, sizeof *e); e->f = v->f.f; e->w = w; e->h = h;
-        VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, v->f.f, {w, h, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
-                                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
-        if (vkCreateImage(g_dev, &ii, NULL, &e->img) != VK_SUCCESS) { RED_ONCE(41, "same-pass feedback: snapshot image not created"); return NULL; }
-        VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_dev, e->img, &mr); e->m = mem_alloc(mr, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); VKCHECK(vkBindImageMemory(g_dev, e->img, e->m, 0));
-        VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, e->img, VK_IMAGE_VIEW_TYPE_2D, v->f.f, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-        VKCHECK(vkCreateImageView(g_dev, &vi, NULL, &e->view));
-        to_general(C->cb, e->img, VK_IMAGE_ASPECT_COLOR_BIT); g_nfbs++;
-        LOG("vk: same-pass feedback: snapshot %ux%u format %d made (serial %llu)", w, h, (int)v->f.f, (unsigned long long)v->serial);
-    }
-    VkImageCopy c = {{VK_IMAGE_ASPECT_COLOR_BIT, lv, ly, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {w, h, 1}};
-    vkCmdCopyImage(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, e->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
-    e->serial = v->serial; e->lv = lv; e->ly = ly; P.cwr[i] = 0; g_fb_copies++;
-    return e;
-}
-static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the sampled colour attachments it writes, snapshot them, and have write_set bind the snapshots
-    g_fb_n = 0;
-    int want[8] = {0}, any = 0;
-    for (int i = 0; i < fs->nb; i++) {
-        const sbind *b = &fs->b[i];
-        if ((b->type != BT_CIS && b->type != BT_TEX) || (b->kind != K_TEX && b->kind != K_TEXU) || (!b->table && b->count > 32)) continue;
-        for (uint32_t element = 0; element < b->count; ++element) {
-        int tid = (int)(descriptor_handle(1, b, element) & 0xfffff); if (!tid) continue;
-        treg_t tr; vtex *v = registered_texture(tid, &tr); if (!v) continue;
-        for (int a = 0; a < P.n; a++) if (P.ct[a] == v && P.cv[a] && v->target != NVN_TEXTURE_TARGET_3D && (S.chmask.mask >> (4 * a) & 0xf)) { want[a] = 1; any = 1; }
-        }
-    }
-    if (!any) return;
-    unsigned reserved = 0;
-    int need = 0;
-    fbsnap_t *cached[8] = {0};
-    for (int a = 0; a < P.n; ++a) if (want[a]) {
-        cached[a] = fb_cached(a);
-        if (cached[a]) reserved |= 1u << (cached[a] - g_fbs);
-        if (!cached[a] || P.cwr[a]) need = 1;
-    }
-    VkCommandBuffer cb = C->cb;
-    if (need) {
-        pass_end();
-        barrier_all(cb);   // earlier fragment reads must finish before recycling their snapshot
-    }
-    for (int a = 0; a < P.n; ++a) if (want[a]) {
-        fbsnap_t *e = fb_snap_for(P.ct[a], a, cached[a], reserved);
-        if (!e) continue;
-        reserved |= 1u << (e - g_fbs);
-        g_fb_src[g_fb_n] = P.ct[a];
-        g_fb_view[g_fb_n++] = e->view;
-    }
-    if (need) { barrier_all(cb); pass_begin(); }
 }
 // All storage descriptors of a command are resolved together. Overlapping
 // ranges share one backing allocation, so writes and atomics through either
@@ -2472,11 +2405,10 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                 uint32_t count = b->count - first < 32 ? b->count - first : 32;
                 for (uint32_t element = 0; element < count; ++element) {
                     uint64_t handle = descriptor_handle(stage, b, first + element);
-                    int ok = 0; vtex *tv = NULL;
+                    int ok = 0;
                     if (b->type != BT_SAMP) {
-                        VkImageView view = tex_slot(handle, b, &ok, &tv);
+                        VkImageView view = tex_slot(handle, b, stage, &ok);
                         if (!view) return VK_NULL_HANDLE;
-                        if (stage == 1 && tv) for (int q = 0; q < g_fb_n; q++) if (tv == g_fb_src[q]) { view = g_fb_view[q]; break; }   // same-pass feedback: the snapshot (fb_prepare)
                         images[element].imageView = view; images[element].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                     }
                     if (b->type != BT_TEX) {
@@ -2597,10 +2529,10 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     if (!pl) SKIP(6);
     VkPipeline pp = pso_get(&k, pl);
     if (!pp) SKIP(5);
-    if (fs && P.n) fb_prepare(fs); else g_fb_n = 0;
+    if (fs && P.n) fb_prepare(fs); else g_fb_mask = 0;
     g_draw_base_instance = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     VkDescriptorSet sets[2] = {write_set(vs, 0), fs ? write_set(fs, 1) : VK_NULL_HANDLE};
-    g_fb_n = 0;
+    g_fb_mask = 0;
     if (!sets[0] || (fs && !sets[1])) SKIP(6);
     VkCommandBuffer cb = C->cb;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
