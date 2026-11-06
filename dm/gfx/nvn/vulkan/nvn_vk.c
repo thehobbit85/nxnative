@@ -140,7 +140,10 @@ static VkDescriptorPool descriptor_pool_new(const uint32_t *need) {
     VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, sets ? sets : 1, sizeof ps / sizeof *ps, ps};
     VkDescriptorPool pool; VKCHECK(vkCreateDescriptorPool(g_dev, &dpi, NULL, &pool)); return pool;
 }
-typedef struct { int kind; void *dst; uint32_t mode, v; uint64_t addr; uint32_t type; const uint8_t *src; size_t n; } post_t;   // kind 1 event, 2 counter, 3 copy ring → guest
+#include "visibility.h"
+enum { POST_VISIBILITY_ADD = 4, POST_VISIBILITY_RESET };
+typedef struct { int kind; void *dst; uint32_t mode, v; uint64_t addr; uint32_t type; const uint8_t *src; size_t n;
+                 visibility_counter *visibility; const uint64_t *samples; } post_t;   // kind 1 event, 2 counter, 3 copy ring → guest
 typedef struct vtex vtex;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer cb, up; VkFence fence; VkDescriptorPool dp;
@@ -150,6 +153,7 @@ typedef struct {
     post_t *post; int npost, cpost;
     uint64_t fence_val; int up_used;
     VkQueryPool qp;   // GPU timestamps at the start and the end of the submission
+    visibility_queries visibility;
     VkFramebuffer *fb; int nfb, cfb;   // render passes' framebuffers (no dynamic rendering), destroyed when the submission is done
     VkBuffer ring0; VkDeviceMemory ringm0; uint8_t *ringp0;   // the context's own ring; ring / ringp move to extra rings when a submission outgrows it (loading screens upload hundreds of MB)
     struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; } *extra; int nextra;
@@ -257,6 +261,7 @@ static void gw_expire(uint64_t fence) {   // completion: the submission's writes
 }
 static void ctx_complete(ctx_t *c) {
     uint64_t ts[2];
+    visibility_read(&c->visibility);
     if (vkGetQueryPoolResults(g_dev, c->qp, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] > ts[0])
         atomic_fetch_add(&g_gpu_ns, (uint64_t)((double)(ts[1] - ts[0]) * g_props.limits.timestampPeriod));
     for (int i = 0; i < c->npost; i++) {
@@ -266,9 +271,13 @@ static void ctx_complete(ctx_t *c) {
             uint64_t t = gpu_ticks();
             int timestamp = p->type == NVN_COUNTER_TYPE_TIMESTAMP || p->type == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
             uint64_t rec[2] = {timestamp && !DM_GAME_RENDER_COND ? t : 0, t};
+            if (p->visibility) rec[0] = p->visibility->samples;
             memcpy((void *)p->addr, rec, sizeof rec);
         }
         else if (p->kind == 3) memcpy(p->dst, p->src, p->n);
+        else if (p->kind == POST_VISIBILITY_ADD) p->visibility->samples += *p->samples;
+        else if (p->kind == POST_VISIBILITY_RESET) p->visibility->samples = 0;
+        visibility_release(p->visibility);
     }
     c->npost = 0;
     gw_expire(c->fence_val);
@@ -301,7 +310,7 @@ static void *completion_thread(void *a) {
 }
 
 // ---------- Device ----------
-static int g_has_u8, g_storage_ms;
+static int g_has_u8, g_storage_ms, g_precise_visibility;
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -391,6 +400,7 @@ static void vk_init_(void) {
     if (getenv("DM_VK_NO_DRAW_PARAMETERS")) g_draw_parameters = 0;
     if (!g_draw_parameters) LOG("vk: shader draw parameters supplied by host push constants");
     g_storage_ms = f2.features.shaderStorageImageMultisample;
+    g_precise_visibility = f2.features.occlusionQueryPrecise;
     f13.robustImageAccess = VK_FALSE;
     const char *ext[5]; uint32_t next = 0;
     g_selectable_subgroup_stages = 0;
@@ -1445,6 +1455,7 @@ static struct {
     p_bind_buf ubo[6][16], ssbo[6][16];
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
+    visibility_counter *visibility;
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc, rasterizer_discard;
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
     float blend_color[4]; int64_t copy_stride, copy_img_stride;
@@ -1478,6 +1489,7 @@ static int g_pass_shader_writes;
 static void pass_end(void) {
     if (!P.open) { int pend = P.clr_d || P.clr_s; for (int i = 0; i < 8; i++) pend |= P.clr_c[i]; if (pend) pass_begin(); }   // clears with no draw after them still happen
     if (P.open) {
+        visibility_end(&C->visibility, C->cb);
         rp_end(C->cb); P.open = 0;
         if (g_pass_shader_writes) { barrier_all(C->cb); g_pass_shader_writes = 0; }
         // what the pass wrote is read by later passes, samples and copies; their vertex work may start before it ends
@@ -2229,6 +2241,10 @@ static uint64_t g_stat_draws, g_stat_skip, g_skip_why[8];   // why: 0 no program
 static int draw_begin(void) {
     if (!pass_begin()) return 0;
     if (S.rasterizer_discard) return 1;
+    if (S.visibility) {
+        const uint64_t *samples = visibility_begin(&C->visibility, C->cb, C->up, g_precise_visibility);
+        if (samples) post_add((post_t){.kind=POST_VISIBILITY_ADD,.visibility=visibility_retain(S.visibility),.samples=samples});
+    }
     for (int a = 0; a < P.n; a++) if (S.chmask.mask >> (4 * a) & 0xf) P.cwr[a] = P.cdrawn[a] = 1;
     return 1;
 }
@@ -2481,6 +2497,7 @@ static shader_t *clear_vertex(void) {
 }
 static void clear_draw_state(VkPipeline pipeline, VkRect2D rect, VkExtent2D size, float depth) {
     VkCommandBuffer cb = C->cb;
+    visibility_end(&C->visibility, cb);  // Internal clear/resolve triangles do not contribute guest samples.
     VkViewport viewport = {0, 0, (float)size.width, (float)size.height, depth, depth};
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdSetViewport(cb, 0, 1, &viewport);
@@ -2944,7 +2961,14 @@ static void buffer_clear(const p_clear_buf *clear) {
     buffer_publish(clear->addr, n, C->ring, offset, C->ringp + offset, 1);
 }
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post_add((post_t){1, (void *)val, mode, v}); }
-void mtl_sub_counter(uint64_t addr, uint32_t type) { post_add((post_t){2, NULL, 0, 0, addr, type}); }
+void mtl_sub_counter(uint64_t addr, uint32_t type) {
+    visibility_counter *counter = NULL;
+    if (type == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
+        visibility_end(&C->visibility, C->cb);
+        counter = visibility_retain(S.visibility);
+    }
+    post_add((post_t){.kind=2,.addr=addr,.type=type,.visibility=counter});
+}
 static void mtl_exec_(const uint8_t *p);
 void mtl_exec(const uint8_t *p) { uint64_t t0 = now_ns(); mtl_exec_(p); atomic_fetch_add(&g_rec_ns, now_ns() - t0); }
 // NVN's initial command buffer state, as the Metal backend's state_reset: games set some of it only by state objects or never (Metroid Dread never sets the stencil value mask,
@@ -2981,6 +3005,7 @@ void mtl_queue_forget(uint64_t serial) {
     while (*at && (*at)->serial != serial) at = &(*at)->next;
     if (!*at) return;
     queue_state *q = *at; *at = q->next;
+    visibility_release(g_active_queue == q ? S.visibility : q->s.visibility);
     if (g_active_queue == q) { g_active_queue = NULL; state_defaults(); memset(&P, 0, sizeof P); }
     free(q);
 }
@@ -3012,6 +3037,20 @@ static void mtl_exec_(const uint8_t *p) {
                 break;
             }
             case OP_RENDER_COND: condition_set((const p_render_cond *)a); break;
+            case OP_RESET_COUNTER: {
+                uint64_t type; memcpy(&type, a, sizeof type);
+                if (type == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
+                    visibility_end(&C->visibility, C->cb);
+                    if (!S.visibility) {
+                        S.visibility = calloc(1, sizeof *S.visibility);
+                        if (!S.visibility) die("Vulkan: cannot allocate queue visibility counter");
+                        atomic_init(&S.visibility->refs, 1);
+                        if (!g_precise_visibility) RED_ONCE(97, "GPU reports conservative visibility; exact sample counts unavailable");
+                    }
+                    post_add((post_t){.kind=POST_VISIBILITY_RESET,.visibility=visibility_retain(S.visibility)});
+                }
+                break;
+            }
             case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_fence + 1; s->fenced = 1; break; }
             case OP_CLEAR_BUF: buffer_clear((const p_clear_buf *)a); break;
             case OP_COPY_B2B: { uint64_t s, d, n; memcpy(&s, a, 8); memcpy(&d, a + 8, 8); memcpy(&n, a + 16, 8); mtl_sub_copy(s, d, n); break; }

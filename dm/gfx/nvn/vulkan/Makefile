@@ -13,7 +13,7 @@ SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswiz
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
 include clear_shaders.mk
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS) render_condition.h
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS) render_condition.h visibility.h
 CPPFLAGS += -I$(CLEAR_GEN)
 .PHONY: geometry-topology-fixture
 geometry-topology-fixture: $(B)/t_geometry_topology $(B)/topology.spv
