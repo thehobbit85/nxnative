@@ -21,7 +21,7 @@ from dm.android.tools.spv_capture import geometry_capture
 from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
 from dm.android.tools import spv_resources
 from dm.android.tools.spv_globalmem import global_memory_fields, lower_physical_addresses, drop_unused_int64
-from dm.android.tools import spv_geometry, spv_half, spv_image_access, spv_meshstage, spv_pool, spv_texture_offsets, spv_warp, spv_warp_native
+from dm.android.tools import spv_geometry, spv_half, spv_image_access, spv_meshstage, spv_pool, spv_texture_offsets, spv_warp, spv_warp_native, spv_warp_width
 from dm.android.tools.spv_cache import capture_cache
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
@@ -228,6 +228,14 @@ def vk_txt(meta):
     if meta.get('schema', 2) != 2:
         raise ValueError('incompatible Vulkan shader schema')
     lines = ['schema 2', 'target vulkan1.1', f"stage {meta['stage']}"]
+    warp = meta.get('warp_width')
+    if warp is not None:
+        if (not isinstance(warp, (tuple, list)) or any(type(w) is not int for w in warp) or
+                tuple(warp) not in ((4, 128), (8, 128), (16, 128), (32, 128), (32, 32))):
+            raise ValueError('invalid native subgroup width range')
+        lines.append(f'warp {warp[0]} {warp[1]}')
+    elif 'warp_width' in meta:
+        lines.append('warp independent')
     for cap in sorted(set(meta.get('capabilities', []))):
         if type(cap) is not int or not 0 <= cap <= 0xffffffff:
             raise ValueError('invalid SPIR-V capability')
@@ -406,7 +414,7 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
     except ValueError as exc:
         raise ValueError(f'{key}: {exc}') from exc
     meta.update(key=key, tg=refl.get('threadgroup_size') if refl['stage'] in ('cs', 'ts', 'ms') else None,
-                bindings=bindings, **requirements(data))
+                bindings=bindings, warp_width=spv_warp_width.requirement(data, optimizer), **requirements(data))
     (destination / (key + '.vk.txt')).write_text(vk_txt(meta))
     if refl['stage'] == 'vs':
         try:
@@ -420,7 +428,8 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
             dict(msl_name='dm_geometry_output', kind='geometry', reg=0),
             dict(msl_name='dm_geometry_control', kind='geometry', reg=5)])
         capture_meta = meta.copy()
-        capture_meta.update(capture=control, bindings=vk_reflect(captured, reflection), **requirements(captured))
+        capture_meta.update(capture=control, bindings=vk_reflect(captured, reflection),
+                            warp_width=spv_warp_width.requirement(captured, optimizer), **requirements(captured))
         if 'geometry' in meta:
             capture_meta['geometry'] = dict(meta['geometry'], role='capture')
         (destination / (key + '.vc.vk.txt')).write_text(vk_txt(capture_meta))

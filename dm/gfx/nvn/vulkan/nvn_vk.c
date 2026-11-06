@@ -40,6 +40,9 @@
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceMemoryProperties g_memp; static VkPhysicalDeviceProperties g_props;
 static int g_draw_parameters;
+static VkPhysicalDeviceSubgroupProperties g_subgroup;
+static VkPhysicalDeviceSubgroupSizeControlProperties g_subgroup_sizes;
+static VkShaderStageFlags g_selectable_subgroup_stages;
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER;   // the queue (submissions, the present readback)
 static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;   // texture / sampler registrations and the image table (game threads register while the submit thread reads)
 
@@ -356,12 +359,19 @@ static void vk_init_(void) {
     uint32_t dv = g_props.apiVersion;
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
-    int has_sc = 0, has_u8 = 0, has_dr = 0;
+    int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0;
     for (uint32_t i = 0; i < ne; i++) {
         has_sc |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME); has_u8 |= !strcmp(ep[i].extensionName, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
         has_dr |= !strcmp(ep[i].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+        has_subgroup_sizes |= !strcmp(ep[i].extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
     }
     free(ep);
+    g_subgroup_sizes = (VkPhysicalDeviceSubgroupSizeControlProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
+    g_subgroup = (VkPhysicalDeviceSubgroupProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    if (has_subgroup_sizes || dv >= VK_API_VERSION_1_3) g_subgroup.pNext = &g_subgroup_sizes;
+    VkPhysicalDeviceProperties2 props2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &g_subgroup};
+    vkGetPhysicalDeviceProperties2(g_pd, &props2);
+    VkPhysicalDeviceSubgroupSizeControlFeatures size_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT u8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT};
     VkPhysicalDeviceDynamicRenderingFeaturesKHR dr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
     VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
@@ -369,6 +379,7 @@ static void vk_init_(void) {
     VkPhysicalDeviceVulkan11Features f11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceShaderDrawParametersFeatures sdp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
     void *chain = NULL;
+    if (has_subgroup_sizes && dv < VK_API_VERSION_1_3) { size_features.pNext = chain; chain = &size_features; }
     if (has_u8) { u8.pNext = chain; chain = &u8; }
     if (dv >= VK_API_VERSION_1_3) { f13.pNext = chain; chain = &f13; } else if (has_dr) { dr.pNext = chain; chain = &dr; }
     if (dv >= VK_API_VERSION_1_2) { f12.pNext = chain; chain = &f12; f11.pNext = chain; chain = &f11; } else { sdp.pNext = chain; chain = &sdp; }
@@ -379,7 +390,12 @@ static void vk_init_(void) {
     if (!g_draw_parameters) LOG("vk: shader draw parameters supplied by host push constants");
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     f13.robustImageAccess = VK_FALSE;
-    const char *ext[4]; uint32_t next = 0;
+    const char *ext[5]; uint32_t next = 0;
+    g_selectable_subgroup_stages = 0;
+    if (f13.subgroupSizeControl || size_features.subgroupSizeControl) {
+        g_selectable_subgroup_stages = g_subgroup_sizes.requiredSubgroupSizeStages;
+        if (dv < VK_API_VERSION_1_3) ext[next++] = VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
+    }
     if (has_sc && g_has_surface) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     if (has_u8 && u8.indexTypeUint8) { ext[next++] = VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME; g_has_u8 = 1; }
     g_dynrend = dv >= VK_API_VERSION_1_3 ? f13.dynamicRendering : has_dr && dr.dynamicRendering;
@@ -1019,6 +1035,7 @@ struct shader {
     vin_module *vertex_variants; int depth_zero;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
     VkShaderModule mod; VkDescriptorSetLayout dsl;
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
     sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
     uint8_t *c1; uint32_t c1_len; uint32_t tg[3];
     VkPipelineLayout cpl; VkPipeline cpp;   // compute shaders: their layout and pipeline (dispatch)
@@ -1253,7 +1270,9 @@ static shader_t *shader_get(const uint8_t md[8]) {
     shader_t *s = calloc(1, sizeof *s); strcpy(s->key, key); s->stage = -1;
     g_sh = realloc(g_sh, (g_nsh + 1) * sizeof *g_sh); g_sh[g_nsh++] = s;
     if (!spv || !txt) { LOG("[RED] vk: shader %s not in %s", key, g_vkdir); free(spv); free(txt); return s; }
-    const char *contract_error = ns % 4 ? "unaligned SPIR-V length" : dm_vk_shader_contract(txt, nt, spv, ns / 4);
+    dm_vk_warp_width warp = {0};
+    uint32_t local = 0;
+    const char *contract_error = ns % 4 ? "unaligned SPIR-V length" : dm_vk_shader_contract_width(txt, nt, spv, ns / 4, &warp, &local);
     if (contract_error) {
         LOG("[RED] vk: shader %s rejected: %s; export shaders again", key, contract_error);
         free(spv); free(txt); return s;
@@ -1299,13 +1318,25 @@ static shader_t *shader_get(const uint8_t md[8]) {
     }
     free(txt);
     if (s->stage < 0) { LOG("[RED] vk: shader %s needs a stage the renderer does not execute", key); free(spv); return s; }
+    VkShaderStageFlags sf = s->stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : s->stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
+    if (warp.min) {
+        int selectable = !!(g_selectable_subgroup_stages & sf);
+        int size = dm_vk_warp_select(warp, g_subgroup.subgroupSize, selectable ? g_subgroup_sizes.minSubgroupSize : 0,
+                                     selectable ? g_subgroup_sizes.maxSubgroupSize : 0, local, g_subgroup_sizes.maxComputeWorkgroupSubgroups);
+        if (!(g_subgroup.supportedStages & sf) || size < 0) {
+            LOG("[RED] vk: shader %s requires subgroup width %u..%u, stage %#x, device default %u, supported stages %#x",
+                key, warp.min, warp.max, sf, g_subgroup.subgroupSize, g_subgroup.supportedStages);
+            free(spv); return s;
+        }
+        if (size) s->subgroup = (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, NULL, (uint32_t)size};
+    }
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
     if (!spv) return s;
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, ns, spv};
     VkResult r = vkCreateShaderModule(g_dev, &mi, NULL, &s->mod); free(spv);
     if (r != VK_SUCCESS) { LOG("[RED] vk: shader %s rejected (%d)", key, (int)r); s->mod = VK_NULL_HANDLE; }
-    VkDescriptorSetLayoutBinding lb[DM_VK_MAX_BINDINGS]; VkShaderStageFlags sf = s->stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : s->stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutBinding lb[DM_VK_MAX_BINDINGS];
     for (int i = 0; i < s->nb; i++) lb[i] = (VkDescriptorSetLayoutBinding){s->b[i].binding, descriptor_type[s->b[i].type], s->b[i].count, sf, NULL};
     VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, (uint32_t)s->nb, lb};
     VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &s->dsl));
@@ -1514,6 +1545,8 @@ static VkCompareOp cop(int f) { return f >= 1 && f <= 8 ? (VkCompareOp)(f - 1) :
 static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, k->vs->mod, "main", NULL},
                                              {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, k->fs ? k->fs->mod : VK_NULL_HANDLE, "main", NULL}};
+    if (k->vs->subgroup.requiredSubgroupSize) st[0].pNext = &k->vs->subgroup;
+    if (k->fs && k->fs->subgroup.requiredSubgroupSize) st[1].pNext = &k->fs->subgroup;
     VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[16]; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
     uint64_t fetch_mask = 0;
     for (int i = 0; i < 32; i++) {
@@ -2367,6 +2400,7 @@ static void dispatch(const p_dispatch *d) {
     if (!cs->cpp) {
         VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &cs->dsl, 0, NULL}; VKCHECK(vkCreatePipelineLayout(g_dev, &li, NULL, &cs->cpl));
         VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs->mod, "main", NULL}, cs->cpl, VK_NULL_HANDLE, -1};
+        if (cs->subgroup.requiredSubgroupSize) ci.stage.pNext = &cs->subgroup;
         if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &cs->cpp) != VK_SUCCESS) { LOG("[RED] vk: compute pipeline for %s not created", cs->key); cs->mod = VK_NULL_HANDLE; return; }
     }
     pass_end();

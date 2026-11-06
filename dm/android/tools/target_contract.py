@@ -34,6 +34,7 @@ def exporter_digest():
     # while edits or newly added lowering modules cannot reuse an old producer.
     paths = set((ROOT / 'dm/android/tools').rglob('*.py'))
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/shader_contract.h')
+    paths.add(ROOT / 'dm/gfx/nvn/vulkan/warp_width.h')
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/geometry_contract.h')
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/meshstage_contract.h')
     paths.add(ROOT / 'dm/gfx/nvn/vulkan/uniform_address.h')

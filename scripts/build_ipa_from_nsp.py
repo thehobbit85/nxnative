@@ -2518,7 +2518,7 @@ def android_shader_tool_inputs(repo, env):
                                    'dm/gfx/nvn/vulkan/meshstage_contract.h', 'dm/gfx/nvn/vulkan/uniform_address.h',
                                    'dm/gfx/nvn/vulkan/split_handle.h', 'dm/gfx/nvn/vulkan/driver_c2.h',
                                    'dm/gfx/nvn/vulkan/driver_c0.h', 'dm/gfx/nvn/vulkan/resource_contract.h',
-                                   'dm/gfx/nvn/vulkan/driver_c2_modes.h'))
+                                   'dm/gfx/nvn/vulkan/driver_c2_modes.h', 'dm/gfx/nvn/vulkan/warp_width.h'))
     # All bundled runtime dependencies matter, including Spv.Generator.dll.
     binaries = repo / 'dm/gfx/tools/dmsh_xlate_bin'
     files.update(p for p in binaries.rglob('*') if p.is_file())
