@@ -185,7 +185,8 @@ typedef struct {
     int cut_copy;
     VkFramebuffer *fb; int nfb, cfb;   // render passes' framebuffers (no dynamic rendering), destroyed when the submission is done
     VkBuffer ring0; VkDeviceMemory ringm0; uint8_t *ringp0;   // the context's own ring; ring / ringp move to extra rings when a submission outgrows it (loading screens upload hundreds of MB)
-    struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; } *extra; int nextra;
+    VkBuffer typed0[2]; // single-usage handles on the base ring's memory, created on first use
+    struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; VkBuffer typed[2]; } *extra; int nextra;
 } ctx_t;
 static _Atomic uint64_t g_gpu_ns;
 static ctx_t g_ctx[NCTX]; static ctx_t *C; static int g_ci;
@@ -204,6 +205,7 @@ static VkDeviceSize ring_alloc(VkDeviceSize n, VkDeviceSize align) {
         void *next = realloc(C->extra, (C->nextra + 1) * sizeof *C->extra);
         if (!next) die("Vulkan: cannot track submission buffers");
         C->extra = next;
+        memset(&C->extra[C->nextra],0,sizeof *C->extra);
         C->extra[C->nextra].size = C->capacity;
         C->extra[C->nextra].b = buf_new(C->capacity, ALL_BUF_USAGE, &C->extra[C->nextra].m, (void **)&C->ringp); C->ring = C->extra[C->nextra++].b; atomic_fetch_add(&g_extra_ring_bytes, C->capacity);
         C->used = 0; o = 0; g_wgen++;   // copies cached in the old ring are not reused from the new one
@@ -369,7 +371,11 @@ static void ctx_complete(ctx_t *c) {
     gw_expire(c->fence_val);
     for (size_t i = 0; i < c->nbv; i++) vkDestroyBufferView(g_dev, c->bv[i], NULL);
     c->nbv = 0;
-    for (int i = 0; i < c->nextra; i++) { vkDestroyBuffer(g_dev, c->extra[i].b, NULL); vkFreeMemory(g_dev, c->extra[i].m, NULL); atomic_fetch_sub(&g_extra_ring_bytes, c->extra[i].size); }
+    for (int i=0;i<c->nextra;i++) {
+        for (int j=0;j<2;j++) vkDestroyBuffer(g_dev,c->extra[i].typed[j],NULL);
+        vkDestroyBuffer(g_dev,c->extra[i].b,NULL); vkFreeMemory(g_dev,c->extra[i].m,NULL);
+        atomic_fetch_sub(&g_extra_ring_bytes,c->extra[i].size);
+    }
     c->nextra = 0;
     for (int i = 0; i < c->nfb; i++) vkDestroyFramebuffer(g_dev, c->fb[i], NULL);
     c->nfb = 0;
@@ -2410,7 +2416,7 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
 typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; VkDeviceSize texel_align; int writable, conflict; } storage_range;
 static storage_range g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
 static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
-typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes; } texel_range;
+typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes; VkBufferUsageFlags single_usage; } texel_range;
 // The staging buffers carry both texel usage bits. Their views must meet
 // both limits, even if this binding only reads. For three-component formats
 // Vulkan uses the component size for its single-texel alignment rule.
@@ -2444,11 +2450,14 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         }
         VkFormatProperties fp = {0};
         if (ok) vkGetPhysicalDeviceFormatProperties(g_pd, f.f, &fp);
-        // Ring buffers support both texel usages; Vulkan 1.1 requires the
-        // view's format to support each usage carried by its backing buffer.
-        VkFormatFeatureFlags need = VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT | VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
-        if (ok && (fp.bufferFeatures & need) != need) ok = 0;
-        if (ok) *out = (texel_range){.range = {.addr = (uintptr_t)tr.t.mem, .size = size}, .format = f.f, .bytes = (uint32_t)bytes};
+        const VkFormatFeatureFlags both=VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT|VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+        int storage=b->type==BT_STB;
+        if (!(fp.bufferFeatures & (storage ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT : VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT))) ok=0;
+        if (ok) {
+            *out=(texel_range){.range={.addr=(uintptr_t)tr.t.mem,.size=size},.format=f.f,.bytes=(uint32_t)bytes};
+            if ((fp.bufferFeatures & both)!=both)
+                out->single_usage=storage ? VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT : VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
+        }
     }
     pthread_mutex_unlock(&g_rmu);
     if (!out->range.addr && b->type == BT_STB) ok = 0; // unbound writable images require a format-aware private dummy
@@ -2592,6 +2601,38 @@ static int prepare_storage(shader_t **first, shader_t **second) {
     return 1;
 }
 static gw_t g_wb[MAX_BUFFER_BINDINGS]; static int g_nwb;   // writable buffers of this draw or dispatch, published only after command encoding
+// A Vulkan 1.1 view inherits both usage bits of the general-purpose ring.
+// Formats such as sRGB can be sampled but cannot be storage images on some
+// GPUs. A second buffer handle bound to exactly the same memory and offset
+// gives the view its legal usage while retaining live aliases and transfers.
+static VkBuffer single_usage_buffer(VkBuffer backing, VkBufferUsageFlags usage) {
+    VkDeviceMemory memory=C->ringm0;
+    VkDeviceSize size=RING;
+    VkBuffer *handles=C->typed0;
+    if (backing!=C->ring0) {
+        int i=0; while (i<C->nextra && C->extra[i].b!=backing) i++;
+        if (i==C->nextra) return VK_NULL_HANDLE;
+        memory=C->extra[i].m; size=C->extra[i].size; handles=C->extra[i].typed;
+    }
+    VkBuffer *slot=&handles[usage==VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT];
+    if (*slot) return *slot;
+    VkBufferCreateInfo create={VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,NULL,0,size,usage,VK_SHARING_MODE_EXCLUSIVE};
+    VkBuffer alias;
+    if (vkCreateBuffer(g_dev,&create,NULL,&alias)!=VK_SUCCESS) return VK_NULL_HANDLE;
+    VkMemoryRequirements allocated;
+    vkGetBufferMemoryRequirements(g_dev,backing,&allocated);
+    uint32_t type=mem_type(allocated.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkMemoryDedicatedRequirements dedicated={VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+    VkMemoryRequirements2 req={VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,&dedicated};
+    VkBufferMemoryRequirementsInfo2 info={VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,NULL,alias};
+    vkGetBufferMemoryRequirements2(g_dev,&info,&req);
+    if (dedicated.requiresDedicatedAllocation || req.memoryRequirements.size>allocated.size ||
+        !(req.memoryRequirements.memoryTypeBits & (1u<<type)) || vkBindBufferMemory(g_dev,alias,memory,0)!=VK_SUCCESS) {
+        vkDestroyBuffer(g_dev,alias,NULL); return VK_NULL_HANDLE;
+    }
+    *slot=alias;
+    return alias;
+}
 static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
     VkBufferView views[32];
     for (uint32_t element = 0; element < b->count; element++) {
@@ -2613,7 +2654,9 @@ static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
                 buffer=C->ring;
             }
         } else t.format = b->num == 1 ? VK_FORMAT_R32G32B32A32_SINT : b->num == 2 ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT;
-        VkBufferViewCreateInfo vi = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, buffer, t.format, offset-prefix, size+prefix};
+        VkBuffer view_buffer=t.single_usage ? single_usage_buffer(buffer,t.single_usage) : buffer;
+        if (!view_buffer) { RED_ONCE(21,"cannot share Vulkan ring memory with a single-usage typed view"); return 0; }
+        VkBufferViewCreateInfo vi = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, view_buffer, t.format, offset-prefix, size+prefix};
         VKCHECK(vkCreateBufferView(g_dev, &vi, NULL, &views[element]));
         if (C->nbv == C->cbv) {
             if (C->cbv > SIZE_MAX / 2 / sizeof *C->bv) die("Vulkan: typed view tracking size overflow");

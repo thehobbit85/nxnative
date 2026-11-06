@@ -216,7 +216,11 @@ $(B)/shaders/0000000000000049.spv: tests/texel.frag tests/texel.frag.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/texel.frag.vk.txt $(@:.spv=.vk.txt)
-fixture: $(B)/shaders/000000000000ad70.spv $(B)/shaders/000000000000ad71.spv
+$(B)/shaders/000000000000ad72.spv: tests/typed_format.comp tests/typed_format.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/typed_format.vk.txt $(@:.spv=.vk.txt)
+fixture: $(B)/shaders/000000000000ad72.spv $(B)/shaders/000000000000ad70.spv $(B)/shaders/000000000000ad71.spv
 $(B)/shaders/000000000000ad71.spv: $(B)/texel-dynamic.spv tests/texel_alias.vk.txt
 	mkdir -p $(B)/shaders
 	cp $< $@

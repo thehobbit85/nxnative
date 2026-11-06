@@ -27,6 +27,7 @@ static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
 static prog_t alias_program = {.nstage = 1};
+static prog_t typed_format_program = {.nstage = 1};
 static prog_t texel_alias_program = {.nstage = 1};
 static prog_t texel_program = {.nstage = 1};
 static prog_t texel_graphics_program = {.nstage = 2};
@@ -88,6 +89,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (int i = 0; i < 3; i++) if (p == &split_program[i]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x4d+i : 0x35; return 1; }
     if (p == &uniform_storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x4b + stage; return 1; }
     if (p == &texel_graphics_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x49 : 0x4a; return 1; }
+    if (p == &typed_format_program) { assert(stage==0); memset(key,0,8); key[6]=0xad; key[7]=0x72; return 1; }
     if (p == &texel_alias_program) { assert(stage == 0); memset(key, 0, 8); key[6] = 0xad; key[7] = getenv("DM_VK_TEST_TEXEL_DYNAMIC") ? 0x71 : 0x70; return 1; }
     if (p == &texel_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x48; return 1; }
     for(int i=0;i<4;i++) if(p==&separate_program[i]) { assert(stage<2);memset(key,0,8);key[7]=stage?0x44+i:1;return 1; }
@@ -2766,7 +2768,63 @@ static void typed_writable_aliases(void) {
     }
     puts("Shifted typed views share in-dispatch writes, atomics, fetches and guest sizes");
 }
+// Sample sRGB, then publish the decoded bytes through its aliased storage
+// buffer. A second dispatch must fetch what the first one wrote.
+static void typed_srgb(void) {
+    uint32_t data[6]={0x12345678,0,0,0,0,0x76543210};
+    const uint32_t seed[4]={0x2380ff00,0x91ff0080,0x008000ff,0xffff8000};
+    uint32_t result[2][4][4]={0};
+    tex_t t={.serial=0xad72,.mem=(uint8_t *)(data+1),.d={.width=4,.height=1,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_BUFFER,.format=NVN_FORMAT_RGBA8_SRGB}};
+    nvn_tex_layout(&t.d,&t.L); mtl_reg_tex(986,&t,NULL);
+    // Optionally fill an entire ring before the producer. Its format views
+    // must stay alive on the overflow allocation until the submission fence.
+    size_t fill_bytes=64u<<20;
+    uint32_t *fill=NULL;
+    if (getenv("DM_VK_TEST_TEXEL_ROLLOVER")) { fill=malloc(fill_bytes); assert(fill); }
+    for (int split=0;split<2;split++) {
+        memset(result,0xff,sizeof result); memset(data+1,0,sizeof seed);
+        mtl_queue_activate(986); mtl_sub_begin(); list_t list={0};
+        if (fill) { RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)fill,.size=fill_bytes,.value=0x8745); }
+        push_constants(&list,1,240,seed,sizeof seed);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(data+1),.size=sizeof seed);
+        RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
+        for (int pass=0;pass<2;pass++) {
+            if (split) {
+                put(&list,OP_END,NULL,0); mtl_exec(list.bytes); list.length=0;
+                mtl_sub_commit(); mtl_sub_begin();
+            }
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&typed_format_program,.stages=0x20);
+            RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=0,.h=986);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(data+1),.size=sizeof seed);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)result[pass],.size=sizeof result[pass]);
+            RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
+        }
+        put(&list,OP_END,NULL,0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (int i=0;i<4;i++) {
+            uint32_t before=seed[i];
+            for (int pass=0;pass<2;pass++) {
+                uint32_t converted=result[pass][i][0];
+                assert(result[pass][i][1]==before && result[pass][i][2]==4);
+                assert((converted>>24)==(before>>24));
+                for (int shift=0;shift<24;shift+=8) {
+                    float c=(float)((before>>shift)&255)/255;
+                    float linear=c<=0.04045f ? c/12.92f : powf((c+0.055f)/1.055f,2.4f);
+                    assert(abs((int)((converted>>shift)&255)-(int)lroundf(255*linear))<=1);
+                }
+                before=converted;
+            }
+            assert(data[i+1]==before);
+        }
+        assert(data[0]==0x12345678 && data[5]==0x76543210); mtl_queue_forget(986);
+    }
+    if (fill) { assert(fill[0]==0x8745 && fill[fill_bytes/4-1]==0x8745); free(fill); }
+    mtl_reg_tex(986,NULL,NULL); mtl_tex_release(&t);
+    puts("Sampled sRGB texel views share GPU-produced bytes and aliased storage across submissions");
+}
 static void typed_buffers(void) {
+    typed_srgb();
     typed_writable_aliases();
     enum { N = 4 };
     const int offsets[] = {0,4,12,60,256};
