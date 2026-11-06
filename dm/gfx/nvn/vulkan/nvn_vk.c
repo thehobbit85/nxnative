@@ -923,6 +923,7 @@ struct vtex {
     uint64_t stamp; const void *span;   // uploaded from a dirty-tracked pool (nvn_dirty.c): the write generation then and the tracked range, re-uploaded when the game writes it
     int sparse; uint64_t sparse_submission, uploaded_mappings, seen_mappings, seen_writes;
     vview *views; int nviews;
+    VkImageView window_view; _Atomic unsigned present_refs;  // Window submissions have their own fences.
     struct vtex *next;
     uint64_t dead;   // released by the game: freed once the GPU has finished the submission that was being recorded then (fence dead)
     uint32_t linrow, linbpb;   // a linear 2D texture (LINEAR / LINEAR_RENDER_TARGET) the CPU can read: its row pitch and bytes per texel; what passes render into it goes back to its storage (lin_writeback)
@@ -1114,7 +1115,8 @@ static void garbage_free(uint64_t done) {
     pthread_mutex_lock(&g_gbmu);
     for (int i = 0; i < g_ngb;) {
         vtex *v = g_gb[i];
-        if (v->dead > done) { i++; continue; }
+        if (v->dead > done || atomic_load(&v->present_refs)) { i++; continue; }
+        if (v->window_view) vkDestroyImageView(g_dev, v->window_view, NULL);
         for (int k = 0; k < v->nviews; k++) vkDestroyImageView(g_dev, v->views[k].v, NULL);
         vkDestroyImage(g_dev, v->img, NULL); img_mem_free(v->blk, v->m, v->moff, v->msize); free(v->views); free(v);
         g_gb[i] = g_gb[--g_ngb];
@@ -3425,15 +3427,17 @@ static shader_t *clear_vertex(void) {
     static shader_t shader = {.key = "clear-vertex"};
     return clear_shader(&shader, code, sizeof code);
 }
-static void clear_draw_state(VkPipeline pipeline, VkRect2D rect, VkExtent2D size, float depth) {
-    VkCommandBuffer cb = C->cb;
-    visibility_end(&C->visibility, cb);  // Internal clear/resolve triangles do not contribute guest samples.
+static void internal_draw_state(VkCommandBuffer cb, VkPipeline pipeline, VkRect2D rect, VkExtent2D size, float depth) {
     VkViewport viewport = {0, 0, (float)size.width, (float)size.height, depth, depth};
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdSetViewport(cb, 0, 1, &viewport);
     vkCmdSetScissor(cb, 0, 1, &rect);
     vkCmdSetDepthBias(cb, 0, 0, 0);
     vkCmdSetBlendConstants(cb, (const float[4]){0});
+}
+static void clear_draw_state(VkPipeline pipeline, VkRect2D rect, VkExtent2D size, float depth) {
+    visibility_end(&C->visibility, C->cb);  // Internal clear/resolve triangles do not contribute guest samples.
+    internal_draw_state(C->cb, pipeline, rect, size, depth);
 }
 // NVN records numeric clear values as floats. Convert them according to the
 // attachment view, saturating an integer conversion as in the Metal renderer.
@@ -4261,11 +4265,22 @@ void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, 
 #ifdef __ANDROID__
 __attribute__((weak)) void *front_native_window(int *gen);   // app/front_android.c; absent in the headless front end
 __attribute__((weak)) void front_window_lock(int on) { (void)on; }
-static struct { VkSurfaceKHR surf; VkSwapchainKHR sc; VkImage img[8]; VkImageView view[8]; uint32_t n; VkFormat fmt; VkExtent2D ext; int gen; } W;
+static struct { VkSurfaceKHR surf; VkSwapchainKHR sc; VkImage img[8]; VkImageView view[8]; uint32_t n; VkFormat fmt; VkExtent2D ext; int gen; VkPipeline pipeline; } W;
 #define NPRES 3
-static struct { VkCommandPool pool; VkCommandBuffer cb; VkFence fence; VkSemaphore acq, done; VkFramebuffer fb; } g_pres[NPRES]; static int g_pi;
+typedef struct {
+    VkCommandPool pool; VkCommandBuffer cb; VkFence fence; VkSemaphore acq, done;
+    VkFramebuffer fb; VkDescriptorSet set; vtex *source;
+} present_slot;
+static present_slot g_pres[NPRES]; static int g_pi;
+#include "window_draw.inc"
 static void win_drop(void) {
-    if (W.sc) { vkDeviceWaitIdle(g_dev); for (uint32_t i = 0; i < W.n; i++) vkDestroyImageView(g_dev, W.view[i], NULL); vkDestroySwapchainKHR(g_dev, W.sc, NULL); W.sc = VK_NULL_HANDLE; }
+    if (W.sc) {
+        pthread_mutex_lock(&g_qmu); vkDeviceWaitIdle(g_dev); pthread_mutex_unlock(&g_qmu);
+        for (int i = 0; i < NPRES; i++) window_slot_retire(&g_pres[i]);
+        vkDestroyPipeline(g_dev, W.pipeline, NULL); W.pipeline = VK_NULL_HANDLE;
+        for (uint32_t i = 0; i < W.n; i++) vkDestroyImageView(g_dev, W.view[i], NULL);
+        vkDestroySwapchainKHR(g_dev, W.sc, NULL); W.sc = VK_NULL_HANDLE;
+    }
     if (W.surf) { vkDestroySurfaceKHR(g_inst, W.surf, NULL); W.surf = VK_NULL_HANDLE; }
 }
 static int win_make(ANativeWindow *aw) {
@@ -4317,9 +4332,7 @@ static uint32_t text_rects(VkClearRect *r, uint32_t nr, uint32_t max, const char
             r[nr++] = (VkClearRect){{{x0 + (int32_t)((d * 4 + c) * cell), y0 + (int32_t)(row * cell)}, {cell, cell}}, 0, 1}; }
     return nr;
 }
-static VkFramebuffer overlay_draw(VkCommandBuffer cb, uint32_t img, int show_fps, const dm_ovl *ov, int nov) {
-    rp_desc d = {.n = 1, .cv = {W.view[img]}, .cf = {W.fmt}, .cl = {VK_ATTACHMENT_LOAD_OP_LOAD}, .w = W.ext.width, .h = W.ext.height, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkFramebuffer fb = rp_begin(cb, &d);
+static void overlay_draw(VkCommandBuffer cb, int show_fps, const dm_ovl *ov, int nov) {
     enum { MAXR = 1024 }; static VkClearRect lines[MAXR], fills[MAXR], fg[MAXR], bg[64]; uint32_t nl = 0, nf = 0, ng = 0, nb = 0;
     #define CLIP(x0, y0, w_, h_) do { int32_t X = (int32_t)(x0), Y = (int32_t)(y0), XW = X + (int32_t)(w_), YH = Y + (int32_t)(h_); if (X < 0) X = 0; if (Y < 0) Y = 0; \
         if (XW > (int32_t)W.ext.width) XW = (int32_t)W.ext.width; if (YH > (int32_t)W.ext.height) YH = (int32_t)W.ext.height; \
@@ -4347,8 +4360,6 @@ static VkFramebuffer overlay_draw(VkCommandBuffer cb, uint32_t img, int show_fps
     if (nf) vkCmdClearAttachments(cb, 1, &grey, nf, fills);
     if (nl) vkCmdClearAttachments(cb, 1, &white, nl, lines);
     if (ng) vkCmdClearAttachments(cb, 1, nov ? &white : &green, ng, fg);
-    rp_end(cb);
-    return fb;
 }
 static void img_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to) {
     VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, from, to,
@@ -4361,38 +4372,34 @@ static int win_present(const tex_t *t, const int crop[4]) {
     ANativeWindow *aw = front_native_window(&gen);
     if (!aw || gen != W.gen) { win_drop(); W.gen = gen; if (aw && !win_make(aw)) W.gen = -1; }
     if (!aw || !W.sc) { front_window_lock(0); return 0; }
-    pthread_mutex_lock(&g_rmu); vtex *v = tex_find(t->serial); pthread_mutex_unlock(&g_rmu);
-    if (!v) { front_window_lock(0); return 0; }
-    typeof(g_pres[0]) *P_ = &g_pres[g_pi]; g_pi = (g_pi + 1) % NPRES;
+    present_slot *P_ = &g_pres[g_pi]; g_pi = (g_pi + 1) % NPRES;
     { uint64_t w0 = now_ns(); vkWaitForFences(g_dev, 1, &P_->fence, VK_TRUE, UINT64_MAX); atomic_fetch_add(&g_pwait_ns, now_ns() - w0); }
-    if (P_->fb) { vkDestroyFramebuffer(g_dev, P_->fb, NULL); P_->fb = VK_NULL_HANDLE; }
+    window_slot_retire(P_);
+    copy_draw_params region = {.linear = 2};  // Clamp the linear footprint to the VI crop.
+    if (!window_pipeline() || !window_prepare(P_, t, crop, &region)) { front_window_lock(0); return 0; }
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, 1000000000ull, P_->acq, VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR || r == VK_SUBOPTIMAL_KHR) W.gen = -1;
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { front_window_lock(0); return 0; }
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { window_slot_retire(P_); front_window_lock(0); return 0; }
     vkResetFences(g_dev, 1, &P_->fence);
     VkCommandBuffer cb = P_->cb; vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL}; vkBeginCommandBuffer(cb, &bi);
     barrier_all(cb);   // the game's submissions before this one wrote the image
-    img_barrier(cb, W.img[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    VkClearColorValue black = {{0, 0, 0, 1}}; VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdClearColorImage(cb, W.img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rr);
-    int32_t sx = crop ? crop[0] : 0, sy = crop ? crop[1] : 0, sw = crop && crop[2] ? crop[2] : (int32_t)v->w, sh = crop && crop[3] ? crop[3] : (int32_t)v->h;
-    static int stretch = -1; if (stretch < 0) { const char *e = getenv("DM_SCREEN_FIT"); stretch = e && !strcmp(e, "stretch"); }
-    vk_present_rect dst = vk_present_fit(atomic_load(&g_screen_shape), atomic_load(&g_layer_shape),
-                                         v->w, v->h, W.ext.width, W.ext.height, stretch);
-    VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{sx, sy, 0}, {sx + sw, sy + sh, 1}},
-                     {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dst.x, dst.y, 0}, {dst.x + dst.w, dst.y + dst.h, 1}}};
-    // Lower-left images keep their bottom row first; flip only the displayed crop,
-    // as Metal does, leaving copies, sampled textures and fragment coordinates alone.
-    if (g_origin_ll) { b.srcOffsets[0].y = sy + sh; b.srcOffsets[1].y = sy; }
-    vkCmdBlitImage(cb, v->img, VK_IMAGE_LAYOUT_GENERAL, W.img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
+    img_barrier(cb, W.img[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rp_desc pass = {.n = 1, .cv = {W.view[idx]}, .cf = {W.fmt}, .cl = {VK_ATTACHMENT_LOAD_OP_CLEAR},
+                    .cc[0].float32 = {0, 0, 0, 1}, .w = W.ext.width, .h = W.ext.height, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    P_->fb = rp_begin(cb, &pass);
+    VkRect2D rect = {{region.dst[0], region.dst[1]}, {region.dst[2], region.dst[3]}};
+    internal_draw_state(cb, W.pipeline, rect, W.ext, 0);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, window_layout, 0, 1, &P_->set, 0, NULL);
+    vkCmdPushConstants(cb, window_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof region, &region);
+    vkCmdDraw(cb, 3, 1, 0, 0);
     static int show = -1; if (show < 0) { const char *e = getenv("DM_SHOW_FPS"); show = e && atoi(e); }
     static dm_ovl ov[32]; int nov = front_overlay(ov, 32);
-    if (show || nov) { img_barrier(cb, W.img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); P_->fb = overlay_draw(cb, idx, show, ov, nov);
-                img_barrier(cb, W.img[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR); }
-    else img_barrier(cb, W.img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (show || nov) overlay_draw(cb, show, ov, nov);
+    rp_end(cb);
+    img_barrier(cb, W.img[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     vkEndCommandBuffer(cb);
-    VkPipelineStageFlags ws[2] = {VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
+    VkPipelineStageFlags ws[2] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
     VkSemaphore wsem[2] = {P_->acq, g_tl}, ssem[2] = {P_->done, g_tl}; uint64_t wv[2] = {0, 0}, sv[2] = {0, 0};
     VkTimelineSemaphoreSubmitInfo ts = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, NULL, 2, wv, 2, sv};
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, g_tl ? &ts : NULL, g_tl ? 2 : 1, wsem, ws, 1, &cb, g_tl ? 2 : 1, ssem};
