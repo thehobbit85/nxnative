@@ -22,6 +22,7 @@
 #include "spv_integer_outputs.h"
 #include "spv_draw_parameters.h"
 #include "spv_buffer_bias.h"
+#include "spv_texel_bias.h"
 #include "feedback_gather.h"
 #include "uniform_address.h"
 #include "present_rect.h"
@@ -1334,6 +1335,7 @@ struct shader {
     shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
     int has_tables;
     sampler_pairs *sampler_images;
+    texel_bias *texel_biases; size_t ntexel_biases; // sparse per-element prefixes of writable aliases
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
     shader_t *capture_variant;
@@ -1508,8 +1510,14 @@ static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
 static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
     uint32_t bindings[DM_VK_MAX_BINDINGS]; int any=0;
     for (int i=0;i<s->nb;i++) { bindings[i]=s->b[i].binding;any|=s->buffer_bias[i]!=0; }
-    if (!spv || !any) return spv;
     size_t words; const char *reason;
+    if (spv && s->ntexel_biases) {
+        uint32_t *adjusted=spv_texel_bias(spv,*bytes/4,s->texel_biases,s->ntexel_biases,&words,&reason);
+        free(spv); spv=adjusted;
+        if (!spv) LOG("[RED] vk: shader %s typed view rebasing failed: %s",s->key,reason);
+        else *bytes=words*4;
+    }
+    if (!spv || !any) return spv;
     uint32_t *biased=spv_buffer_bias(spv,*bytes/4,bindings,s->buffer_bias,s->nb,&words,&reason);
     free(spv);
     if (!biased) LOG("[RED] vk: shader %s buffer rebasing failed: %s",s->key,reason);
@@ -1787,15 +1795,23 @@ static shader_t *shader_get(const uint8_t md[8]) {
     for (int i=0; i<8; i++) sprintf(key+2*i,"%02x",md[i]);
     return shader_by_key(key);
 }
-static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BINDINGS]) {
+static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BINDINGS],
+                                const texel_bias *texels, size_t nt) {
     int any=0;for(int i=0;i<base->nb;i++) any|=bias[i]!=0;
-    if (!any) return base;
+    if (!any && !nt) return base;
     for(shader_t *s=base->buffer_variants;s;s=s->next_buffer_variant)
-        if(!memcmp(s->buffer_bias,bias,sizeof s->buffer_bias)) return s->mod?s:NULL;
+        if (s->ntexel_biases==nt && !memcmp(s->buffer_bias,bias,sizeof s->buffer_bias) &&
+            (!nt || !memcmp(s->texel_biases,texels,nt*sizeof *texels))) return s->mod?s:NULL;
     shader_t *s=malloc(sizeof *s);
     if(!s) return NULL;
     *s=*base;s->buffer_variants=NULL;s->vertex_variants=NULL;s->cpp=VK_NULL_HANDLE;s->cpl=VK_NULL_HANDLE;s->mod=VK_NULL_HANDLE;
     s->fragment_variants=NULL;
+    s->texel_biases=NULL; s->ntexel_biases=nt;
+    if (nt) {
+        s->texel_biases=malloc(nt*sizeof *texels);
+        if (!s->texel_biases) { free(s); return NULL; }
+        memcpy(s->texel_biases,texels,nt*sizeof *texels);
+    }
     memcpy(s->buffer_bias,bias,sizeof s->buffer_bias);
     s->next_buffer_variant=base->buffer_variants;base->buffer_variants=s;
     char path[1024];size_t bytes;
@@ -2458,6 +2474,43 @@ static int storage_order(const void *a, const void *b) {
     uint64_t x = ((const storage_range *)a)->addr, y = ((const storage_range *)b)->addr;
     return (x > y) - (x < y);
 }
+static const storage_range *prepared_storage(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off, uint8_t **p) {
+    for (size_t i = 0; i < g_nstorage; i++) {
+        const storage_range *r = &g_storage[i];
+        if (r->buf && addr >= r->addr && addr - r->addr < r->size && size <= r->size - (addr - r->addr)) {
+            *buf = r->buf; *off = r->off + addr - r->addr; *p = r->p + (addr - r->addr); return r;
+        }
+    }
+    return 0;
+}
+// Three-component formats may need up to two more alignment units to reach
+// a whole texel. Only expose a padded view if it still fits the device limit.
+static int texel_prefix(const texel_range *t, VkDeviceSize offset, VkDeviceSize *prefix) {
+    VkDeviceSize align=texel_alignment(t->bytes), pad=offset%align;
+    for (int i=0;i<3 && pad<=offset;i++,pad+=align) {
+        if (pad%t->bytes) continue;
+        if (pad/t->bytes+t->range.size/t->bytes>g_props.limits.maxTexelBufferElements) break;
+        *prefix=pad; return 1;
+    }
+    RED_ONCE(23,"writable typed alias cannot fit a whole-texel prefix within the device view limit");
+    return 0;
+}
+static int shader_texel_biases(const shader_t *s, texel_bias *edits, size_t *count) {
+    for (int i=0;i<s->nb;i++) {
+        const sbind *b=&s->b[i]; if (!is_texel(b)) continue;
+        for (uint32_t j=0;j<b->count;j++) {
+            texel_range t; if (!texel_binding(b,s->stage,j,&t)) return 0;
+            if (!t.range.addr) continue;
+            VkBuffer buf; VkDeviceSize offset, prefix; uint8_t *mapped;
+            const storage_range *group=prepared_storage(t.range.addr,t.range.size,&buf,&offset,&mapped);
+            if (!group) return 0;
+            if (!group->writable || !group->conflict) continue;
+            if (!texel_prefix(&t,offset,&prefix)) return 0;
+            if (prefix) edits[(*count)++]=(texel_bias){b->binding,j,(uint32_t)(prefix/t.bytes)};
+        }
+    }
+    return 1;
+}
 static int prepare_storage(shader_t **first, shader_t **second) {
     g_nstorage = 0;
     if (!prepare_tables(first) || (second && !prepare_tables(second))) return 0;
@@ -2501,14 +2554,19 @@ static int prepare_storage(shader_t **first, shader_t **second) {
         } else g_storage[n++] = *r;
     }
     g_nstorage = n;
+    int writable_conflict=0;
     for (size_t i = 0; i < n; i++) {
         storage_range *r = &g_storage[i];
-        if (r->conflict && r->writable) {
-            RED_ONCE(23,"overlapping writable typed views require a shader texel-coordinate offset"); return 0;
-        }
         VkDeviceSize ta=r->texel_align, align=g_props.limits.minStorageBufferOffsetAlignment;
         if (ta>align) align=ta;
         VkDeviceSize prefix=ta ? (ta-(r->texel-r->addr)%ta)%ta : 0;
+        if (r->conflict && r->writable) {
+            // Keep the guest residue for every power-of-two texel alignment
+            // and reserve space for a possible three-component view prefix.
+            prefix=2*ta+r->addr%ta;
+            if (align<4*ta) align=4*ta;
+            writable_conflict=1;
+        }
         if (!prefix && gw_find(r->addr, r->size, align, &r->buf, &r->off, &r->p)) continue;
         VkDeviceSize offset = copy_in_at(r->addr, r->size, align, prefix);
         if (offset == VK_WHOLE_SIZE) return 0;
@@ -2524,20 +2582,14 @@ static int prepare_storage(shader_t **first, shader_t **second) {
                 bias[b]=(uint32_t)((g_storage[i].off+u.addr-g_storage[i].addr)%g_props.limits.minStorageBufferOffsetAlignment);break;
             }
         }
-        shader_t *variant=buffer_variant(s,bias);
+        static texel_bias texels[DM_VK_MAX_BINDINGS*32];
+        size_t nt=0;
+        if (writable_conflict && !shader_texel_biases(s,texels,&nt)) return 0;
+        shader_t *variant=buffer_variant(s,bias,texels,nt);
         if(!variant) return 0;
         if(st) *second=variant;else *first=variant;
     }
     return 1;
-}
-static const storage_range *prepared_storage(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off, uint8_t **p) {
-    for (size_t i = 0; i < g_nstorage; i++) {
-        const storage_range *r = &g_storage[i];
-        if (r->buf && addr >= r->addr && addr - r->addr < r->size && size <= r->size - (addr - r->addr)) {
-            *buf = r->buf; *off = r->off + addr - r->addr; *p = r->p + (addr - r->addr); return r;
-        }
-    }
-    return 0;
 }
 static gw_t g_wb[MAX_BUFFER_BINDINGS]; static int g_nwb;   // writable buffers of this draw or dispatch, published only after command encoding
 static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
@@ -2545,22 +2597,23 @@ static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
     for (uint32_t element = 0; element < b->count; element++) {
         texel_range t; if (!texel_binding(b, stage, element, &t)) return 0;
         VkBuffer buffer = g_zero_buf; VkDeviceSize offset = 0, size = 256; uint8_t *mapped = NULL;
+        VkDeviceSize prefix=0;
         if (t.range.addr) {
             const storage_range *group=prepared_storage(t.range.addr,t.range.size,&buffer,&offset,&mapped);
             if (!group) return 0;
             size = t.range.size;
             VkDeviceSize align=texel_alignment(t.bytes);
-            if (offset%align) {
-                // prepare_storage certified that no shader stage can write
-                // this overlapping group. An independently aligned snapshot
-                // observes exactly the same prior GPU writes.
-                if (group->writable || (b->type==BT_STB && !b->read_only)) return 0;
+            if (group->writable && group->conflict) {
+                if (!texel_prefix(&t,offset,&prefix)) return 0;
+            } else if (offset%align) {
+                // Read-only snapshots can be aligned independently.
+                if (group->writable) return 0;
                 offset=copy_in(t.range.addr,size,align);
                 if (offset==VK_WHOLE_SIZE) return 0;
                 buffer=C->ring;
             }
         } else t.format = b->num == 1 ? VK_FORMAT_R32G32B32A32_SINT : b->num == 2 ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT;
-        VkBufferViewCreateInfo vi = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, buffer, t.format, offset, size};
+        VkBufferViewCreateInfo vi = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, buffer, t.format, offset-prefix, size+prefix};
         VKCHECK(vkCreateBufferView(g_dev, &vi, NULL, &views[element]));
         if (C->nbv == C->cbv) {
             if (C->cbv > SIZE_MAX / 2 / sizeof *C->bv) die("Vulkan: typed view tracking size overflow");

@@ -1,0 +1,6 @@
+stage cs
+tg 1 1 1
+b 0 stb 2 img 0 -1 - -1 num=2
+b 1 tbuf 1 tbuf 0 -1 - -1 num=2
+b 2 ssbo 1 sbuf 1 -1 - -1
+b 3 ubo 1 drvcb -1 24 - -1

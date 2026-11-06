@@ -27,6 +27,7 @@ static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
 static prog_t alias_program = {.nstage = 1};
+static prog_t texel_alias_program = {.nstage = 1};
 static prog_t texel_program = {.nstage = 1};
 static prog_t texel_graphics_program = {.nstage = 2};
 static prog_t separate_program[4]={{.nstage=2},{.nstage=2},{.nstage=2},{.nstage=2}};
@@ -87,6 +88,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (int i = 0; i < 3; i++) if (p == &split_program[i]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x4d+i : 0x35; return 1; }
     if (p == &uniform_storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x4b + stage; return 1; }
     if (p == &texel_graphics_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x49 : 0x4a; return 1; }
+    if (p == &texel_alias_program) { assert(stage == 0); memset(key, 0, 8); key[6] = 0xad; key[7] = getenv("DM_VK_TEST_TEXEL_DYNAMIC") ? 0x71 : 0x70; return 1; }
     if (p == &texel_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x48; return 1; }
     for(int i=0;i<4;i++) if(p==&separate_program[i]) { assert(stage<2);memset(key,0,8);key[7]=stage?0x44+i:1;return 1; }
     if (p == &alias_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x43; return 1; }
@@ -2723,7 +2725,49 @@ static void descriptor_lifetime(void) {
     mtl_tex_release(&output); mtl_queue_forget(950);
     puts("Descriptor pools preserve 400 dispatches and 400 draws across exhaustion and context reuse without submission cuts");
 }
+// Each invocation uses two overlapping views of the same words. The store,
+// atomic and read must observe each other before there can be any copyback.
+static void typed_writable_aliases(void) {
+    for (int split=0;split<2;split++) for (unsigned shift=1;shift<=3;shift++) {
+        uint32_t words[10], result[6]={0};
+        for (int i=0;i<10;i++) words[i]=0xfedcba00+i;
+        uint32_t *first=words+1;
+        tex_t views[2];
+        for (int i=0;i<2;i++) {
+            views[i]=(tex_t){.serial=0xfac0+2*shift+8*split+i, .mem=(uint8_t *)(first+i*shift),
+                .d={.width=i?4:7,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_BUFFER,.format=NVN_FORMAT_R32UI}};
+            nvn_tex_layout(&views[i].d,&views[i].L); mtl_reg_tex(984+i,&views[i],NULL);
+        }
+        mtl_queue_activate(984); mtl_sub_begin(); list_t list={0};
+        uint32_t values[]={30,31,32,33};
+        push_constants(&list,1,240,values,sizeof values);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(first+shift),.size=sizeof values);
+        RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
+        put(&list,OP_END,NULL,0); mtl_exec(list.bytes); list.length=0;
+        if (split) { mtl_sub_commit(); mtl_sub_begin(); }
+        unsigned slot=getenv("DM_VK_TEST_TEXEL_DYNAMIC") ? (shift+split)%2 : 1;
+        uint32_t params[]={shift,slot,0,0}; push_constants(&list,1,240,params,sizeof params);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&texel_alias_program,.stages=0x20);
+        RECORD(OP_BIND_IMG,p_bind_handles,.stage=5,.first=0,.n=2,.h={984,985});
+        RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=1,.h={985});
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)result,.size=sizeof result);
+        RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+        put(&list,OP_END,NULL,0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        uint32_t expected[]={30,31,131,7,slot?4u:7u,4};
+        assert(!memcmp(result,expected,sizeof result));
+        for (unsigned i=0;i<10;i++) {
+            uint32_t want=i>=1+shift && i<5+shift ? values[i-1-shift] : 0xfedcba00+i;
+            if (i==1+shift) want=131;
+            assert(words[i]==want);
+        }
+        for (int i=0;i<2;i++) { mtl_reg_tex(984+i,NULL,NULL); mtl_tex_release(&views[i]); }
+        mtl_queue_forget(984);
+    }
+    puts("Shifted typed views share in-dispatch writes, atomics, fetches and guest sizes");
+}
 static void typed_buffers(void) {
+    typed_writable_aliases();
     enum { N = 4 };
     const int offsets[] = {0,4,12,60,256};
     for (int missing = 0; missing < 2; missing++) for (int split = 0; split < 2; split++) for (unsigned c = 0; c < sizeof offsets/sizeof *offsets; c++) {
