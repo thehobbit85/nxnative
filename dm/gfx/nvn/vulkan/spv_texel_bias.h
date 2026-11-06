@@ -10,6 +10,7 @@
 typedef struct {
     uint32_t binding, element, texels;
     uint32_t swizzle; // 0 = identity, otherwise packed NVN mapping plus one
+    uint32_t scaled; // five bits per channel width, bit 20 selects signed conversion
 } texel_bias;
 typedef struct {
     uint32_t type, binding, index, value, vector_scalar, sparse_vector;
@@ -34,7 +35,7 @@ static int texel_append(texel_words *dst, const uint32_t *words, size_t n) {
 
 typedef struct {
     texel_words globals, body;
-    uint32_t next, boolean, bool4;
+    uint32_t next, boolean, bool4, uint_type, uint4;
 } texel_module;
 
 #define TEXEL_OP(dst, op, ...) do { \
@@ -81,10 +82,59 @@ fail:
     return 0;
 }
 
+static uint32_t texel_float4(texel_module *m,uint32_t vector,uint32_t scalar,const float lanes[4]) {
+    uint32_t constants[4];
+    for (int c=0;c<4;c++) {
+        uint32_t bits; memcpy(&bits,lanes+c,sizeof bits);
+        constants[c]=texel_constant(m,scalar,bits);
+        if (!constants[c]) return 0;
+    }
+    uint32_t id=m->next++;
+    TEXEL_OP(&m->globals,44,vector,id,constants[0],constants[1],constants[2],constants[3]);
+    return id;
+fail:
+    return 0;
+}
+
+// Recover the exact stored integer from a float UNORM texel. Missing RGB
+// components and alpha retain the default produced by the image unit.
+static uint32_t texel_scaled_value(texel_module *m,uint32_t vector,uint32_t scalar,uint32_t input,uint32_t encoding) {
+    float maximum[4], threshold[4], modulus[4];
+    for (unsigned c=0;c<4;c++) {
+        unsigned width=(encoding>>(5*c))&31;
+        if (width>16) return 0;
+        modulus[c]=width ? (float)(1u<<width) : 0.0f;
+        threshold[c]=width ? modulus[c]/2 : 2.0f;
+        maximum[c]=width ? modulus[c]-1 : 1.0f;
+    }
+    if (!m->uint_type) { m->uint_type=m->next++; TEXEL_OP(&m->globals,21,m->uint_type,32,0); }
+    if (!m->uint4) { m->uint4=m->next++; TEXEL_OP(&m->globals,23,m->uint4,m->uint_type,4); }
+    uint32_t factor=texel_float4(m,vector,scalar,maximum), half=texel_float4(m,vector,scalar,(float[]){.5f,.5f,.5f,.5f});
+    if (!factor || !half) return 0;
+    uint32_t product=m->next++, rounded=m->next++, integer=m->next++, value=m->next++;
+    TEXEL_OP(&m->body,133,vector,product,input,factor);
+    TEXEL_OP(&m->body,129,vector,rounded,product,half);
+    TEXEL_OP(&m->body,109,m->uint4,integer,rounded);
+    TEXEL_OP(&m->body,112,vector,value,integer);
+    if (encoding & (1u<<20)) {
+        if (!m->bool4) { m->bool4=m->next++; TEXEL_OP(&m->globals,23,m->bool4,m->boolean,4); }
+        uint32_t high=texel_float4(m,vector,scalar,threshold), range=texel_float4(m,vector,scalar,modulus);
+        if (!high || !range) return 0;
+        uint32_t sign=m->next++, negative=m->next++, selected=m->next++;
+        TEXEL_OP(&m->body,190,m->bool4,sign,value,high);
+        TEXEL_OP(&m->body,131,vector,negative,value,range);
+        TEXEL_OP(&m->body,169,vector,selected,sign,negative,value);
+        value=selected;
+    }
+    return value;
+fail:
+    return 0;
+}
+
 // Apply the mapping after conversion by the image unit. Select the result
 // per descriptor when the subscript is dynamic. A sparse fetch also returns
 // a residency code; replace only its texel member.
-static int texel_swizzle_result(texel_module *m, const texel_bias *edits, size_t count, const texel_id *ids,
+static int texel_map_result(texel_module *m, const texel_bias *edits, size_t count, const texel_id *ids,
                                 texel_id image, uint32_t type, size_t instruction, int sparse) {
     const texel_id index=ids[image.index];
     int dynamic=image.index && !index.constant;
@@ -92,7 +142,7 @@ static int texel_swizzle_result(texel_module *m, const texel_bias *edits, size_t
     uint32_t old=m->body.w[instruction+2], raw=0, value=0, result=0, constants=0;
     for (size_t i=0;i<count;i++) {
         const texel_bias *e=&edits[i];
-        if (!e->swizzle || e->binding!=image.binding || (!dynamic && e->element!=index.value)) continue;
+        if ((!e->swizzle && !e->scaled) || e->binding!=image.binding || (!dynamic && e->element!=index.value)) continue;
         if (!raw) {
             uint32_t scalar=ids[vector].vector_scalar;
             if (!scalar || !(ids[scalar].floating || ids[scalar].integer)) return 0;
@@ -107,13 +157,21 @@ static int texel_swizzle_result(texel_module *m, const texel_bias *edits, size_t
             if (sparse) { value=m->next++; TEXEL_OP(&m->body,81,vector,value,raw,1); }
             result=value;
         }
-        uint32_t mapped=m->next++, lanes[4];
-        for (unsigned c=0;c<4;c++) {
-            unsigned selector=((e->swizzle-1)>>(3*c))&7;
-            if (selector>5) return 0;
-            lanes[c]=selector<2 ? selector+4 : selector-2;
+        uint32_t mapped=value;
+        if (e->scaled) {
+            uint32_t scalar=ids[vector].vector_scalar;
+            if (!ids[scalar].floating || !(mapped=texel_scaled_value(m,vector,scalar,value,e->scaled))) return 0;
         }
-        TEXEL_OP(&m->body,79,vector,mapped,value,constants,lanes[0],lanes[1],lanes[2],lanes[3]);
+        if (e->swizzle) {
+            uint32_t lanes[4], shuffled=m->next++;
+            for (unsigned c=0;c<4;c++) {
+                unsigned selector=((e->swizzle-1)>>(3*c))&7;
+                if (selector>5) return 0;
+                lanes[c]=selector<2 ? selector+4 : selector-2;
+            }
+            TEXEL_OP(&m->body,79,vector,shuffled,mapped,constants,lanes[0],lanes[1],lanes[2],lanes[3]);
+            mapped=shuffled;
+        }
         if (dynamic) {
             if (!index.type) return 0;
             uint32_t element=texel_constant(m,index.type,e->element);
@@ -159,9 +217,13 @@ static uint32_t *spv_texel_bias(const uint32_t *w, size_t count, const texel_bia
         if (op==23 && len==4 && p[1]<bound && p[2]<bound && p[3]==4) {
             ids[p[1]].vector_scalar=p[2];
             if (p[2]==m.boolean) m.bool4=p[1];
+            if (p[2]==m.uint_type) m.uint4=p[1];
         }
         if (op==30 && len==4 && p[1]<bound && p[3]<bound) ids[p[1]].sparse_vector=p[3];
-        if (op==TypeInt && len==4 && p[1]<bound && p[2]==32) ids[p[1]].integer=1;
+        if (op==TypeInt && len==4 && p[1]<bound && p[2]==32) {
+            ids[p[1]].integer=1;
+            if (p[3]==0) m.uint_type=p[1];
+        }
         // A scalar result uses its integer type ID as its first operand.
         if (len>=3 && p[1]<bound && ids[p[1]].integer && p[2]<bound && op!=TypeInt) {
             ids[p[2]].type=p[1];
@@ -217,7 +279,7 @@ static uint32_t *spv_texel_bias(const uint32_t *w, size_t count, const texel_bia
             if (!texel_append(&m.body,p,len)) goto fail;
             if (adjusted) m.body.w[start+operand+1]=adjusted;
             if ((op==ImageFetch || op==ImageSparseFetch) && (p[1]>=bound ||
-                !texel_swizzle_result(&m,edits,ne,ids,ids[p[operand]],p[1],start,op==ImageSparseFetch))) {
+                !texel_map_result(&m,edits,ne,ids,ids[p[operand]],p[1],start,op==ImageSparseFetch))) {
                 *reason="unsupported sampled texel result or mapping"; goto fail;
             }
             i+=len; continue;

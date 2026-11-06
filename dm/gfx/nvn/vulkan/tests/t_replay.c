@@ -27,6 +27,7 @@ static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
 static prog_t alias_program = {.nstage = 1};
+static prog_t scaled_texels_program = {.nstage = 1};
 static prog_t empty_texels_program = {.nstage = 1};
 static prog_t typed_format_program = {.nstage = 1};
 static prog_t texel_alias_program = {.nstage = 1};
@@ -90,6 +91,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (int i = 0; i < 3; i++) if (p == &split_program[i]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x4d+i : 0x35; return 1; }
     if (p == &uniform_storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x4b + stage; return 1; }
     if (p == &texel_graphics_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x49 : 0x4a; return 1; }
+    if (p == &scaled_texels_program) { assert(stage==0); memset(key,0,8); key[6]=0xad; key[7]=getenv("DM_VK_TEST_TEXEL_DYNAMIC")?0x75:0x74; return 1; }
     if (p == &empty_texels_program) { assert(stage==0); memset(key,0,8); key[6]=0xad; key[7]=0x73; return 1; }
     if (p == &typed_format_program) { assert(stage==0); memset(key,0,8); key[6]=0xad; key[7]=0x72; return 1; }
     if (p == &texel_alias_program) { assert(stage == 0); memset(key, 0, 8); key[6] = 0xad; key[7] = getenv("DM_VK_TEST_TEXEL_DYNAMIC") ? 0x71 : 0x70; return 1; }
@@ -2861,7 +2863,48 @@ static void empty_texels(void) {
     mtl_reg_tex(989,NULL,NULL); mtl_tex_release(&live); mtl_queue_forget(989);
     puts("Empty float, signed and atomic typed descriptors preserve neighboring work and zero reads");
 }
+static void scaled_texels(void) {
+    // The two views share every byte. One converts unsigned integers, and
+    // the other sign-extends the same bits before converting to float.
+    uint32_t packed[]={0xf7ac0180,0x01637fff,0x80000001,0x12345678,
+                       0x7ffe8100,0xffffffff,0x18305403,0xffff8000};
+    const struct { unsigned channels,bits; } cases[]={{1,8},{1,16},{2,8},{2,16},{3,8},{3,16},{4,8},{4,16},{4,10}};
+    for (size_t test=0;test<sizeof cases/sizeof *cases;test++) {
+        unsigned n=cases[test].channels,bits=cases[test].bits;
+        for (int sign=0;sign<2;sign++) {
+            unsigned format=(bits==10 ? NVN_FORMAT_RGB10A2_UI2F : NVN_FORMAT_R8_UI2F+6*(n-1)+(bits==16?2:0))+sign;
+            tex_t view={.serial=0x11000+format,.mem=(uint8_t *)packed,
+                .d={.width=4,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_BUFFER,.format=format}};
+            nvn_tex_layout(&view.d,&view.L); mtl_reg_tex(990+sign,&view,NULL);
+        }
+        float result[2][4][4]; memset(result,0xff,sizeof result);
+        mtl_queue_activate(990); mtl_sub_begin(); list_t list={0};
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&scaled_texels_program,.stages=0x20);
+        RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=2,.h={990,991});
+        for (unsigned sign=0;sign<2;sign++) {
+            uint32_t params[]={sign,0,0,0}; push_constants(&list,1,240,params,sizeof params);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result[sign],.size=sizeof result[sign]);
+            RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
+        }
+        put(&list,OP_END,NULL,0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (int sign=0;sign<2;sign++) for (unsigned i=0;i<4;i++) for (unsigned c=0;c<4;c++) {
+            int want=c==3;
+            if (c<n) {
+                unsigned width=bits==10 && c==3 ? 2 : bits;
+                uint32_t raw=0;
+                if (bits==10) raw=(packed[i]>>(10*c)) & ((1u<<width)-1);
+                else memcpy(&raw,(uint8_t *)packed+(i*n+c)*(bits/8),bits/8);
+                want=(int)raw;
+                if (sign && (raw & (1u<<(width-1)))) want-=(int)(1u<<width);
+            }
+            if (result[sign][i][c]!=(float)want) die("scaled texel %ux%u, sign%d [%u].%u: %g expected %d",n,bits,sign,i,c,result[sign][i][c],want);
+        }
+        mtl_reg_tex(990,NULL,NULL); mtl_reg_tex(991,NULL,NULL); mtl_queue_forget(990);
+    }
+    puts("Signed and unsigned scaled texels preserve their integer values, units and missing channels");
+}
 static void typed_buffers(void) {
+    scaled_texels();
     empty_texels();
     typed_srgb();
     typed_writable_aliases();
