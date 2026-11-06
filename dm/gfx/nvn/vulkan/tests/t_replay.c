@@ -645,6 +645,32 @@ static void compressed_transfers(void) {
         uint8_t want[]={red?255:0,red?255:0,red?0:255,255};
         assert(!memcmp(rgba[z][i],want,4));
     }
+    // A texture copy must preserve the encoded bytes too. Replace only
+    // the second block of the middle layer. Its first block stays green.
+    tex_t dest=blocks; dest.serial+=2; dest.mem=calloc(1,dest.L.size); assert(dest.mem);
+    uint32_t after[3][4], copied_blocks[3][4]={{0}};
+    for (unsigned z=0; z<3; ++z) {
+        memcpy(after[z],expected[2],8); memcpy(after[z]+2,expected[0]+2,8);
+        assert(!nvn_swizzle(&dest.d,1,z,after[z],16,dest.mem));
+    }
+    memcpy(after[1]+2,expected[1],8);
+    view_t selected=slice; selected.target=NVN_TEXTURE_TARGET_2D; selected.set_target=1; selected.nlayers=1;
+    mtl_reg_tex(992,&dest,&selected);
+    list.length=0;
+    RECORD(OP_COPY_T2T,p_copy_t2t,.src=&blocks,.dst=&dest,.has_sv=1,.sv=slice,.has_dv=1,.dv=slice,
+           .sr={.width=4,.height=4,.depth=1},.dr={.xoffset=4,.width=4,.height=4,.depth=1});
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&dest,.view=mip,.has_view=1,.src=(uintptr_t)copied_blocks,.r={.width=8,.height=4,.depth=3});
+    RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1,.slot=0,.h=992);
+    RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1,.slot=1,.h=992);
+    RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&color,.src=(uintptr_t)rgba[0],.r={.width=8,.height=4,.depth=1});
+    put(&list,OP_END,NULL,0); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    assert(!memcmp(copied_blocks,after,sizeof after));
+    for (unsigned i=0; i<32; ++i) {
+        uint8_t want[]={i%8<4?0:255,i%8<4?0:255,i%8<4?255:0,255};
+        assert(!memcmp(want,rgba[0][i],4));
+    }
+    mtl_reg_tex(992,NULL,NULL); mtl_tex_release(&dest); free(dest.mem);
     mtl_reg_tex(990,NULL,NULL); mtl_reg_tex(991,NULL,NULL);
     mtl_tex_release(&color); mtl_tex_release(&blocks); free(blocks.mem); mtl_queue_forget(0x8fbd00);
     puts("Vulkan compressed block transfers preserved guest bytes, decoded pixels and same-list consumers");
