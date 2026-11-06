@@ -2419,7 +2419,7 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
 typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; VkDeviceSize texel_align; int writable, conflict; } storage_range;
 static storage_range g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
 static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
-typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes, swizzle; VkBufferUsageFlags single_usage; } texel_range;
+typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes, swizzle, scaled; VkBufferUsageFlags single_usage; } texel_range;
 // The staging buffers carry both texel usage bits. Their views must meet
 // both limits, even if this binding only reads. For three-component formats
 // Vulkan uses the component size for its single-texel alignment rule.
@@ -2431,6 +2431,33 @@ static VkDeviceSize texel_alignment(uint32_t bytes) {
     if (g_texel_limits.storageTexelBufferOffsetSingleTexelAlignment && unit<s) s=unit;
     return u>s ? u : s;
 }
+// Scaled vertex formats are often vertex-only in Vulkan. A sampled UNORM
+// view preserves 8/16-bit channel data even on those devices; the shader
+// reconstructs the signed/unsigned value before applying the NVN swizzle.
+static VkFormat scaled_texel_format(unsigned format,uint32_t *encoding) {
+    static const VkFormat normalized[][2]={
+        {VK_FORMAT_R8_UNORM,VK_FORMAT_R16_UNORM}, {VK_FORMAT_R8G8_UNORM,VK_FORMAT_R16G16_UNORM},
+        {VK_FORMAT_R8G8B8_UNORM,VK_FORMAT_R16G16B16_UNORM}, {VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_R16G16B16A16_UNORM}
+    };
+    uint32_t widths[4]={0}; unsigned channels, sign;
+    VkFormat fallback;
+    if (format==NVN_FORMAT_RGB10A2_UI2F || format==NVN_FORMAT_RGB10A2_I2F) {
+        channels=4; widths[0]=widths[1]=widths[2]=10; widths[3]=2;
+        sign=format==NVN_FORMAT_RGB10A2_I2F; fallback=VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    } else {
+        if (format<NVN_FORMAT_R8_UI2F || format>NVN_FORMAT_RGBA32_I2F) return VK_FORMAT_UNDEFINED;
+        unsigned index=format-NVN_FORMAT_R8_UI2F, lane=(index%6)/2;
+        if (lane>1) return VK_FORMAT_UNDEFINED;
+        channels=1+index/6; sign=index&1; fallback=normalized[channels-1][lane];
+        for (unsigned c=0;c<channels;c++) widths[c]=lane ? 16 : 8;
+    }
+    VkFormat native=vfmt(format,NVN_CT_FLOAT);
+    VkFormatProperties props; vkGetPhysicalDeviceFormatProperties(g_pd,native,&props);
+    if (props.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT) return native;
+    *encoding=sign<<20;
+    for (unsigned c=0;c<channels;c++) *encoding|=widths[c]<<(5*c);
+    return fallback;
+}
 static int texel_binding(const sbind *b, int stage, uint32_t element, texel_range *out) {
     *out = (texel_range){0};
     uint64_t handle = b->kind == K_IMG && b->reg >= 0 && (uint32_t)b->reg + element < 32 ? S.img[stage][b->reg + element] : sampled_handle(stage, b, element);
@@ -2441,6 +2468,8 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         int original_bw, original_bh, original_bytes = nvn_fmt_bpb(tr.t.d.format, &original_bw, &original_bh);
         int format = tr.has_v && tr.v.set_format ? tr.v.format : tr.t.d.format;
         fmt_t f = fmt_of(format);
+        uint32_t scaled=0;
+        if (!f.f && b->type!=BT_STB && b->num==0) f.f=scaled_texel_format(format,&scaled);
         int bw, bh, bytes = nvn_fmt_bpb(format, &bw, &bh);
         uint64_t size = (uint64_t)tr.t.d.width * (unsigned)original_bytes;
         if (original_bytes <= 0 || original_bw != 1 || original_bh != 1 || bytes <= 0 || bw != 1 || bh != 1 || f.dec || f.depth || f.f == VK_FORMAT_UNDEFINED ||
@@ -2456,7 +2485,7 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         int storage=b->type==BT_STB;
         if (!(fp.bufferFeatures & (storage ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT : VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT))) ok=0;
         if (ok) {
-            *out=(texel_range){.range={.addr=(uintptr_t)tr.t.mem,.size=size},.format=f.f,.bytes=(uint32_t)bytes};
+            *out=(texel_range){.range={.addr=(uintptr_t)tr.t.mem,.size=size},.format=f.f,.bytes=(uint32_t)bytes,.scaled=scaled};
             uint8_t sw[4]={2,3,4,5};
             sampled_swizzle(sw,f,&tr.t,&tr.v,tr.has_v);
             for (unsigned c=0;c<4;c++) if (sw[c]>5) sw[c]=2+c;
@@ -2540,7 +2569,7 @@ static int shader_texel_biases(const shader_t *s, texel_bias *edits, size_t *cou
             if (!group) return 0;
             prefix=0;
             if (group->writable && group->conflict && !texel_prefix(&t,offset,&prefix)) return 0;
-            if (prefix || t.swizzle) edits[(*count)++]=(texel_bias){b->binding,j,(uint32_t)(prefix/t.bytes),t.swizzle};
+            if (prefix || t.swizzle || t.scaled) edits[(*count)++]=(texel_bias){b->binding,j,(uint32_t)(prefix/t.bytes),t.swizzle,t.scaled};
         }
     }
     return 1;
@@ -2562,7 +2591,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             if (is_texel(b)) {
                 texel_range t; if (!texel_binding(b,s->stage,element,&t)) return 0;
                 u=t.range; if (u.addr) texel_align=texel_alignment(t.bytes);
-                needs_texel_variant|=t.swizzle!=0;
+                needs_texel_variant|=t.swizzle!=0 || t.scaled!=0;
             }
             if (!u.addr || !u.size) continue;
             if (u.size > UINT64_MAX - u.addr) return 0;

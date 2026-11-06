@@ -224,7 +224,11 @@ $(B)/shaders/000000000000ad73.spv: tests/empty_texels.comp tests/empty_texels.vk
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/empty_texels.vk.txt $(@:.spv=.vk.txt)
-fixture: $(B)/shaders/000000000000ad73.spv $(B)/shaders/000000000000ad72.spv $(B)/shaders/000000000000ad70.spv $(B)/shaders/000000000000ad71.spv
+$(B)/shaders/000000000000ad74.spv $(B)/shaders/000000000000ad75.spv: tests/scaled_texel.comp tests/scaled_texel.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $(if $(filter %75.spv,$@),-DDYNAMIC_SLOT) $< -o $@
+	cp tests/scaled_texel.vk.txt $(@:.spv=.vk.txt)
+fixture: $(B)/shaders/000000000000ad74.spv $(B)/shaders/000000000000ad75.spv $(B)/shaders/000000000000ad73.spv $(B)/shaders/000000000000ad72.spv $(B)/shaders/000000000000ad70.spv $(B)/shaders/000000000000ad71.spv
 $(B)/shaders/000000000000ad71.spv: $(B)/texel-dynamic.spv tests/texel_alias.vk.txt
 	mkdir -p $(B)/shaders
 	cp $< $@
@@ -413,11 +417,13 @@ $(B)/texel-dynamic.spv: tests/texel_alias.comp
 	mkdir -p $(B)
 	$(GLSLC) --target-env=vulkan1.1 -DDYNAMIC_SLOT $< -o $@
 .PHONY: texel-bias-check
-texel-bias-check: $(B)/t_texel_bias $(B)/shaders/000000000000ad70.spv $(B)/texel-dynamic.spv
+texel-bias-check: $(B)/shaders/000000000000ad75.spv $(B)/t_texel_bias $(B)/shaders/000000000000ad70.spv $(B)/texel-dynamic.spv
 	$(B)/t_texel_bias $(B)/shaders/000000000000ad70.spv $(B)/texel-biased.spv
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/texel-biased.spv
 	$(B)/t_texel_bias $(B)/texel-dynamic.spv $(B)/texel-dynamic-biased.spv
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/texel-dynamic-biased.spv
+	$(B)/t_texel_bias $(B)/shaders/000000000000ad75.spv $(B)/texel-scaled.spv scaled
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/texel-scaled.spv
 
 $(B)/t_integer_outputs: tests/t_integer_outputs.c spv_integer_outputs.h spv_fragment_outputs.h spv_alpha.h
 	mkdir -p $(B)
