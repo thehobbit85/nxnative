@@ -1,0 +1,63 @@
+#version 450
+// Each invocation owns four adjacent pixels and one stencil word. Vulkan
+// exposes separate planes while Maxwell interleaves the stencil per pixel.
+layout(local_size_x=64) in;
+layout(binding=0,std430) buffer Guest { uint guest[]; };
+layout(binding=1,std430) buffer Depth { uint depth[]; };
+layout(binding=2,std430) buffer Stencil { uint stencil[]; };
+layout(push_constant) uniform Transfer {
+    uint count;
+    uint uploading;
+    uint guest_float;
+    uint native_float;
+    uint has_stencil;
+} p;
+
+uint quantize24(float z) {
+    z = clamp(z, 0.0, 1.0);
+    // round(z * (2^24 - 1)) without rounding the product before the tie test.
+    float scaled = z * 16777216.0;
+    uint whole = uint(scaled);
+    float fraction = scaled - float(whole);
+    if (fraction - 0.5 >= z) return whole + 1u;
+    if (z - 0.5 > fraction) return whole - 1u;
+    return whole;
+}
+uint normalized24Bits(uint d) {
+    // d / 2^24 is exact. For nonzero d, dividing by (2^24 - 1)
+    // instead increases it by just over half to one float ULP.
+    // Multiplying by a rounded reciprocal can overshoot by another ULP.
+    return floatBitsToUint(float(d) * (1.0/16777216.0)) + uint(d != 0u);
+}
+void main() {
+    uint group = gl_GlobalInvocationID.x, first = group * 4u;
+    if (first >= p.count) return;
+    uint s = 0u;
+    if (p.uploading == 0u && p.has_stencil != 0u) s = stencil[group];
+    for (uint j = 0u; j < min(4u, p.count-first); ++j) {
+        uint i = first+j, g = p.guest_float != 0u ? i*2u : i;
+        if (p.uploading != 0u) {
+            uint d = guest[g];
+            uint value = d;
+            if (p.guest_float == 0u) {
+                d >>= 8;
+                value = p.native_float != 0u ? normalized24Bits(d) : d;
+            }
+            depth[i] = value;
+            if (p.has_stencil != 0u) {
+                uint st = guest[g+p.guest_float] & 255u;
+                s |= st << (8u*j);
+            }
+        } else {
+            uint value = depth[i], st = (s >> (8u*j)) & 255u;
+            if (p.guest_float != 0u) {
+                guest[g] = value;
+                guest[g+1u] = st;
+            } else {
+                uint d = p.native_float != 0u ? quantize24(uintBitsToFloat(value)) : value;
+                guest[g] = (d << 8) | st;
+            }
+        }
+    }
+    if (p.uploading != 0u && p.has_stencil != 0u) stencil[group] = s;
+}

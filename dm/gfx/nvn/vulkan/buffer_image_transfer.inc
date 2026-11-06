@@ -27,11 +27,11 @@ static int buffer_image_region(const vtex *v, const p_copy_b2t *c, buffer_image_
     return 1;
 }
 
-static VkDeviceSize upload_rows(uint64_t addr, const buffer_image_layout *l) {
+static VkDeviceSize upload_rows(uint64_t addr, const buffer_image_layout *l, VkDeviceSize align) {
     size_t slice = l->bytes * l->rows, size = slice * l->slices;
-    if (l->span == size) return copy_in(addr, size, 16);
+    if (l->span == size) return copy_in(addr, size, align);
     gw_wait_prior(addr, l->span);
-    VkDeviceSize off = ring_alloc(size, 16);
+    VkDeviceSize off = ring_alloc(size, align);
     for (uint32_t z=0; z<l->slices; ++z) for (size_t y=0; y<l->rows; ++y)
         memcpy(C->ringp + off + z*slice + y*l->bytes,
                (const uint8_t *)(uintptr_t)addr + z*l->image_pitch + y*l->row_pitch, l->bytes);
@@ -54,6 +54,13 @@ static VkDeviceSize upload_rows(uint64_t addr, const buffer_image_layout *l) {
     return off;
 }
 
+#include "packed_depth.inc"
+
+static VkDeviceSize transfer_alignment(const vtex *v) {
+    VkDeviceSize align = g_props.limits.minStorageBufferOffsetAlignment;
+    return v->f.stencil && align > 16 ? align : 16;
+}
+
 static void copy_b2t(const p_copy_b2t *c) {
     if (!c->tex || (vk_skip() & SK_B2T)) return;
     if (g_plog) LOG("plog:  b2t serial %llu fmt %#x %dx%d at %d,%d,%d", (unsigned long long)c->tex->serial, c->tex->d.format, c->r.width, c->r.height, c->r.xoffset, c->r.yoffset, c->r.zoffset);
@@ -63,10 +70,10 @@ static void copy_b2t(const p_copy_b2t *c) {
     if (!buffer_image_region(v, c, &l)) { RED_ONCE(50, "invalid buffer-to-texture region or strides"); return; }
     if (v->f.dec) { RED_ONCE(50, "unsupported buffer-to-texture format %#x", c->tex->d.format); return; }
     pass_end();
-    if (v->f.depth) l.region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    l.region.bufferOffset = upload_rows(c->src, &l);
-    vkCmdCopyBufferToImage(C->cb, C->ring, v->img, VK_IMAGE_LAYOUT_GENERAL, 1, &l.region);
-    barrier_all(C->cb);
+    VkDeviceSize align = transfer_alignment(v);
+    VkDeviceSize off = upload_rows(c->src, &l, align);
+    VkDescriptorBufferInfo guest = {C->ring,off,l.bytes*l.rows*l.slices};
+    buffer_image_transfer(v,l.region,guest,1,align);
 }
 
 static void copy_t2b(const p_copy_b2t *c) {
@@ -76,20 +83,20 @@ static void copy_t2b(const p_copy_b2t *c) {
     if (!v) return;
     buffer_image_layout l;
     if (!buffer_image_region(v, c, &l)) { RED_ONCE(51, "invalid texture-to-buffer region or strides"); return; }
-    if (v->f.dec || v->f.stencil) { RED_ONCE(51, "unsupported texture-to-buffer format %#x", c->tex->d.format); return; }
+    if (v->f.dec) { RED_ONCE(51, "unsupported texture-to-buffer format %#x", c->tex->d.format); return; }
     size_t slice = l.bytes * l.rows, size = slice * l.slices;
-    VkDeviceSize off = ring_alloc(size, 16);
-    l.region.bufferOffset = off;
-    vkCmdCopyImageToBuffer(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, C->ring, 1, &l.region);
-    barrier_all(C->cb);
-    if (l.span == size) buffer_written(c->src, size, C->ring, off, C->ringp + off);
+    VkDeviceSize align = transfer_alignment(v), off = ring_alloc(size, align);
+    VkDescriptorBufferInfo guest = {C->ring,off,size};
+    uint8_t *mapped = C->ringp;
+    buffer_image_transfer(v,l.region,guest,0,align);
+    if (l.span == size) buffer_written(c->src, size, guest.buffer, off, mapped + off);
     else for (uint32_t z=0; z<l.slices; ++z) {
         uint64_t addr = c->src + z*l.image_pitch;
         VkDeviceSize start = off + z*slice;
-        if (l.bytes == l.row_pitch) buffer_written(addr, slice, C->ring, start, C->ringp + start);
+        if (l.bytes == l.row_pitch) buffer_written(addr, slice, guest.buffer, start, mapped + start);
         else for (size_t y=0; y<l.rows; ++y) {
             VkDeviceSize pos = start + y*l.bytes;
-            buffer_written(addr + y*l.row_pitch, l.bytes, C->ring, pos, C->ringp + pos);
+            buffer_written(addr + y*l.row_pitch, l.bytes, guest.buffer, pos, mapped + pos);
         }
     }
 }
