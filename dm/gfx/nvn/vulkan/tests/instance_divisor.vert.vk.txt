@@ -1,0 +1,3 @@
+stage vs
+vin 0 0
+vin 1 0

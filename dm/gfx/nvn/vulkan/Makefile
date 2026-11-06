@@ -71,8 +71,17 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/0000000000000044.spv $(B)/shaders/0000000000000045.spv $(B)/shaders/0000000000000046.spv $(B)/shaders/0000000000000047.spv $(B)/shaders/0000000000000048.spv $(B)/shaders/0000000000000049.spv $(B)/shaders/000000000000004a.spv \
          $(B)/shaders/000000000000004b.spv $(B)/shaders/000000000000004c.spv \
          $(B)/shaders/000000000000004d.spv $(B)/shaders/000000000000004e.spv $(B)/shaders/000000000000004f.spv $(B)/shaders/0000000000000050.spv $(B)/shaders/0000000000000051.spv \
-         $(B)/shaders/0000000000000052.spv $(B)/shaders/0000000000000053.spv $(B)/shaders/0000000000000054.spv $(B)/shaders/0000000000000055.spv
+         $(B)/shaders/0000000000000052.spv $(B)/shaders/0000000000000053.spv $(B)/shaders/0000000000000054.spv $(B)/shaders/0000000000000055.spv \
+         $(B)/shaders/0000000000000056.spv $(B)/shaders/0000000000000057.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
+$(B)/shaders/0000000000000056.spv: tests/instance_divisor.vert tests/instance_divisor.vert.vk.txt
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/instance_divisor.vert.vk.txt $(@:.spv=.vk.txt)
+$(B)/shaders/0000000000000057.spv: tests/instance_divisor.frag
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	echo 'stage ps' > $(@:.spv=.vk.txt)
 $(B)/shaders/0000000000000055.spv: tests/blend_mrt.frag
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
