@@ -1295,7 +1295,7 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Cause:** a BRX's table in c1 stores no length. The decoder read entries until one failed, so a table ran on into the next one; a target of 0 counted as a jump to the start of the program; and it looked only on one path for the `LDC` that loads the table's base, so a base loaded before an if / else join was not found.
 - **Fix:** `FindBrxTargetsAmpere` reads a table one new target per pass, so the next table is known before this one overruns it, and stops at the next known base; an entry of 0 is filler for unused cases. `FindBrxTableAmpere` walks every predecessor and takes the base only when all paths reach the same `LDC`.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 18 `Hoian_UBER` vertex shaders, 5 of them used at boot.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`. `ampere_control_fixture.py` executes a three-way BRX with its actual c1 table, a bounded divergent loop and early returns on Metal and Vulkan. Each lane has separate guarded output words.
 
 ### MUFU.F16
 

@@ -21,6 +21,14 @@ static BOOL check(NSString *directory, NSDictionary *test, id<MTLDevice> device,
     if (!arguments || !output) return NO;
     [args setArgumentBuffer:arguments offset:0];
     [args setBuffer:output offset:0 atIndex:[test[@"metal_slot"] unsignedIntegerValue]];
+    id<MTLBuffer> bank = nil;
+    if (test[@"c1_slot"]) {
+        NSData *constants = [NSData dataWithContentsOfFile:[stem stringByAppendingString:@".c1"]];
+        if (!constants.length) return NO;
+        bank = [device newBufferWithBytes:constants.bytes length:constants.length options:MTLResourceStorageModeShared];
+        if (!bank) return NO;
+        [args setBuffer:bank offset:0 atIndex:[test[@"c1_slot"] unsignedIntegerValue]];
+    }
     uint32_t *words = output.contents;
     if (test[@"initial"]) {
         NSData *initial = [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:test[@"initial"]]];
@@ -33,6 +41,7 @@ static BOOL check(NSString *directory, NSDictionary *test, id<MTLDevice> device,
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:state];
     [enc setBuffer:arguments offset:0 atIndex:0];
+    if (bank) [enc useResource:bank usage:MTLResourceUsageRead];
     [enc useResource:output usage:(MTLResourceUsageRead | MTLResourceUsageWrite)];
     NSArray *local = test[@"local"];
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
