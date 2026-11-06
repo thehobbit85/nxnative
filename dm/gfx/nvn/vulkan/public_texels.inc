@@ -119,42 +119,53 @@ static void transfer_rows(const vtex *v, texel_extent ext, size_t pixels, const 
     }
 }
 
+typedef struct {
+    VkBufferImageCopy copies[2];
+    uint32_t count;
+    size_t bytes, depth_bytes;
+    int stencil;
+} texel_planes;
+
+static texel_planes transfer_planes(const vtex *v, VkBufferImageCopy region, size_t native_bytes) {
+    texel_planes p = {.copies={region},.count=1,.bytes=native_bytes};
+    if (!v->f.stencil) return p;
+    size_t pixels = (size_t)region.imageExtent.width * region.imageExtent.height *
+                    region.imageExtent.depth * region.imageSubresource.layerCount;
+    p.depth_bytes = v->nvn_fmt == NVN_FORMAT_STENCIL8 ? 0 : 4*pixels;
+    p.stencil = v->nvn_fmt != NVN_FORMAT_DEPTH24;
+    p.bytes = p.depth_bytes + (p.stencil ? pixels : 0);
+    p.copies[0].imageSubresource.aspectMask = p.depth_bytes ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (p.depth_bytes && p.stencil) {
+        p.count = 2;
+        p.copies[1] = region;
+        p.copies[1].bufferOffset += p.depth_bytes;
+        p.copies[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+    }
+    return p;
+}
+
 // The public API may be called by a guest worker. One-time commands have
 // their own command pool and use the same ordered VkQueue as submissions.
 // Keep the image registry locked through completion so retirement cannot free it.
 static int gpu_texels(const vtex *v, unsigned level, const NVNcopyRegion *r, const uint8_t *src, uint8_t *dst,
                       size_t row, size_t img, texel_extent ext) {
     if (v->f.dec || v->samples != VK_SAMPLE_COUNT_1_BIT) return 0;
-    size_t pixels = (size_t)r->width * ext.rows * ext.nz;
-    int depth = v->f.stencil && v->nvn_fmt != NVN_FORMAT_STENCIL8;
-    int stencil = v->f.stencil && v->nvn_fmt != NVN_FORMAT_DEPTH24;
-    size_t depth_bytes = depth ? pixels * 4 : 0;
-    size_t size = v->f.stencil ? depth_bytes + (stencil ? pixels : 0) : ext.bytes * ext.rows * ext.nz;
-    VkDeviceMemory mem;
-    void *mapped;
-    VkBuffer buffer = buf_new(size, src ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : VK_BUFFER_USAGE_TRANSFER_DST_BIT, &mem, &mapped);
-    if (src) transfer_rows(v, ext, r->width, src, NULL, row, img, mapped, depth_bytes, stencil);
     VkBufferImageCopy region = {0, 0, 0, {v->aspect, level, ext.volume ? 0 : ext.layer, ext.volume ? 1 : ext.nz},
                                 {r->xoffset, r->yoffset, ext.volume ? (int32_t)ext.layer : 0},
                                 {(uint32_t)r->width, (uint32_t)r->height, ext.volume ? ext.nz : 1}};
-    VkBufferImageCopy copies[2] = {region, region};
-    uint32_t count = 1;
-    if (v->f.stencil) {
-        copies[0].imageSubresource.aspectMask = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT;
-        if (depth && stencil) {
-            copies[1].bufferOffset = depth_bytes;
-            copies[1].imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
-            count = 2;
-        }
-    }
+    texel_planes planes = transfer_planes(v, region, ext.bytes * ext.rows * ext.nz);
+    VkDeviceMemory mem;
+    void *mapped;
+    VkBuffer buffer = buf_new(planes.bytes, src ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : VK_BUFFER_USAGE_TRANSFER_DST_BIT, &mem, &mapped);
+    if (src) transfer_rows(v, ext, r->width, src, NULL, row, img, mapped, planes.depth_bytes, planes.stencil);
     VkCommandBuffer cb = once_begin();
     barrier_all(cb);
     if (src) {
-        vkCmdCopyBufferToImage(cb, buffer, v->img, VK_IMAGE_LAYOUT_GENERAL, count, copies);
+        vkCmdCopyBufferToImage(cb, buffer, v->img, VK_IMAGE_LAYOUT_GENERAL, planes.count, planes.copies);
         barrier_all(cb);
-    } else vkCmdCopyImageToBuffer(cb, v->img, VK_IMAGE_LAYOUT_GENERAL, buffer, count, copies);
+    } else vkCmdCopyImageToBuffer(cb, v->img, VK_IMAGE_LAYOUT_GENERAL, buffer, planes.count, planes.copies);
     once_end(cb);
-    if (dst) transfer_rows(v, ext, r->width, NULL, dst, row, img, mapped, depth_bytes, stencil);
+    if (dst) transfer_rows(v, ext, r->width, NULL, dst, row, img, mapped, planes.depth_bytes, planes.stencil);
     vkUnmapMemory(g_dev, mem);
     vkDestroyBuffer(g_dev, buffer, NULL);
     vkFreeMemory(g_dev, mem, NULL);

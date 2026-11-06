@@ -936,18 +936,27 @@ static void tex_upload(vtex *v, const tex_t *t) {
         uint32_t bx = (w + bw - 1) / bw, by = (h + bh - 1) / bh; size_t pitch = (size_t)bx * bpb, lsz = pitch * by * d;
         for (unsigned ly = 0; ly < v->layers; ly++) {
             size_t out = v->f.dec ? (size_t)w * h * dec_bpp(v->f.dec) * d : lsz;
-            VkDeviceSize o = ring_alloc(out, 16);
-            if (o == VK_WHOLE_SIZE) return;
-            uint8_t *dst = C->ringp + o, *tmp = v->f.dec ? malloc(lsz) : dst;
+            VkBufferImageCopy region = {0, 0, 0, {v->aspect, lv, ly, 1}, {0, 0, 0}, {w, h, d}};
+            texel_planes planes = transfer_planes(v, region, out);
+            VkDeviceSize o = ring_alloc(planes.bytes, 16);
+            uint8_t *dst = C->ringp + o, *tmp = dst;
+            if (v->f.dec || planes.depth_bytes) {
+                tmp = malloc(lsz);
+                if (!tmp) die("Vulkan: cannot allocate texture conversion input");
+            }
+            texel_extent ext = {.bytes=pitch, .rows=by, .nz=d, .layer=ly};
             int rc;
-            if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {
-                texel_extent ext = {.bytes=pitch, .rows=by, .nz=d, .layer=ly};
+            if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))
                 rc = !storage_texels(t, lv, tmp, pitch, pitch * by, ext);
-            } else rc = nvn_deswizzle(&t->d, lv, ly, t->mem, tmp, pitch);
-            if (rc) { RED_ONCE(5, "texture format %#x target %d: deswizzle failed", t->d.format, t->d.target); if (v->f.dec) free(tmp); continue; }
-            if (v->f.dec) { for (uint32_t z = 0; z < d; z++) bc_decode(v->f.dec, tmp + pitch * by * z, pitch, w, h, dst + (size_t)w * h * dec_bpp(v->f.dec) * z); free(tmp); }
-            VkBufferImageCopy c = {o, 0, 0, {v->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, lv, ly, 1}, {0, 0, 0}, {w, h, d}};
-            vkCmdCopyBufferToImage(C->up, C->ring, v->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+            else rc = nvn_deswizzle(&t->d, lv, ly, t->mem, tmp, pitch);
+            if (rc) { RED_ONCE(5, "texture format %#x target %d: deswizzle failed", t->d.format, t->d.target); if (tmp != dst) free(tmp); continue; }
+            if (v->f.dec) for (uint32_t z = 0; z < d; z++)
+                bc_decode(v->f.dec, tmp + pitch * by * z, pitch, w, h, dst + (size_t)w * h * dec_bpp(v->f.dec) * z);
+            else if (planes.depth_bytes)
+                transfer_rows(v, ext, w, tmp, NULL, pitch, pitch * by, dst, planes.depth_bytes, planes.stencil);
+            if (tmp != dst) free(tmp);
+            for (unsigned i=0; i<planes.count; ++i) planes.copies[i].bufferOffset += o;
+            vkCmdCopyBufferToImage(C->up, C->ring, v->img, VK_IMAGE_LAYOUT_GENERAL, planes.count, planes.copies);
         }
     }
     // The upload buffer precedes the draw buffer, but execution order alone does

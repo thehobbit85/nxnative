@@ -238,6 +238,20 @@ static void check_packed_texels(NVNdevice *device, NVNqueue *queue, NVNmemoryPoo
         memset(got,0xc3,size);
         API(nvnTextureReadTexelsStrided)(&tex,NULL,&all,got+3,row,size);
         assert(!memcmp(want,got,size));
+        // A fresh texture can get its first contents from the guest pool,
+        // before any GPU command has written its Vulkan backing.
+        API(nvnTextureFinalize)(&tex);
+        assert(API(nvnTextureInitialize)(&tex,&tb));
+        API(nvnTextureWriteTexelsStrided)(&tex,NULL,&all,want+3,row,size);
+        memset(storage+output,0xc3,size);
+        API(nvnCommandBufferBeginRecording)(&cb);
+        API(nvnCommandBufferSetCopyRowStride)(&cb,row);
+        API(nvnCommandBufferCopyTextureToBuffer)(&cb,&tex,NULL,&all,addr+output+3,0);
+        commands=API(nvnCommandBufferEndRecording)(&cb);
+        API(nvnQueueSubmitCommands)(queue,1,&commands);
+        API(nvnQueueFinish)(queue);
+        for (size_t k=0; k<size; ++k) if (want[k]!=storage[output+k])
+            die("initial packed upload format %#x byte %zu: got %02x expected %02x",formats[i],k,storage[output+k],want[k]);
         API(nvnCommandBufferFinalize)(&cb);
         API(nvnTextureFinalize)(&tex);
     }
