@@ -4,7 +4,7 @@ import struct
 
 from dm.android.tools.spv_capture import Module, instruction
 from dm.android.tools.spv_module import decode, opcode, pointer_operands
-from dm.android.tools import spv_warp_masks
+from dm.android.tools import spv_warp_flow, spv_warp_masks
 
 VOTE_ALL, VOTE_ANY, VOTE_EQUAL = 334, 335, 336
 BALLOT, SHUFFLE = 339, 345
@@ -48,16 +48,12 @@ def _scratch_fits(module, size):
     return words <= 16384 // 4
 
 
-def _qualifies(module, lane, exchanges):
-    # A branch or early return that excludes even one warp would make a
-    # workgroup barrier invalid. Accept single-block functions and callees.
-    seen_label = False
+def _qualifies(module, lane):
     bools = set()
     in_function = False
     for inst in module.code:
         op = opcode(inst)
         if op == 54:
-            seen_label = False
             in_function = True
         elif op == 56:
             in_function = False
@@ -65,10 +61,6 @@ def _qualifies(module, lane, exchanges):
         # the result ID. Only typed constants, undef and function values count.
         if (in_function or op in (1, 41, 42, 46, 48, 49, 52)) and len(inst) > 2 and inst[1] == module.boolean:
             bools.add(inst[2])
-        if op == 248:
-            if exchanges and seen_label:
-                return False
-            seen_label = True
         if lane in pointer_operands(inst) and (op != 61 or inst[3] != lane or inst[1] != module.uint):
             return False
         if op in (73, 74, 75, 332, 5632, 5633):
@@ -175,9 +167,9 @@ def lower(data):
     module = Module(data)
     # A WorkgroupSize built-in takes precedence over LocalSize. Its value
     # may be specialized at pipeline creation, after we allocate the array.
-    if 25 in builtins or set(range(36, 41)).intersection(builtins) or not _qualifies(module, lane, exchanges):
+    if 25 in builtins or set(range(36, 41)).intersection(builtins) or not _qualifies(module, lane):
         return data
-    if exchanges and not _scratch_fits(module, size):
+    if exchanges and (not _scratch_fits(module, size) or not spv_warp_flow.converged(code, COLLECTIVES)):
         return data
     masks = spv_warp_masks.inputs(module, builtins)
     if masks is None:
