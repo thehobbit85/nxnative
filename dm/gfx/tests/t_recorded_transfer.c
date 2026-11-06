@@ -519,6 +519,7 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 #endif
 
 #include "recorded_draw_texture.h"
+#include "recorded_sampler_reduction.h"
 #include "recorded_sparse_texture.h"
 #include "recorded_query_lifetime.h"
 
@@ -670,6 +671,8 @@ int main(void) {
     API(nvnTextureFinalize)(&tex);
     check_subregion_transfers(&device,&queue,&pool,storage);
     check_draw_texture(&device, &queue);
+    check_sampler_reduction(&device, &queue, NVN_FORMAT_R32F);
+    check_sampler_reduction(&device, &queue, NVN_FORMAT_RGBA8);
     check_sparse_textures(&device, &queue);
     check_query_lifetimes(&device,&queue,&qb);
 #ifdef DM_VK_PUBLIC_BINDINGS

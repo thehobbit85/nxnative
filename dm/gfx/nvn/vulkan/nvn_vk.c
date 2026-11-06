@@ -1158,9 +1158,7 @@ static VkSamplerAddressMode wrap(int w) {
     switch (w) { case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT; case 6: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; case 4: case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
                  case 2: case 3: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE; default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; }
 }
-static VkSampler samp_get(int sid) {
-    if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid]) return g_dummy_samp;
-    samp_par p = g_sreg[sid];
+static VkSampler sampler_for(samp_par p) {
     for (int i = 0; i < g_nsc; i++) if (!memcmp(&g_sc[i].p, &p, sizeof p)) return g_sc[i].s;
     VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = p.magf ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -1175,6 +1173,10 @@ static VkSampler samp_get(int sid) {
     VkSampler s; if (vkCreateSampler(g_dev, &si, NULL, &s) != VK_SUCCESS) return g_dummy_samp;
     g_sc = realloc(g_sc, (g_nsc + 1) * sizeof *g_sc); g_sc[g_nsc++] = (scache){p, s};
     return s;
+}
+
+static VkSampler samp_get(int sid) {
+    return sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? sampler_for(g_sreg[sid]) : g_dummy_samp;
 }
 
 // ---------- Shaders and pipelines ----------
