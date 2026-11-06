@@ -327,6 +327,7 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** `nvnCommandBufferFenceSync` unimplemented, every `SyncWait` timed out at once.
 - **Cause:** Pokémon Legends: Z-A fences once per frame from a command buffer and waits on it; Unreal's RHI records the call in its command buffers too.
 - **Fix:** a record (`OP_FENCE_SYNC`) fences the sync at replay with the fence value of the submission segment being encoded, so it signals once everything before it has completed (the replay fences the sync with the submission that reaches it).
+- **Android.** A nested command list can rearm the same fence on each submission. The completion worker publishes pending guest writes before signaling. Finite waits use a deadline on the steady clock, including waits longer than one minute. The public recorder fixture holds writeback in flight to exercise both timeout and reuse.
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (19.3.11; one boot); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (new with Unreal).
 
 ### Submissions from two queues on two threads

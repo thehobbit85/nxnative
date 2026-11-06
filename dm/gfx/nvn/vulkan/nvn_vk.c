@@ -167,7 +167,9 @@ static _Atomic uint64_t g_gpu_ns;
 static ctx_t g_ctx[NCTX]; static ctx_t *C; static int g_ci;
 static _Atomic uint64_t g_fence;
 static uint64_t g_done;
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cv;
+static clockid_t g_cv_clock = CLOCK_REALTIME;
 static int g_pend[NCTX], g_npend;   // contexts submitted and not yet completed, in order (under g_mu)
 
 static uint64_t g_wgen;   // bumped by every in-order write to guest memory (and when the ring changes): the per-submission copies are reused only within one generation
@@ -523,6 +525,13 @@ static void vk_init_(void) {
         if (g_timestamp_mask) VKCHECK(vkCreateQueryPool(g_dev, &qi2, NULL, &c->qp));
     }
     dummies();
+    pthread_condattr_t attr;
+    if (pthread_condattr_init(&attr)) die("Vulkan: cannot initialize completion condition attributes");
+#if defined(_POSIX_CLOCK_SELECTION) && _POSIX_CLOCK_SELECTION >= 0
+    if (!pthread_condattr_setclock(&attr, CLOCK_MONOTONIC)) g_cv_clock = CLOCK_MONOTONIC;
+#endif
+    if (pthread_cond_init(&g_cv, &attr)) die("Vulkan: cannot initialize the completion condition");
+    pthread_condattr_destroy(&attr);
     pthread_t th; if (pthread_create(&th, NULL, completion_thread, NULL)) die("Vulkan: cannot start the completion thread"); pthread_detach(th);
     LOG("vk: %s, Vulkan %u.%u.%u, driver %#x; uint8 indices %s, %s, %s", g_props.deviceName, VK_API_VERSION_MAJOR(g_props.apiVersion), VK_API_VERSION_MINOR(g_props.apiVersion),
         VK_API_VERSION_PATCH(g_props.apiVersion), g_props.driverVersion, g_has_u8 ? "yes" : "no", g_dynrend ? "dynamic rendering" : "render passes (no dynamic rendering)",
@@ -3558,10 +3567,18 @@ uint64_t mtl_sub_commit(void) {
 }
 uint64_t mtl_last_fence(void) { return g_fence; }
 int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
+    if (!fence) return 1;   // no submission yet
     pthread_mutex_lock(&g_mu);
-    if (timeout_ns == UINT64_MAX || timeout_ns > 60ull * 1000000000ull) { while (g_done < fence) pthread_cond_wait(&g_cv, &g_mu); }
-    else {
-        struct timespec t; clock_gettime(CLOCK_REALTIME, &t); uint64_t ns = (uint64_t)t.tv_nsec + timeout_ns; t.tv_sec += (time_t)(ns / 1000000000ull); t.tv_nsec = (long)(ns % 1000000000ull);
+    if (timeout_ns == UINT64_MAX) { while (g_done < fence) pthread_cond_wait(&g_cv, &g_mu); }
+    else if (timeout_ns && g_done < fence) {
+        struct timespec t;
+        clock_gettime(g_cv_clock, &t);
+        // Split before adding: even the largest finite NVN interval fits a
+        // 64-bit time_t, but adding nanoseconds to it directly can wrap.
+        const uint64_t second = 1000000000;
+        uint64_t ns = t.tv_nsec + timeout_ns % second;
+        t.tv_sec += (time_t)(timeout_ns / second + ns / second);
+        t.tv_nsec = (long)(ns % second);
         while (g_done < fence) if (pthread_cond_timedwait(&g_cv, &g_mu, &t)) break;
     }
     int ok = g_done >= fence; pthread_mutex_unlock(&g_mu); return ok;
