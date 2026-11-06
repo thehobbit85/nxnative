@@ -48,10 +48,11 @@ typedef struct {
 // The rectangle's texel-to-pixel ratio is constant. Select its mip footprint
 // once and let the shader combine the actual texels before any averaging.
 static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *tr, draw_texture_params *params) {
-    if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) return sampler_for(p);
+    border_view sampled = sampler_view(v,tr);
+    if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) return sampler_for(p,sampled);
     if (p.aniso > 1 || p.cmp_mode) {
         RED_ONCE(103, "DrawTexture reduction with anisotropy or depth comparison is unavailable");
-        return sampler_for(p);
+        return sampler_for(p,sampled);
     }
     uint32_t levels = v->levels;
     if (tr->has_v && tr->v.set_levels) {
@@ -75,7 +76,7 @@ static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *t
     p.minf = NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST; p.magf = NVN_MAG_FILTER_NEAREST;
     p.reduction = NVN_SAMPLER_REDUCTION_AVERAGE; p.lod_bias = 0;
     p.lod_min = 0; p.lod_max = VK_LOD_CLAMP_NONE;
-    return sampler_for(p);
+    return sampler_for(p,sampled);
 }
 
 static void draw_texture(const p_draw_tex *c) {

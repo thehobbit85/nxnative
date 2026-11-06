@@ -361,6 +361,8 @@ static void *completion_thread(void *a) {
 // ---------- Device ----------
 static int g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
 static int g_logic_op, g_non_solid_fill;
+static uint32_t g_custom_border_limit, g_custom_border_count;
+static int g_border_from_image;
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -426,12 +428,15 @@ static void vk_init_(void) {
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
     int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0, has_calibrated = 0;
     int divisor_ext = 0, divisor_khr = 0, descriptor_indexing = 0;
+    int border_ext = 0, border_swizzle_ext = 0;
     for (uint32_t i = 0; i < ne; i++) {
         has_sc |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME); has_u8 |= !strcmp(ep[i].extensionName, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
         has_dr |= !strcmp(ep[i].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
         has_subgroup_sizes |= !strcmp(ep[i].extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
         has_calibrated |= !strcmp(ep[i].extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
         descriptor_indexing |= !strcmp(ep[i].extensionName, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+        border_ext |= !strcmp(ep[i].extensionName, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+        border_swizzle_ext |= !strcmp(ep[i].extensionName, VK_EXT_BORDER_COLOR_SWIZZLE_EXTENSION_NAME);
         divisor_ext |= ep[i].specVersion >= 3 && !strcmp(ep[i].extensionName,VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
         divisor_khr |= !strcmp(ep[i].extensionName,VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     }
@@ -444,6 +449,8 @@ static void vk_init_(void) {
     VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR div_khr_props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_KHR, props2.pNext};
     if (divisor_ext) props2.pNext=&div_ext_props;
     else if (divisor_khr) props2.pNext=&div_khr_props;
+    VkPhysicalDeviceCustomBorderColorPropertiesEXT border_props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT, props2.pNext};
+    if (border_ext) props2.pNext = &border_props;
     vkGetPhysicalDeviceProperties2(g_pd, &props2);
     VkPhysicalDeviceSubgroupSizeControlFeatures size_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT u8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT};
@@ -454,6 +461,10 @@ static void vk_init_(void) {
     VkPhysicalDeviceShaderDrawParametersFeatures sdp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
     VkPhysicalDeviceDescriptorIndexingFeatures indexing = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
     void *chain = dv < VK_API_VERSION_1_2 && descriptor_indexing ? &indexing : NULL;
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT border_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, chain};
+    if (border_ext) chain = &border_features;
+    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT border_swizzle = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT, chain};
+    if (border_swizzle_ext && border_ext) chain = &border_swizzle;
     // EXT rev 3 guarantees firstInstance + localInstance/divisor. Its KHR
     // successor allows implementations without nonzero firstInstance support.
     const char *div_extension = divisor_ext ? VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME :
@@ -478,7 +489,19 @@ static void vk_init_(void) {
     if (getenv("DM_VK_NO_WIREFRAME")) f2.features.fillModeNonSolid = VK_FALSE;
     g_non_solid_fill = f2.features.fillModeNonSolid;
     f13.robustImageAccess = VK_FALSE;
-    const char *ext[7]; uint32_t next = 0;
+    const char *ext[9]; uint32_t next = 0;
+    if (border_features.customBorderColors && !getenv("DM_VK_NO_CUSTOM_BORDER")) {
+        ext[next++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
+        g_custom_border_limit = border_props.maxCustomBorderColorSamplers;
+    } else {
+        border_features.customBorderColors = border_features.customBorderColorWithoutFormat = VK_FALSE;
+    }
+    if (g_custom_border_limit && border_swizzle.borderColorSwizzleFromImage) {
+        ext[next++] = VK_EXT_BORDER_COLOR_SWIZZLE_EXTENSION_NAME;
+        g_border_from_image = 1;
+    } else {
+        border_swizzle.borderColorSwizzle = border_swizzle.borderColorSwizzleFromImage = VK_FALSE;
+    }
     g_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
         f12.runtimeDescriptorArray && f12.shaderSampledImageArrayNonUniformIndexing :
         indexing.runtimeDescriptorArray && indexing.shaderSampledImageArrayNonUniformIndexing;
@@ -1038,6 +1061,11 @@ static fmt_t view_format(const vtex *v, const view_t *view, int has_view) {
     if (!f.f || f.dec != v->f.dec || (f.dec && f.f != v->f.f)) return v->f;
     return f;
 }
+static void sampled_swizzle(uint8_t swz[4], fmt_t f, const tex_t *t, const view_t *vw, int has_vw) {
+    if (t->set_swz) for (int i = 0; i < 4; i++) swz[i] = (uint8_t)(t->swz >> (3 * i) & 7);
+    if (has_vw && vw->set_swizzle) memcpy(swz, vw->swz, 4);
+    if (f.noalpha) for (int i = 0; i < 4; i++) if (swz[i] == 5) swz[i] = 1;
+}
 static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_vw, int want_type, int purpose) {
     int rt = purpose == VIEW_ATTACHMENT, storage = purpose == VIEW_STORAGE;
     int target = has_vw && vw->set_target ? vw->target : t->d.target;
@@ -1048,11 +1076,7 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
     if (!nly || b0 + nly > v->layers) nly = v->layers - (b0 < v->layers ? b0 : 0);
     fmt_t f = view_format(v, vw, has_vw);
     uint8_t swz[4] = {2, 3, 4, 5};
-    if (!rt && !storage) {
-        if (t->set_swz) for (int i = 0; i < 4; i++) swz[i] = (uint8_t)(t->swz >> (3 * i) & 7);
-        if (has_vw && vw->set_swizzle) memcpy(swz, vw->swz, 4);
-        if (f.noalpha) for (int i = 0; i < 4; i++) if (swz[i] == 5) swz[i] = 1;
-    }
+    if (!rt && !storage) sampled_swizzle(swz, f, t, vw, has_vw);
     VkImageViewType vt;
     if (want_type >= 0) vt = (VkImageViewType)want_type;
     else switch (target) {
@@ -1152,14 +1176,31 @@ void mtl_tex_cpu_written(const tex_t *t) {
 void mtl_prog_release(prog_t *p) { (void)p; }
 
 // Samplers, cached by their parameters
-typedef struct { samp_par p; VkSampler s; } scache;
+#include "../nvn_border.h"
+typedef struct { VkFormat format; int needs_swizzle; } border_view;
+static border_view sampler_view(const vtex *v, const treg_t *tr) {
+    fmt_t f = view_format(v,&tr->v,tr->has_v);
+    border_view result = {f.f};
+    if (!g_border_from_image && (f.noalpha || tr->t.set_swz || (tr->has_v && tr->v.set_swizzle))) {
+        uint8_t swz[] = {2,3,4,5};
+        sampled_swizzle(swz,f,&tr->t,&tr->v,tr->has_v);
+        result.needs_swizzle = !!memcmp(swz,(uint8_t[]){2,3,4,5},4);
+    }
+    return result;
+}
+typedef struct { samp_par p; border_view view; VkSampler s; } scache;
 static scache *g_sc; static int g_nsc;
+static VkClearColorValue clear_value(const float rgba[4], enum clear_type type);
 static VkSamplerAddressMode wrap(int w) {
     switch (w) { case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT; case 6: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; case 4: case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
                  case 2: case 3: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE; default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; }
 }
-static VkSampler sampler_for(samp_par p) {
-    for (int i = 0; i < g_nsc; i++) if (!memcmp(&g_sc[i].p, &p, sizeof p)) return g_sc[i].s;
+static VkSampler sampler_for(samp_par p, border_view view) {
+    int border = p.ws == 4 || p.ws == 5 || p.wt == 4 || p.wt == 5 || p.wr == 4 || p.wr == 5;
+    if (!border) view = (border_view){0};
+    for (int i = 0; i < g_nsc; i++)
+        if (g_sc[i].view.format == view.format && g_sc[i].view.needs_swizzle == view.needs_swizzle &&
+            !memcmp(&g_sc[i].p, &p, sizeof p)) return g_sc[i].s;
     VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = p.magf ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     si.minFilter = p.minf == 1 || p.minf == 3 || p.minf == 5 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -1168,15 +1209,33 @@ static VkSampler sampler_for(samp_par p) {
     si.mipLodBias = p.lod_bias; si.minLod = p.minf >= 2 ? p.lod_min : 0; si.maxLod = p.minf >= 2 ? p.lod_max : 0.25f;
     if (p.aniso > 1) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = p.aniso > 16 ? 16 : p.aniso; }
     if (p.cmp_mode) { si.compareEnable = VK_TRUE; si.compareOp = (VkCompareOp)(p.cmp_func ? p.cmp_func - 1 : 7); }
-    int white = p.border[0] + p.border[1] + p.border[2] > 1.5f, opaque = p.border[3] > 0.5f;
-    si.borderColor = white ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : opaque ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    VkSamplerCustomBorderColorCreateInfoEXT custom = {VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT};
+    if (border) {
+        int stock = nvn_stock_border(p.border);
+        enum clear_type type = clear_color_type(view.format);
+        const VkBorderColor fixed[][3] = {
+            {VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE},
+            {VK_BORDER_COLOR_INT_TRANSPARENT_BLACK,VK_BORDER_COLOR_INT_OPAQUE_BLACK,VK_BORDER_COLOR_INT_OPAQUE_WHITE}};
+        si.borderColor = fixed[type != CLEAR_FLOAT][stock];
+        if (memcmp(p.border, nvn_mtl_border[stock], sizeof p.border)) {
+            if (view.format != VK_FORMAT_UNDEFINED && !view.needs_swizzle && g_custom_border_count < g_custom_border_limit) {
+                custom.format = view.format;
+                custom.customBorderColor = clear_value(p.border,type);
+                si.borderColor = type == CLEAR_FLOAT ? VK_BORDER_COLOR_FLOAT_CUSTOM_EXT : VK_BORDER_COLOR_INT_CUSTOM_EXT;
+                si.pNext = &custom;
+            } else {
+                RED_ONCE(104, "custom border color unavailable for this sampler, using the nearest stock color");
+            }
+        }
+    }
     VkSampler s; if (vkCreateSampler(g_dev, &si, NULL, &s) != VK_SUCCESS) return g_dummy_samp;
-    g_sc = realloc(g_sc, (g_nsc + 1) * sizeof *g_sc); g_sc[g_nsc++] = (scache){p, s};
+    if (si.pNext == &custom) ++g_custom_border_count;
+    g_sc = realloc(g_sc, (g_nsc + 1) * sizeof *g_sc); g_sc[g_nsc++] = (scache){p, view, s};
     return s;
 }
 
-static VkSampler samp_get(int sid) {
-    return sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? sampler_for(g_sreg[sid]) : g_dummy_samp;
+static VkSampler samp_get(int sid, border_view view) {
+    return sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? sampler_for(g_sreg[sid],view) : g_dummy_samp;
 }
 
 // ---------- Shaders and pipelines ----------
@@ -2175,9 +2234,9 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
 }
 #include "uniform_table.inc"
 #include "attachment_feedback.inc"
-static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, int *ok) {
+static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *sampled) {
     VkImageView dummy = sampled_dummy(b->view, b->num);
-    int tid = (int)(h & 0xfffff); *ok = 0;
+    int tid = (int)(h & 0xfffff);
     if (!tid) { g_tex_miss[0]++; return dummy; }
     treg_t tr; vtex *v = registered_texture(tid, &tr);
     if (!tr.ok) { g_tex_miss[1]++; return dummy; }
@@ -2202,7 +2261,7 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, int *ok) {
         tr.v.nlevels = tr.v.nlayers = 1;
     }
     VkImageView view = tex_view(v, &tr.t, &tr.v, tr.has_v, b->view, 0);
-    *ok = view != VK_NULL_HANDLE;
+    if (view && sampled) *sampled = sampler_view(v,&tr);
     if (!view) g_tex_miss[3]++;
     return view ? view : dummy;
 }
@@ -2515,16 +2574,16 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
                 uint32_t count = b->count - first < 32 ? b->count - first : 32;
                 for (uint32_t element = 0; element < count; ++element) {
                     uint64_t handle = descriptor_handle(stage, b, first + element);
-                    int ok = 0;
+                    border_view sampled = {0};
                     if (b->type != BT_SAMP) {
-                        VkImageView view = tex_slot(handle, b, stage, &ok);
+                        VkImageView view = tex_slot(handle, b, stage, b->type == BT_CIS ? &sampled : NULL);
                         if (!view) return VK_NULL_HANDLE;
                         images[element].imageView = view; images[element].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                     }
                     if (b->type != BT_TEX) {
-                        pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20)); pthread_mutex_unlock(&g_rmu);
+                        pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20),sampled); pthread_mutex_unlock(&g_rmu);
                     }
-                    if (b->type == BT_CIS && !ok && b->num) {
+                    if (b->type == BT_CIS && sampled.format == VK_FORMAT_UNDEFINED && b->num) {
                         static VkSampler nearest;
                         if (!nearest) { VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; VKCHECK(vkCreateSampler(g_dev, &si, NULL, &nearest)); }
                         images[element].sampler = nearest;

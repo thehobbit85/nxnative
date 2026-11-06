@@ -1,0 +1,12 @@
+#version 450
+layout(local_size_x=1) in;
+layout(binding=0) uniform isampler2D signedImage;
+layout(binding=1) uniform usampler2D unsignedImage;
+layout(binding=2) uniform sampler2D floatImage;
+layout(binding=3, std430) writeonly buffer Results { ivec4 s; uvec4 u; vec4 f; } result;
+void main() {
+    vec2 outside = vec2(-1.0,0.5);
+    result.s = textureLod(signedImage, outside, 0.0);
+    result.u = textureLod(unsignedImage, outside, 0.0);
+    result.f = textureLod(floatImage, outside, 0.0);
+}
