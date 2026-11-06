@@ -874,18 +874,21 @@ static void garbage_free(uint64_t done) {
 }
 // A view of the image: type and format from the NVN view (or the texture), levels and layers, swizzle (the format's missing alpha, the texture's and the view's swizzles)
 enum { VIEW_SAMPLED, VIEW_ATTACHMENT, VIEW_STORAGE };
+static fmt_t view_format(const vtex *v, const view_t *view, int has_view) {
+    if (!has_view || !view->set_format) return v->f;
+    fmt_t f = fmt_of(view->format);
+    if (!f.f || f.dec != v->f.dec || (f.dec && f.f != v->f.f)) return v->f;
+    return f;
+}
 static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_vw, int want_type, int purpose) {
     int rt = purpose == VIEW_ATTACHMENT, storage = purpose == VIEW_STORAGE;
     int target = has_vw && vw->set_target ? vw->target : t->d.target;
-    int fmtn = has_vw && vw->set_format ? vw->format : t->d.format;
     uint32_t bl = has_vw && vw->set_levels ? vw->base_level : 0, nl = has_vw && vw->set_levels ? vw->nlevels : v->levels - bl;
     uint32_t b0 = has_vw && vw->set_layers ? vw->min_layer : 0, nly = has_vw && vw->set_layers ? vw->nlayers : v->layers - b0;
     if (rt || storage) nl = 1;
     if (!nl || bl + nl > v->levels) nl = v->levels - (bl < v->levels ? bl : 0);
     if (!nly || b0 + nly > v->layers) nly = v->layers - (b0 < v->layers ? b0 : 0);
-    fmt_t f = fmt_of(fmtn);
-    if (!f.f || f.dec != v->f.dec || (f.dec && f.f != v->f.f)) f = v->f;
-    if (f.dec) f.f = v->f.f;
+    fmt_t f = view_format(v, vw, has_vw);
     uint8_t swz[4] = {2, 3, 4, 5};
     if (!rt && !storage) {
         if (t->set_swz) for (int i = 0; i < 4; i++) swz[i] = (uint8_t)(t->swz >> (3 * i) & 7);
@@ -1451,7 +1454,7 @@ static uint32_t g_draw_base_instance;
 static VkBuffer g_dispatch_args;
 static VkDeviceSize g_dispatch_offset;
 static struct {   // the current render targets and the open dynamic rendering; clears that come before the pass's first draw become its load actions (a tiler then never reads the old contents)
-    int n; vtex *ct[8]; VkImageView cv[8]; vtex *dt; VkImageView dv; uint32_t w, h; int open;
+    int n; vtex *ct[8]; VkImageView cv[8]; VkFormat cf[8]; vtex *dt; VkImageView dv; uint32_t w, h; int open;
     uint32_t clv[8], cly[8]; uint8_t cwr[8], cdrawn[8];   // each colour attachment's level and layer, and whether a draw wrote it since its last same-pass snapshot (fb_prepare)
     uint8_t clr_c[8], clr_d, clr_s; VkClearColorValue cc[8]; float cd; uint32_t cs;
 } P;
@@ -1485,6 +1488,13 @@ static void pass_end(void) {
         if (wb) barrier_all(C->cb);
     }
 }
+static void begin_tracked_pass(const rp_desc *d) {
+    VkFramebuffer fb = rp_begin(C->cb, d);
+    if (fb) {
+        if (C->nfb == C->cfb) { C->cfb = C->cfb ? 2 * C->cfb : 256; C->fb = realloc(C->fb, C->cfb * sizeof *C->fb); }
+        C->fb[C->nfb++] = fb;
+    }
+}
 static int pass_begin(void) {
     if (P.open) return 1;
     if (!P.n && !P.dt) {
@@ -1492,15 +1502,14 @@ static int pass_begin(void) {
         P.w = P.h = 1; // Vertex-only work still needs a valid render area.
     }
     rp_desc d = {.n = P.n, .w = P.w, .h = P.h, .layout = VK_IMAGE_LAYOUT_GENERAL};
-    for (int i = 0; i < P.n; i++) { d.cv[i] = P.cv[i]; d.cf[i] = P.ct[i] ? P.ct[i]->f.f : VK_FORMAT_UNDEFINED; d.cl[i] = P.clr_c[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; d.cc[i] = P.cc[i]; if (P.clr_c[i]) P.cdrawn[i] = 1; }
+    for (int i = 0; i < P.n; i++) { d.cv[i] = P.cv[i]; d.cf[i] = P.cf[i]; d.cl[i] = P.clr_c[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; d.cc[i] = P.cc[i]; if (P.clr_c[i]) P.cdrawn[i] = 1; }
     if (P.dt) { d.dv = P.dv; d.df = P.dt->f.f; d.stencil = P.dt->f.stencil; d.dl = P.clr_d ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
                 d.sl = P.clr_s ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; d.dc = (VkClearDepthStencilValue){P.cd, P.cs}; }
     memset(P.clr_c, 0, sizeof P.clr_c); P.clr_d = P.clr_s = 0;
     if (g_plog) { char b[512]; int o = 0; for (int i = 0; i < P.n; i++) o += snprintf(b + o, sizeof b - o, " c%d=%llu/%d%s", i, P.ct[i] ? (unsigned long long)P.ct[i]->serial : 0ull, (int)d.cf[i], d.cl[i] == VK_ATTACHMENT_LOAD_OP_CLEAR ? "/clr" : "");
                   if (P.dt) snprintf(b + o, sizeof b - o, " d=%llu/%d%s%s", (unsigned long long)P.dt->serial, (int)d.df, d.dl == VK_ATTACHMENT_LOAD_OP_CLEAR ? "/clr" : "", d.sl == VK_ATTACHMENT_LOAD_OP_CLEAR ? "/sclr" : "");
                   LOG("plog: pass %ux%u%s", P.w, P.h, b); }
-    VkFramebuffer fb = rp_begin(C->cb, &d); P.open = 1;
-    if (fb) { if (C->nfb == C->cfb) { C->cfb = C->cfb ? 2 * C->cfb : 256; C->fb = realloc(C->fb, C->cfb * sizeof *C->fb); } C->fb[C->nfb++] = fb; }
+    begin_tracked_pass(&d); P.open = 1;
     return 1;
 }
 static void set_rt(const p_set_rt *r) {
@@ -1511,6 +1520,7 @@ static void set_rt(const p_set_rt *r) {
         if (!r->color[i]) continue;
         vtex *v = tex_get(r->color[i], 1); if (!v) continue;
         P.ct[i] = v; P.cv[i] = tex_view(v, r->color[i], &r->cview[i], r->has_cview[i], -1, 1);
+        if (P.cv[i]) P.cf[i] = view_format(v, &r->cview[i], r->has_cview[i]).f;
         uint32_t lv = r->has_cview[i] && r->cview[i].set_levels ? r->cview[i].base_level : 0, w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
         P.clv[i] = lv; P.cly[i] = r->has_cview[i] && r->cview[i].set_layers ? r->cview[i].min_layer : 0; P.cwr[i] = 1;
         if (w < P.w) P.w = w; if (h < P.h) P.h = h;
@@ -2245,7 +2255,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     k.rasterizer_discard = S.rasterizer_discard;
     k.origin_ll = g_queue_origin_ll;
     k.vs = vs; k.fs = fs; k.prim = prim; k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
-    k.nc = P.n; for (int i = 0; i < P.n; i++) { k.cf[i] = P.ct[i] && P.cv[i] ? P.ct[i]->f.f : VK_FORMAT_UNDEFINED; k.blend[i] = S.blend[i]; }
+    k.nc = P.n; memcpy(k.cf, P.cf, sizeof k.cf); memcpy(k.blend, S.blend, P.n * sizeof *k.blend);
     k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.ct[0] ? 1 : 1;
     if (P.dt) { k.df = P.dt->f.f; k.stencil = P.dt->f.stencil; k.ds = S.ds; }
     if (g_plog) LOG("plog:  draw vs %s fs %s n %u depth t%d w%d f%d stencil %d f%d ops %d/%d/%d ref %u vm %#x wm %#x blend %#x mask %#x cull %d", vs->key, fs ? fs->key : "-", dw ? dw->count : di->count,
@@ -2437,20 +2447,6 @@ static void dispatch(const p_dispatch *d) {
     }
     g_stat_draws++;
 }
-static void clear_color(const p_clear_color *c) {
-    if (c->index < 0 || c->index >= P.n || !P.cv[c->index] || !(c->mask & 15)) return;
-    VkClearRect r = {.rect = render_scissor(), .layerCount = 1};
-    if (!r.rect.extent.width || !r.rect.extent.height) return;
-    if ((c->mask & 15) != 15) RED_ONCE(40, "a color clear with a partial channel mask clears every channel");
-    P.cwr[c->index] = 1;
-    if (!P.open && r.rect.extent.width == P.w && r.rect.extent.height == P.h) {
-        P.clr_c[c->index] = 1; memcpy(&P.cc[c->index], c->rgba, 16); return;
-    }
-    if (!pass_begin()) return;
-    VkClearAttachment a = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)c->index, {.color = {{c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]}}}};
-    vkCmdClearAttachments(C->cb, 1, &a, 1, &r);
-    P.cdrawn[c->index] = 1;
-}
 static shader_t *clear_shader(shader_t *shader, const uint32_t *code, size_t bytes) {
     if (!shader->mod) {
         VkShaderModuleCreateInfo info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, bytes, code};
@@ -2466,6 +2462,105 @@ static shader_t *clear_vertex(void) {
     static shader_t shader = {.key = "clear-vertex"};
     return clear_shader(&shader, code, sizeof code);
 }
+static void clear_draw_state(VkPipeline pipeline, VkRect2D rect, float depth) {
+    VkCommandBuffer cb = C->cb;
+    VkViewport viewport = {0, 0, (float)P.w, (float)P.h, depth, depth};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdSetViewport(cb, 0, 1, &viewport);
+    vkCmdSetScissor(cb, 0, 1, &rect);
+    vkCmdSetDepthBias(cb, 0, 0, 0);
+    vkCmdSetBlendConstants(cb, (const float[4]){0});
+}
+enum clear_type { CLEAR_FLOAT, CLEAR_UINT, CLEAR_SINT };
+static enum clear_type clear_color_type(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_R8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R32_UINT:
+        case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R32G32_UINT:
+        case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R32G32B32A32_UINT:
+        case VK_FORMAT_A2B10G10R10_UINT_PACK32: return CLEAR_UINT;
+        case VK_FORMAT_R8_SINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R32_SINT:
+        case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R32G32_SINT:
+        case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32G32B32A32_SINT:
+            return CLEAR_SINT;
+        default: return CLEAR_FLOAT;
+    }
+}
+// NVN records numeric clear values as floats. Convert them according to the
+// attachment view, saturating an integer conversion as in the Metal renderer.
+static VkClearColorValue clear_value(const float rgba[4], enum clear_type type) {
+    VkClearColorValue value;
+    for (int i = 0; i < 4; i++) {
+        float f = rgba[i];
+        if (type == CLEAR_UINT) value.uint32[i] = f > 0 ? (f < 4294967040.f ? (uint32_t)f : UINT32_MAX) : 0;
+        else if (type == CLEAR_SINT) value.int32[i] = isnan(f) ? 0 : f >= 2147483520.f ? INT32_MAX : f <= -2147483648.f ? INT32_MIN : (int32_t)f;
+        else value.float32[i] = f;
+    }
+    return value;
+}
+static shader_t *clear_fragment(enum clear_type type) {
+    static const uint32_t floating[] =
+#include "clear_color.vec4.inc"
+    ;
+    static const uint32_t unsigned_int[] =
+#include "clear_color.uvec4.inc"
+    ;
+    static const uint32_t signed_int[] =
+#include "clear_color.ivec4.inc"
+    ;
+    static shader_t shaders[] = {{.key="clear-float", .stage=1}, {.key="clear-uint", .stage=1}, {.key="clear-sint", .stage=1}};
+    static const struct { const uint32_t *code; size_t bytes; } modules[] = {
+        {floating, sizeof floating}, {unsigned_int, sizeof unsigned_int}, {signed_int, sizeof signed_int}};
+    return clear_shader(&shaders[type], modules[type].code, modules[type].bytes);
+}
+static void clear_masked_color(int slot, unsigned mask, enum clear_type type, VkClearColorValue value, VkRect2D rect) {
+    static VkPipelineLayout layout;
+    if (!layout) {
+        VkPushConstantRange push = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof value};
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &push};
+        VKCHECK(vkCreatePipelineLayout(g_dev, &info, NULL, &layout));
+    }
+    // A single-color pass addresses any MRT slot on devices without
+    // independentBlend. Other attachments retain their stored contents.
+    int separate = P.n != 1;
+    pso_key k = {.vs = clear_vertex(), .fs = clear_fragment(type), .prim = NVN_DRAW_PRIMITIVE_TRIANGLES,
+                 .nc = 1, .cf = {P.cf[slot]}, .chmask = {.mask = mask}};
+    if (!separate && P.dt) { k.df = P.dt->f.f; k.stencil = P.dt->f.stencil; }
+    VkPipeline pipeline = pso_get(&k, layout);
+    if (!pipeline) return;
+    if (separate) {
+        pass_end();
+        rp_desc d = {.n = 1, .cv = {P.cv[slot]}, .cf = {P.cf[slot]}, .cl = {VK_ATTACHMENT_LOAD_OP_LOAD},
+                     .w = P.w, .h = P.h, .layout = VK_IMAGE_LAYOUT_GENERAL};
+        begin_tracked_pass(&d);
+    } else if (!pass_begin()) return;
+    clear_draw_state(pipeline, rect, 0);
+    vkCmdPushConstants(C->cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof value, &value);
+    vkCmdDraw(C->cb, 3, 1, 0, 0);
+    if (separate) {
+        rp_end(C->cb);
+        barrier_all(C->cb);
+        if (P.ct[slot]->linrow && !P.clv[slot] && !P.cly[slot]) { lin_writeback(P.ct[slot]); barrier_all(C->cb); }
+    } else P.cdrawn[slot] = 1;
+}
+static void clear_color(const p_clear_color *c) {
+    if (c->index < 0 || c->index >= P.n || !P.cv[c->index] || !(c->mask & 15)) return;
+    VkClearRect r = {.rect = render_scissor(), .layerCount = 1};
+    if (!r.rect.extent.width || !r.rect.extent.height) return;
+    P.cwr[c->index] = 1;
+    enum clear_type type = clear_color_type(P.cf[c->index]);
+    VkClearColorValue value = clear_value(c->rgba, type);
+    if ((c->mask & 15) != 15) {
+        clear_masked_color(c->index, c->mask & 15, type, value, r.rect);
+        return;
+    }
+    if (!P.open && r.rect.extent.width == P.w && r.rect.extent.height == P.h) {
+        P.clr_c[c->index] = 1; P.cc[c->index] = value; return;
+    }
+    if (!pass_begin()) return;
+    VkClearAttachment a = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)c->index, {.color = value}};
+    vkCmdClearAttachments(C->cb, 1, &a, 1, &r);
+    P.cdrawn[c->index] = 1;
+}
 // vkCmdClearAttachments replaces all eight stencil bits. A rasterized
 // REPLACE applies the guest's write mask and leaves every color target alone.
 static void clear_masked_stencil(const p_clear_ds *c, VkRect2D rect, float depth) {
@@ -2475,22 +2570,17 @@ static void clear_masked_stencil(const p_clear_ds *c, VkRect2D rect, float depth
     static shader_t fragment = {.key = "clear-stencil", .stage = 1};
     pso_key k = {.vs = clear_vertex(), .fs = clear_shader(&fragment, code, sizeof code),
         .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .nc = P.n, .df = P.dt->f.f, .stencil = 1};
-    for (int i = 0; i < P.n; i++) k.cf[i] = P.cv[i] ? P.ct[i]->f.f : VK_FORMAT_UNDEFINED;
+    memcpy(k.cf, P.cf, sizeof k.cf);
     k.ds = (ds_st){.dt = !!c->depth_mask, .dw = !!c->depth_mask, .df = NVN_COMPARE_FUNC_ALWAYS,
         .st = 1, .sf_f = NVN_COMPARE_FUNC_ALWAYS, .sf_b = NVN_COMPARE_FUNC_ALWAYS,
         .zpass_f = NVN_STENCIL_OP_REPLACE, .zpass_b = NVN_STENCIL_OP_REPLACE};
     VkPipeline pipeline = pso_get(&k, layout_get(k.vs, k.fs));
     if (!pipeline || !pass_begin()) return;
     VkCommandBuffer cb = C->cb;
-    VkViewport viewport = {0, 0, (float)P.w, (float)P.h, depth, depth};
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdSetViewport(cb, 0, 1, &viewport);
-    vkCmdSetScissor(cb, 0, 1, &rect);
+    clear_draw_state(pipeline, rect, depth);
     vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
     vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, (uint32_t)c->stencil_mask & 0xff);
     vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, (uint32_t)c->stencil & 0xff);
-    vkCmdSetDepthBias(cb, 0, 0, 0);
-    vkCmdSetBlendConstants(cb, (const float[4]){0});
     vkCmdDraw(cb, 3, 1, 0, 0);
 }
 static void clear_ds(const p_clear_ds *c) {
