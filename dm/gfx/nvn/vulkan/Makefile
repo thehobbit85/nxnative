@@ -328,6 +328,8 @@ $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorde
 
 # The Android SHA implementation is the loader's as well. The driver and ANativeWindow
 # are linked from the NDK. Use the device's Vulkan loader when executing the fixture.
+$(B)/t_present_surface_android: $(B)/t_replay tests/present_surface.inc
+	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) -DDM_VK_TEST_ANDROID_SURFACE $(SRC) -o $@ $(LIBS) -lmediandk
 .PHONY: android-recorder
 android-recorder: RECORDER_CPPFLAGS = -I../../../android/compat
 android-recorder: RECORDER_EXTRA = ../../../android/compat/sha256.c
