@@ -518,6 +518,8 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 #include "../nvn/vulkan/tests/public_buffers.inc"
 #endif
 
+#include "recorded_draw_texture.h"
+
 int main(void) {
     load_bootstrap();
     enum { pool_size = 0x10000, cmd_size = 0x4000, tex_offset = 0x4000, dst_offset = 0x8000,
@@ -665,6 +667,7 @@ int main(void) {
     API(nvnCommandBufferFinalize)(&cb);
     API(nvnTextureFinalize)(&tex);
     check_subregion_transfers(&device,&queue,&pool,storage);
+    check_draw_texture(&device, &queue);
 #ifdef DM_VK_PUBLIC_BINDINGS
     check_linear_transfer(&device, &queue, &pool, storage);
     check_packed_texels(&device, &queue, &pool, storage);

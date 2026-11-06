@@ -43,6 +43,22 @@ static fbsnap_t *fb_cached(int slot) {
     }
     return NULL;
 }
+static vtex *sampled_snapshot(const vtex *v, uint32_t w, uint32_t h, uint32_t levels) {
+    VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+        VK_IMAGE_TYPE_2D, v->f.f, {w,h,1}, levels, 1, v->samples, VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkImage img;
+    if (vkCreateImage(g_dev, &ii, NULL, &img) != VK_SUCCESS) { RED_ONCE(41, "same-pass feedback: snapshot image not created"); return NULL; }
+    vtex *snap = calloc(1, sizeof *snap);
+    if (!snap) die("Vulkan: allocating feedback snapshot");
+    *snap = (vtex){.img=img,.w=w,.h=h,.d=1,.levels=levels,.layers=1,.target=NVN_TEXTURE_TARGET_2D,
+        .f=v->f,.usage=ii.usage,.samples=v->samples,.aspect=VK_IMAGE_ASPECT_COLOR_BIT};
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_dev, img, &mr);
+    snap->blk = img_mem(mr, &snap->m, &snap->moff); snap->msize = mr.size;
+    VKCHECK(vkBindImageMemory(g_dev, img, snap->m, snap->moff));
+    to_general(C->cb, img, snap->aspect);
+    return snap;
+}
 static fbsnap_t *fb_snap_for(vtex *v, int i, fbsnap_t *e, unsigned reserved) {
     uint32_t lv = P.clv[i], ly = P.cly[i], w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
     if (e && !P.cwr[i]) { g_fb_reuses++; return e; }
@@ -53,19 +69,8 @@ static fbsnap_t *fb_snap_for(vtex *v, int i, fbsnap_t *e, unsigned reserved) {
         }
     }
     if (!e) {
-        VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
-            VK_IMAGE_TYPE_2D, v->f.f, {w,h,1}, 1, 1, v->samples, VK_IMAGE_TILING_OPTIMAL,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
-        VkImage img;
-        if (vkCreateImage(g_dev, &ii, NULL, &img) != VK_SUCCESS) { RED_ONCE(41, "same-pass feedback: snapshot image not created"); return NULL; }
-        vtex *snap = calloc(1, sizeof *snap);
-        if (!snap) die("Vulkan: allocating feedback snapshot");
-        *snap = (vtex){.img=img,.w=w,.h=h,.d=1,.levels=1,.layers=1,.target=NVN_TEXTURE_TARGET_2D,
-            .f=v->f,.usage=ii.usage,.samples=v->samples,.aspect=VK_IMAGE_ASPECT_COLOR_BIT};
-        VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_dev, img, &mr);
-        snap->blk = img_mem(mr, &snap->m, &snap->moff); snap->msize = mr.size;
-        VKCHECK(vkBindImageMemory(g_dev, img, snap->m, snap->moff));
-        to_general(C->cb, img, snap->aspect);
+        vtex *snap = sampled_snapshot(v, w, h, 1);
+        if (!snap) return NULL;
         if (g_nfbs < (int)(sizeof g_fbs / sizeof *g_fbs)) e = &g_fbs[g_nfbs++];
         else {
             // At most eight entries are reserved by this draw. Descriptors

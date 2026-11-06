@@ -32,6 +32,7 @@
 #include <android/native_window.h>
 #endif
 #include <vulkan/vulkan.h>
+#include <math.h>
 #include <unistd.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
@@ -3052,6 +3053,7 @@ static int depth_copy_scaled(vtex *s, vtex *d, const p_copy_t2t *c, uint32_t sl,
     return 1;
 }
 #include "image_copy_draw.inc"
+#include "draw_texture.inc"
 static VkOffset3D copy_end(VkOffset3D start, VkExtent3D size) {
     return (VkOffset3D){start.x+(int32_t)size.width,start.y+(int32_t)size.height,start.z+(int32_t)size.depth};
 }
@@ -3373,6 +3375,7 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_CLEAR_COLOR: if (!conditional_skip) clear_color((const p_clear_color *)a); break;
             case OP_CLEAR_DS: if (!conditional_skip) clear_ds((const p_clear_ds *)a); break;
             case OP_MULTI_DRAW: if (!conditional_skip) draw_multi((const p_multi_draw *)a); break;
+            case OP_DRAW_TEX: if (!conditional_skip) draw_texture((const p_draw_tex *)a); break;
             case OP_DRAW: { p_draw t; if (!conditional_skip) draw(draw_rec(a, h.size, &t), NULL); break; }
             case OP_DRAW_IDX: { p_draw_idx t; if (!conditional_skip) draw(NULL, draw_idx_rec(a, h.size, &t)); break; }
             case OP_DISPATCH: dispatch((const p_dispatch *)a); break;
