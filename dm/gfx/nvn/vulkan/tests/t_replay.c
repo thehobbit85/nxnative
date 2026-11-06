@@ -722,6 +722,9 @@ static void scissored_attachment_clears(void) {
     RECORD(OP_SCISSOR, p_scissor, .x = 12, .y = 0, .w = 2, .h = 8);
     RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 1, .mask = 15, .rgba = {0,0,0,0});
     RECORD(OP_CLEAR_DS, p_clear_ds, .depth = 0, .depth_mask = 1);
+    RECORD(OP_SCISSOR, p_scissor, .x = 1, .y = 2, .w = 0, .h = 3);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 0, .mask = 15, .rgba = {0,0,0,0});
+    RECORD(OP_CLEAR_DS, p_clear_ds, .depth = 0, .depth_mask = 1);
     RECORD(OP_SCISSOR, p_scissor, .x = 0, .y = 0, .w = 8, .h = 8);
     RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 0, .mask = 0, .rgba = {0,0,0,0});
     for (int i = 0; i < 2; ++i) {
@@ -1016,11 +1019,19 @@ static void graphics_storage(void) {
         mtl_set_origin_lower_left(split); mtl_set_queue_origin_lower_left(split);
         uint32_t vertices[5]={0xcafebabe,10,10,10,0xcafebabe}, fragments[66], vertex_result[3]={0}, fragment_result[64]={0};
         for(int i=0;i<66;i++) fragments[i]=i==0||i==65?0xcafebabe:20;
-        uint8_t pixels[8*8*4]={0};list_t list={0};
+        uint8_t pixels[8*8*4]={0}, discarded[8*8*4]={0};list_t list={0};
         RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
+        RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={0,0,1,1});
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&storage_program,.stages=3);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)(vertices+1),.size=12);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=1,.index=0,.addr=(uintptr_t)(fragments+1),.size=256);
+        RECORD(OP_RAST_DISCARD,p_rast_discard,.on=1);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)discarded,.r={.width=8,.height=8,.depth=1});
+        RECORD(OP_SET_RT,p_set_rt,.n=0);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_RAST_DISCARD,p_rast_discard,.on=0);
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
         // Both clipped-away draws must still execute every vertex invocation.
         const p_scissor clipped[] = {{2,2,0,3}, {12,1,4,3}};
         for (unsigned i=0; i<sizeof clipped/sizeof *clipped; ++i) {
@@ -1044,9 +1055,10 @@ static void graphics_storage(void) {
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)fragment_result,.size=sizeof fragment_result);
         RECORD(OP_DISPATCH,p_dispatch,.x=64,.y=1,.z=1);
         put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
-        for(int i=0;i<3;i++) if(vertices[i+1]!=15||vertex_result[i]!=1015) {
-            fprintf(stderr,"graphics storage split%d vertex%d: %u/%u expected 15/1015\n",split,i,vertices[i+1],vertex_result[i]);abort();
+        for(int i=0;i<3;i++) if(vertices[i+1]!=17||vertex_result[i]!=1017) {
+            fprintf(stderr,"graphics storage split%d vertex%d: %u/%u expected 17/1017\n",split,i,vertices[i+1],vertex_result[i]);abort();
         }
+        for(int i=0;i<64;i++) assert(!memcmp(discarded+4*i,(uint8_t[]){0,0,255,255},4));
         for(int i=0;i<64;i++) assert(fragments[i+1]==23 && fragment_result[i]==1023 && !memcmp(pixels+4*i,(uint8_t[]){0,255,0,255},4));
         assert(vertices[0]==0xcafebabe&&vertices[4]==0xcafebabe&&fragments[0]==0xcafebabe&&fragments[65]==0xcafebabe);
         mtl_queue_forget(0xb100+split);

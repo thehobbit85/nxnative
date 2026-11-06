@@ -1439,7 +1439,7 @@ static struct {
     p_bind_buf ubo[6][16], ssbo[6][16];
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
-    p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc;
+    p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc, rasterizer_discard;
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
     float blend_color[4]; int64_t copy_stride, copy_img_stride;
     int tex_base, samp_base;
@@ -1487,7 +1487,10 @@ static void pass_end(void) {
 }
 static int pass_begin(void) {
     if (P.open) return 1;
-    if (!P.n && !P.dt) return 0;
+    if (!P.n && !P.dt) {
+        if (!S.rasterizer_discard) return 0;
+        P.w = P.h = 1; // Vertex-only work still needs a valid render area.
+    }
     rp_desc d = {.n = P.n, .w = P.w, .h = P.h, .layout = VK_IMAGE_LAYOUT_GENERAL};
     for (int i = 0; i < P.n; i++) { d.cv[i] = P.cv[i]; d.cf[i] = P.ct[i] ? P.ct[i]->f.f : VK_FORMAT_UNDEFINED; d.cl[i] = P.clr_c[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; d.cc[i] = P.cc[i]; if (P.clr_c[i]) P.cdrawn[i] = 1; }
     if (P.dt) { d.dv = P.dv; d.df = P.dt->f.f; d.stencil = P.dt->f.stencil; d.dl = P.clr_d ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -1525,7 +1528,7 @@ typedef struct {
     shader_t *vs, *fs; int prim;
     va_st attr[16]; int nattr; vs_st stream[16]; int nstream;
     blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples;
-    VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll;
+    VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll, rasterizer_discard;
 } pso_key;
 typedef struct { pso_key k; uint64_t h; VkPipeline p; } pso_ent;
 static pso_ent *g_pso; static int g_npso, g_cpso;
@@ -1608,6 +1611,7 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0, TOPO[k->prim < 15 ? k->prim : 4], VK_FALSE};
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL};
     VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.rasterizerDiscardEnable = k->rasterizer_discard;
     rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = (VkCullModeFlags)k->poly.cull; rs.frontFace = k->poly.front ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     if (k->origin_ll) rs.frontFace = rs.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     rs.depthBiasEnable = k->poly.offset_en != 0; rs.lineWidth = 1;
@@ -2198,6 +2202,7 @@ static uint64_t g_stat_draws, g_stat_skip, g_skip_why[8];   // why: 0 no program
 #define SKIP(w) do { g_stat_skip++; g_skip_why[w]++; return; } while (0)
 static int draw_begin(void) {
     if (!pass_begin()) return 0;
+    if (S.rasterizer_discard) return 1;
     for (int a = 0; a < P.n; a++) if (S.chmask.mask >> (4 * a) & 0xf) P.cwr[a] = P.cdrawn[a] = 1;
     return 1;
 }
@@ -2216,7 +2221,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
     if (!S.bst[0]) SKIP(0);
     shader_t *vs = NULL, *fs = NULL;
-    for (int st = 0; st < 2; st++) {   // the vertex shader of the program bound to the vertex stage, the fragment shader of the one bound to the fragment stage (cached by program and serial)
+    for (int st = 0; st < (S.rasterizer_discard ? 1 : 2); st++) {   // the vertex shader of the program bound to the vertex stage, the fragment shader of the one bound to the fragment stage (cached by program and serial)
         const prog_t *p = S.bst[st]; if (!p) continue;
         static struct { const prog_t *p; uint64_t ser; shader_t *sh[2]; } pc[1024];
         unsigned h = (unsigned)(((uintptr_t)p >> 4) ^ p->serial) % 1024;
@@ -2237,6 +2242,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP || prim == NVN_DRAW_PRIMITIVE_PATCHES) { RED_ONCE(31, "primitive %d not implemented yet", prim); SKIP(4); }
     if (!prepare_storage(&vs, &fs)) SKIP(6);
     pso_key k; memset(&k, 0, sizeof k);
+    k.rasterizer_discard = S.rasterizer_discard;
     k.origin_ll = g_queue_origin_ll;
     k.vs = vs; k.fs = fs; k.prim = prim; k.nattr = S.nattr; memcpy(k.attr, S.attr, sizeof k.attr); k.nstream = S.nstream; memcpy(k.stream, S.stream, sizeof k.stream);
     k.nc = P.n; for (int i = 0; i < P.n; i++) { k.cf[i] = P.ct[i] && P.cv[i] ? P.ct[i]->f.f : VK_FORMAT_UNDEFINED; k.blend[i] = S.blend[i]; }
@@ -2784,6 +2790,7 @@ static void mtl_exec_(const uint8_t *p) {
             }
             case OP_STENCIL: { const p_stencil *b = (const p_stencil *)a; for (int f = 0; f < 2; f++) if (b->face & (1 << f)) { if (b->which == 0) S.st_vmask[f] = b->value_mask; else if (b->which == 1) S.st_wmask[f] = b->mask; else S.st_ref[f] = b->ref; } break; }
             case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
+            case OP_RAST_DISCARD: S.rasterizer_discard = ((const p_rast_discard *)a)->on != 0; break;
             case OP_VIEWPORTS: { const p_viewports *b = (const p_viewports *)a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
             case OP_DEPTH_RANGE: { const p_depth_range *b = (const p_depth_range *)a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
             case OP_PUSH_CONST: {
