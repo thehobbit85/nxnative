@@ -4,6 +4,7 @@ import struct
 
 from dm.android.tools.spv_capture import Module, instruction
 from dm.android.tools.spv_module import decode, opcode, pointer_operands
+from dm.android.tools import spv_warp_masks
 
 VOTE_ALL, VOTE_ANY, VOTE_EQUAL = 334, 335, 336
 BALLOT, SHUFFLE = 339, 345
@@ -21,7 +22,7 @@ def _workgroup_size(code):
     return size if size <= 1024 else 0
 
 
-def _qualifies(module, lane):
+def _qualifies(module, lane, exchanges):
     # A branch or early return that excludes even one warp would make a
     # workgroup barrier invalid. Accept single-block functions and callees.
     seen_label = False
@@ -39,14 +40,23 @@ def _qualifies(module, lane):
         if (in_function or op in (1, 41, 42, 46, 48, 49, 52)) and len(inst) > 2 and inst[1] == module.boolean:
             bools.add(inst[2])
         if op == 248:
-            if seen_label:
+            if exchanges and seen_label:
                 return False
             seen_label = True
         if lane in pointer_operands(inst) and (op != 61 or inst[3] != lane or inst[1] != module.uint):
             return False
-        if op == 59 and inst[3] == 4:
+        if exchanges and op == 59 and inst[3] == 4:
             # Preserve the guest's shared-memory budget. With no other
             # Workgroup allocation, our scratch occupies at most 4 KiB.
+            return False
+        if op in (73, 74, 75, 332, 5632, 5633):
+            # Built-ins and other decorations can be applied indirectly to
+            # multiple IDs. ID- and string-valued annotations can also refer
+            # to removed variables. Only ordinary decorations are rewritten.
+            return False
+        scopes = inst[1:3] if op == 224 else inst[1:2] if op == 225 else ()
+        if any(module.constants.get(scope) == 3 for scope in scopes):
+            # A subgroup barrier still synchronizes physical lanes.
             return False
         if 333 <= op <= 366:
             if op not in COLLECTIVES or module.constants.get(inst[3]) != 3:
@@ -128,18 +138,25 @@ class _Exchange:
 
 def lower(data):
     _, code = decode(data)
-    if not any(opcode(inst) in COLLECTIVES for inst in code):
+    builtin_pairs = [(inst[3], inst[1]) for inst in code if opcode(inst) == 71 and inst[2] == 11]
+    builtins = dict(builtin_pairs)
+    lane = builtins.get(41)
+    exchanges = any(opcode(inst) in COLLECTIVES for inst in code)
+    if not exchanges and lane is None and not spv_warp_masks.MASKS.intersection(builtins):
+        return data
+    if len(builtins) != len(builtin_pairs):
+        # A second, unused input variable may legally name the same built-in.
         return data
     size = _workgroup_size(code)
     if not size:
         return data
     module = Module(data)
-    builtins = {inst[3]: inst[1] for inst in code if opcode(inst) == 71 and inst[2] == 11}
-    lane = builtins.get(41)  # SubgroupLocalInvocationId
     # A WorkgroupSize built-in takes precedence over LocalSize. Its value
     # may be specialized at pipeline creation, after we allocate the array.
-    other_subgroup_inputs = set(range(36, 41)) | set(range(4416, 4421))
-    if 25 in builtins or other_subgroup_inputs.intersection(builtins) or not _qualifies(module, lane):
+    if 25 in builtins or set(range(36, 41)).intersection(builtins) or not _qualifies(module, lane, exchanges):
+        return data
+    masks = spv_warp_masks.inputs(module, builtins)
+    if masks is None:
         return data
 
     index = builtins.get(29, lane)
@@ -149,7 +166,7 @@ def lower(data):
     if index is None:
         index = module.variable(module.uint, 1)
         module.decorate(index, 11, 29)
-    exchange = _Exchange(module, size, index)
+    exchange = _Exchange(module, size, index) if exchanges else None
     output = []
     for inst in code:
         op = opcode(inst)
@@ -161,15 +178,19 @@ def lower(data):
             continue
         if index != lane and ((op in (5, 71) and inst[1] == lane) or (op == 59 and inst[2] == lane)):
             continue
+        if masks and ((op in (5, 71) and inst[1] in masks) or (op in (59, 65, 66) and inst[2] in masks)):
+            continue
         if op == 15:
             # A declared but previously unused index might be absent.
             end = next(i + 1 for i in range(3, len(inst)) if inst[i] < 0x01000000)
-            interfaces = [key for key in inst[end:] if key not in (lane, index)]
+            interfaces = [key for key in inst[end:] if key not in (lane, index) and key not in masks]
             output.append(instruction(15, *inst[1:end], *interfaces, index))
         elif op == 61 and inst[3] == lane:
             linear = module.value(output, 61, module.uint, index)
             output.append(instruction(199, module.uint, inst[2], linear, module.const(31)))
-        elif op in COLLECTIVES:
+        elif op == 61 and inst[3] in masks:
+            spv_warp_masks.emit(module, output, inst, index, *masks[inst[3]])
+        elif op in COLLECTIVES and exchange is not None:
             exchange.emit(output, inst)
         else:
             output.append(inst)
