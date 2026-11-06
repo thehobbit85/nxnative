@@ -52,6 +52,9 @@ static const void *flushed_storage;
 // The raw replay fixture has no shared recorder or sparse guest page tables.
 int nvn_ft_tracked(uint64_t serial) { (void)serial; return 0; }
 int nvn_sparse_pool(const void *pool) { (void)pool; return 0; }
+uint64_t nvn_sparse_gen(void) { abort(); } // Sparse paths are tested with the real public recorder.
+int nvn_sparse_since(const void *p, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) { abort(); }
+void nvn_sparse_protect(const void *p, uint64_t a, uint64_t n) { abort(); }
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t addr, uint64_t size) { abort(); }
 int nvn_flushed(const void *p, uint64_t n) { (void)n; return p == flushed_storage; }
 int nvn_dpool_base(const void *pool, int texture) {

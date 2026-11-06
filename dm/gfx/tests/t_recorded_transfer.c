@@ -519,6 +519,7 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 #endif
 
 #include "recorded_draw_texture.h"
+#include "recorded_sparse_texture.h"
 
 int main(void) {
     load_bootstrap();
@@ -668,6 +669,7 @@ int main(void) {
     API(nvnTextureFinalize)(&tex);
     check_subregion_transfers(&device,&queue,&pool,storage);
     check_draw_texture(&device, &queue);
+    check_sparse_textures(&device, &queue);
 #ifdef DM_VK_PUBLIC_BINDINGS
     check_linear_transfer(&device, &queue, &pool, storage);
     check_packed_texels(&device, &queue, &pool, storage);
