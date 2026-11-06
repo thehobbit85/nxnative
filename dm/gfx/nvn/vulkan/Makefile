@@ -16,7 +16,7 @@ $(B)/t_replay: ../../tests/packed_texel_corpus.h ../../tests/dlss_spatial_corpus
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
 include clear_shaders.mk
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS) transform_feedback.inc feedback_gather.h render_condition.h visibility.h uniform_table.inc attachment_feedback.inc buffer_image_transfer.inc stored_transfer.inc image_copy_draw.inc temporal_upscale.inc draw_texture.inc packed_depth.inc public_texels.inc sparse_upload.inc primitive_replay.h ../nvn_primitive.h
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: $(CLEAR_HEADERS) transform_feedback.inc feedback_gather.h render_condition.h visibility.h uniform_table.inc attachment_feedback.inc buffer_image_transfer.inc stored_transfer.inc window_draw.inc image_copy_draw.inc temporal_upscale.inc draw_texture.inc packed_depth.inc public_texels.inc sparse_upload.inc primitive_replay.h ../nvn_primitive.h
 CPPFLAGS += -I$(CLEAR_GEN)
 .PHONY: geometry-topology-fixture
 geometry-topology-fixture: $(B)/t_geometry_topology $(B)/topology.spv

@@ -19,6 +19,12 @@ void main() {
     // Linear sampling can also be unavailable for an otherwise sampleable
     // format. Fetch four texels and interpolate in the source's numeric space.
     vec2 centered = p - 0.5;
+    // VI stretches only the valid part of a window texture. Its first and
+    // last texel centers are the filter limits, including along mirrored axes.
+    if (blit.linear == 2) {
+        ivec2 end = blit.source.xy + blit.source.zw;
+        centered = clamp(centered, vec2(min(blit.source.xy,end)), vec2(max(blit.source.xy,end)-1));
+    }
     ivec2 base = ivec2(floor(centered));
     ivec2 a = clamp(base,ivec2(0),hi), b = clamp(base+1,ivec2(0),hi);
     vec2 f = fract(centered);
