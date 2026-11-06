@@ -264,6 +264,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 
 - H.264 (type 1) into the client's NVN texture (output 3 = RGBA, mode 2), with AAC 5.1 sound (type 4, PCM16). VideoToolbox decodes to BGRA for that mode (`mavc_set_rgba`), and AAC goes through AudioToolbox's converter with an MPEG-4 ES descriptor built from the AudioSpecificConfig in `csd-0` (as FFmpeg's AudioToolbox decoder does). Found on [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md); its end-of-stream packets and decoder deletes are in [End-of-stream packets with no data, and deleted decoders](#end-of-stream-packets-with-no-data-and-deleted-decoders).
 
+### Android AAC channel order in guest buffers
+
+- **Symptom:** the guest reads the centre or surround channel at a different PCM offset on Android and Mac. An eight-channel stream configured by rate and count alone can fail to open on Android.
+- **Cause:** MediaCodec and AudioToolbox return different interleaved speaker orders for multichannel AAC. The guest's `movie::Buffer` carries samples and a channel count, without a speaker mask. Also, MPEG-4 AudioSpecificConfig encodes an eight-channel layout with configuration 7.
+- **Fix:** use the MPEG configuration when constructing a missing AudioSpecificConfig. Map MediaCodec's standard multichannel outputs to the guest order at the point where decoded PCM is copied. The mapping checks the configuration and output count, and the reported Android layout for eight channels.
+- **Found on:** synthetic AAC-LC streams on the ARM64 API 35 emulator and Mac AudioToolbox. `dm/android/tests/movie_audio_layouts.py` compares a distinct tone per speaker for the seven standard configurations. The guest test drains EOS with all 32 slots held.
+
 ### Vorbis movie sound
 
 - Movie sound in [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0): the decoder is asked for type 5 (Vorbis) with output format 1 (PCM16); see the other entries in this file and `hle_movie.c`.

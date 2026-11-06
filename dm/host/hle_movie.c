@@ -98,7 +98,7 @@ typedef struct {
     int16_t *hold; size_t hold_n, hold_cap; int vb_prev;   // decoded samples (interleaved values) not handed out yet, and the last packet's blocksize, 0 at a stream's start (md_vorbis)
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
 #ifdef __ANDROID__
-    media_stream aac; struct pcm_chunk *pcm_first, *pcm_last;
+    media_stream aac; struct pcm_chunk *pcm_first, *pcm_last; int aac_channel_config;
     int avc_color, avc_slot_color[MD_NOUT]; // matrix/range returned with each decoded output, guarded by mu
 #else
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
@@ -409,7 +409,11 @@ static int md_asc(mdec_t *d, uint8_t asc[64]) {
         if (fi < 13 && d->rate <= 0) d->rate = rates[fi]; if (cc && cc < 8 && d->ch <= 0) d->ch = cc == 7 ? 8 : cc;
     }
     if (d->rate <= 0) d->rate = 48000; if (d->ch <= 0) d->ch = 2;
-    if (!an) { int fi = 3; for (int i = 0; i < 13; i++) if (rates[i] == d->rate) fi = i; asc[0] = (uint8_t)(2 << 3 | fi >> 1); asc[1] = (uint8_t)((fi & 1) << 7 | (d->ch & 15) << 3); an = 2; }
+    if (!an) {
+        int fi = 3; for (int i = 0; i < 13; i++) if (rates[i] == d->rate) fi = i;
+        int cc = d->ch == 8 ? 7 : d->ch; // eight speakers have channelConfiguration 7, the inverse of the read above
+        asc[0] = (uint8_t)(2 << 3 | fi >> 1); asc[1] = (uint8_t)((fi & 1) << 7 | (cc & 15) << 3); an = 2;
+    }
     return an;
 }
 #ifdef __ANDROID__
