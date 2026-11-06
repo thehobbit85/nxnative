@@ -127,6 +127,37 @@ void main() {
                 if not portable:
                     self.assertEqual(result, raw)
 
+    @unittest.skipUnless(shutil.which('glslc') and shutil.which('spirv-opt'), 'requires GLSL compiler and optimizer')
+    def test_sparse_votes_after_an_early_return_or_inside_a_branch(self):
+        template = """#version 450
+#extension GL_KHR_shader_subgroup_vote : require
+layout(local_size_x=48) in;
+layout(set=0,binding=0,std430) buffer Data { uint words[]; };
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    bool activeLane = (lane & 4) == 0;
+    bool value = false;
+    BODY
+    words[lane] = uint(value);
+}
+"""
+        cases = [
+            ('if (activeLane) { value = subgroupAllEqual(lane < 19); }', True),
+            ('if (!activeLane) return; value = subgroupAny(lane < 19);', True),
+            ('if (!activeLane) return; value = subgroupAny(words[lane] == 1);', False),
+            ('if (activeLane) { value = subgroupAll(atomicAdd(words[lane], 1) == 0); }', False),
+        ]
+        for body, can_move in cases:
+            with self.subTest(body=body):
+                src = template.replace('BODY', body).encode()
+                raw = subprocess.check_output(['glslc', '--target-env=vulkan1.1', '-fshader-stage=comp', '-', '-o', '-'], input=src)
+                result = spv_warp.lower(raw, shutil.which('spirv-opt'))
+                subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=result, check=True)
+                ops = set(map(opcode, decode(result)[1]))
+                self.assertEqual(224 in ops and ops.isdisjoint((334, 335, 336)), can_move)
+                if not can_move:
+                    self.assertEqual(result, raw)
+
     def test_collective_after_merge_or_before_return_is_converged(self):
         branch = assembly(branch=True)
         exchange = '%value = OpGroupNonUniformShuffle %uint %scope %id %one\n'
