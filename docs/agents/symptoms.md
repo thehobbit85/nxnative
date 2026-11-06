@@ -1080,6 +1080,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - font strings lose their first glyph or show clipped characters despite a complete, correctly uploaded atlas. Instanced geometry can also disappear. → [Draw parameters on a Vulkan device without the optional feature](../reference/shaders.md#draw-parameters-on-a-vulkan-device-without-the-optional-feature)
 - a compact Maxwell texture instruction returns `0x6408` for the alpha value 1032.75 on Android; the same Apple instruction and a CPU binary16 conversion return `0x6409`. → [Android half-register packing rounds differently from Metal](../reference/shaders.md#android-half-register-packing-rounds-differently-from-metal)
 - Vulkan shader validation fails on `OpImageRead` with “Capability StorageImageReadWithoutFormat is required”, or on the declaration of an image such as `Rg32ui`. → [Vulkan export rejects a storage-image read or extended format](../reference/shaders.md#vulkan-export-rejects-a-storage-image-read-or-extended-format)
+- a Maxwell indexed shuffle that selects lane zero returns the value of invocation 4 instead of invocation 0 on an Android Vulkan driver with four lanes per subgroup. → [Compute shuffles return data from the wrong group of threads on Android](../reference/shaders.md#compute-shuffles-return-data-from-the-wrong-group-of-threads-on-android)
 
 ## Cheats on a Switch
 
