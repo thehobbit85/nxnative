@@ -91,6 +91,39 @@ class ComputeWarp(unittest.TestCase):
                 raw = self.module(**{option: True})
                 self.assertEqual(spv_warp.lower(raw), raw)
 
+    def test_collective_after_merge_or_before_return_is_converged(self):
+        branch = assembly(branch=True)
+        exchange = '%value = OpGroupNonUniformShuffle %uint %scope %id %one\n'
+        for anchor in ('%merge = OpLabel\n', '%id = OpLoad %uint %lane\n'):
+            source = branch.replace(exchange, '').replace(anchor, anchor + exchange)
+            with self.subTest(anchor=anchor):
+                raw = self.assemble(source)
+                result = spv_warp.lower(raw)
+                self.assertNotEqual(raw, result)
+                subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=result, check=True)
+        # An early return lets part of the group bypass the post-merge barrier.
+        raw = self.assemble(branch.replace(exchange, '').replace('OpBranch %merge', 'OpReturn')
+                            .replace('%merge = OpLabel\n', '%merge = OpLabel\n' + exchange))
+        self.assertEqual(spv_warp.lower(raw), raw)
+
+    def test_collective_helper_requires_a_converged_call_site(self):
+        source = assembly(branch=True)
+        exchange = '%value = OpGroupNonUniformShuffle %uint %scope %id %one'
+        helper = '%helper = OpFunction %void None %fn\n%h = OpLabel\n' + exchange.replace('%id', '%one') + '\nOpReturn\nOpFunctionEnd\n'
+        call = '%call = OpFunctionCall %void %helper'
+        raw = self.assemble(source.replace(exchange, call) + helper)
+        self.assertEqual(spv_warp.lower(raw), raw)
+        raw = self.assemble(source.replace(exchange, '').replace('OpReturn', call + '\nOpReturn') + helper)
+        result = spv_warp.lower(raw)
+        self.assertNotEqual(result, raw)
+        subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', '-'], input=result, check=True)
+
+    def test_variable_trip_count_loop_with_exchange_keeps_native_path(self):
+        raw = self.assemble(assembly().replace('%value =', 'OpBranch %head\n%head = OpLabel\n%more = OpIEqual %bool %id %one\n'
+            'OpLoopMerge %end %cont None\nOpBranchConditional %more %body %end\n%body = OpLabel\n%value =')
+            .replace('OpReturn', 'OpBranch %cont\n%cont = OpLabel\nOpBranch %head\n%end = OpLabel\nOpReturn'))
+        self.assertEqual(spv_warp.lower(raw), raw)
+
     def test_shared_words_fit_within_the_vulkan_minimum(self):
         template = assembly(shared=True).replace('%wg = OpTypePointer Workgroup %uint',
             '%count = OpConstant %uint COUNT\n%words = OpTypeArray %uint %count\n%wg = OpTypePointer Workgroup %words')
