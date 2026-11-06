@@ -100,6 +100,12 @@ class Packaging(unittest.TestCase):
             with zipfile.ZipFile(apk) as archive:
                 self.assertEqual(archive.read('assets/web-shim.js'), shim)
 
+    def test_upscaler_license_ships_inside_apk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            apk = self.package_with_fake_sdk(Path(tmp), b'game')
+            with zipfile.ZipFile(apk) as archive:
+                self.assertEqual(archive.read('assets/licenses/sgsr2.txt'), pack.SGSR_LICENSE.read_bytes())
+
     def test_javac_wrapper_reports_real_jdk_home(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); java = root / 'real JDK'; bt = root / 'sdk'; jar = bt / 'android.jar'

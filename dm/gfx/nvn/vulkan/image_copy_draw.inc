@@ -4,8 +4,9 @@
 typedef struct { int32_t src[4], dst[4], linear; } copy_draw_params;
 
 static VkPipelineLayout image_draw_layout(shader_t *fragment, uint32_t push_bytes) {
-    VkDescriptorSetLayoutBinding binding={0,descriptor_type[fragment->b[0].type],1,VK_SHADER_STAGE_FRAGMENT_BIT,NULL};
-    VkDescriptorSetLayoutCreateInfo set={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,NULL,0,1,&binding};
+    VkDescriptorSetLayoutBinding bindings[fragment->nb];
+    for (int i=0;i<fragment->nb;i++) bindings[i]=(VkDescriptorSetLayoutBinding){i,descriptor_type[fragment->b[i].type],1,VK_SHADER_STAGE_FRAGMENT_BIT,NULL};
+    VkDescriptorSetLayoutCreateInfo set={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,NULL,0,fragment->nb,bindings};
     VKCHECK(vkCreateDescriptorSetLayout(g_dev,&set,NULL,&fragment->dsl));
     VkPushConstantRange push={VK_SHADER_STAGE_FRAGMENT_BIT,0,push_bytes};
     VkPipelineLayoutCreateInfo info={VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,NULL,0,1,&fragment->dsl,1,&push};
@@ -21,8 +22,9 @@ static VkDescriptorSet image_draw_set(shader_t *fragment, VkImageView source, Vk
     return set;
 }
 
+enum { COPY_DRAW_LINEAR=1, COPY_DRAW_OPAQUE=2 };
 static int draw_image_slice(const p_copy_t2t *c, vtex *src, vtex *dst, uint32_t sl, uint32_t sly,
-                            uint32_t dl, uint32_t dly, int linear) {
+                            uint32_t dl, uint32_t dly, unsigned options) {
     static const uint32_t resolve_code[] =
 #include "resolve_depth.frag.inc"
     ;
@@ -40,8 +42,9 @@ static int draw_image_slice(const p_copy_t2t *c, vtex *src, vtex *dst, uint32_t 
                                       : clear_shader(&color_shader,color_code,sizeof color_code);
     view_t view={.set_levels=1,.base_level=sl,.nlevels=1,.set_layers=1,.min_layer=sly,.nlayers=1,
                  .set_swizzle=1,.swz={2,3,4,5}};
+    if (options&COPY_DRAW_OPAQUE) view.swz[3]=NVN_TEXTURE_SWIZZLE_ONE;
     VkImageView source=tex_view(src,c->src,&view,1,VK_IMAGE_VIEW_TYPE_2D,VIEW_SAMPLED);
-    view.base_level=dl; view.min_layer=dly;
+    view.swz[3]=NVN_TEXTURE_SWIZZLE_A; view.base_level=dl; view.min_layer=dly;
     VkImageView destination=tex_view(dst,c->dst,&view,1,VK_IMAGE_VIEW_TYPE_2D,VIEW_ATTACHMENT);
     if (!source || !destination) return 0;
     VkExtent2D size={dst->w >> dl ? dst->w >> dl : 1,dst->h >> dl ? dst->h >> dl : 1};
@@ -68,7 +71,7 @@ static int draw_image_slice(const p_copy_t2t *c, vtex *src, vtex *dst, uint32_t 
         vkCmdPushConstants(C->cb,layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof offset,offset);
     } else {
         copy_draw_params p={{c->sr.xoffset,c->sr.yoffset,c->sr.width,c->sr.height},
-                            {c->dr.xoffset,c->dr.yoffset,c->dr.width,c->dr.height},linear};
+                            {c->dr.xoffset,c->dr.yoffset,c->dr.width,c->dr.height},(options&COPY_DRAW_LINEAR)!=0};
         if (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) { p.src[0]+=p.src[2]; p.src[2]=-p.src[2]; }
         if (c->flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) { p.src[1]+=p.src[3]; p.src[3]=-p.src[3]; }
         vkCmdPushConstants(C->cb,layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof p,&p);

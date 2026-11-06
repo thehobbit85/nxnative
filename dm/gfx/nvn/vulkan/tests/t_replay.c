@@ -2748,6 +2748,7 @@ static void typed_graphics(void) {
 }
 #include "uniform_storage.inc"
 #include "../../../tests/dlss_spatial_corpus.h"
+#include "../../../tests/dlss_temporal_corpus.h"
 #include "feedback_capture.inc"
 #include "alpha.inc"
 #include "logic.inc"
@@ -2778,7 +2779,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
-    if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); return 0; }
+    if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
     if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }
     if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); sparse_mrt_outputs(); mixed_integer_outputs(); return 0; }
     if (getenv("DM_VK_TEST_ALPHA_COVERAGE")) { alpha_coverage(&logic_program[0],1); alpha_coverage(&logic_program[0],4); return 0; }
@@ -2849,7 +2850,7 @@ int main(void) {
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
     initial_texture_content();
     uniform_texture_array(0,STOCK_BORDER); uniform_texture_array(1,STOCK_BORDER); uniform_texture_array(2,STOCK_BORDER);
-    dlss_spatial_corpus(1);
+    dlss_spatial_corpus(1); dlss_temporal_corpus();
     feedback_capture();
     custom_borders();
     compute_driver_constants();

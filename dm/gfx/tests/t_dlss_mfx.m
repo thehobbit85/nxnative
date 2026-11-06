@@ -4,6 +4,7 @@
 #include "../nvn/nvn_mtl.m"
 #include "recorded_list.h"
 #include "dlss_spatial_corpus.h"
+#include "dlss_temporal_corpus.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -52,6 +53,7 @@ int main(void) { @autoreleasepool {
     CHECK(g_dlss[0].sc != nil, "MetalFX made a temporal scaler for these formats");
     CHECK(flat(tex_mtl(&out), a), "the first evaluation's output holds its own colour");
     CHECK(flat(tex_mtl(&out2), b), "the second evaluation through the same scaler holds its own");
+    dlss_temporal_corpus();
     printf("t_dlss_mfx (encoding thread %s): %d checks, %d failed\n", rec_on() ? "on" : "off", checks, failed);
     return failed != 0;
 }}

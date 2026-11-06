@@ -16,6 +16,7 @@ import argparse, glob, hashlib, json, os, re, shutil, struct, subprocess, sys, t
 from pathlib import Path
 from xml.sax.saxutils import escape
 HERE = os.path.dirname(os.path.abspath(__file__)); ANDROID = os.path.dirname(HERE)
+SGSR_LICENSE = Path(ANDROID).parent / 'third_party/sgsr2/LICENSE'
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from dm.android.tools.target_contract import target_manifest
 from dm.android.tools.program_inputs import program_inputs, program_root
@@ -117,6 +118,7 @@ def selected_inputs(a, lib, ks):
     icon = a.icon or next(iter(sorted(glob.glob(os.path.join(a.build, 'extract', '*', 'icon.jpg')))), None)
     java = sorted(glob.glob(os.path.join(ANDROID, 'app', 'java', '**', '*.java'), recursive=True))
     sources = [('host', lib), ('keystore', ks), ('packer', __file__), ('target-contract', os.path.join(HERE, 'target_contract.py'))]
+    sources.append(('sgsr2-license', SGSR_LICENSE))
     sources.append(('program-inputs', os.path.join(HERE, 'program_inputs.py')))
     sources.append(('web-shim', os.path.join(ANDROID, '..', 'host', 'web_apple.m')))
     if getattr(a, 'programs', None): sources.append(('programs', a.programs))
@@ -235,6 +237,7 @@ def build(a):
         with ExitStack() as archives, zipfile.ZipFile(base, 'a', zipfile.ZIP_DEFLATED) as z:
             z.write(os.path.join(w, 'classes.dex'), 'classes.dex')
             z.write(lib, 'lib/arm64-v8a/libdmhost.so')
+            z.write(SGSR_LICENSE, 'assets/licenses/sgsr2.txt')
             if a.language: z.writestr('assets/default-language.txt', a.language)
             if a.env_file: z.write(a.env_file, 'assets/default.env')
             if a.cheats:
