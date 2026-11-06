@@ -73,7 +73,8 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/000000000000004d.spv $(B)/shaders/000000000000004e.spv $(B)/shaders/000000000000004f.spv $(B)/shaders/0000000000000050.spv $(B)/shaders/0000000000000051.spv \
          $(B)/shaders/0000000000000052.spv $(B)/shaders/0000000000000053.spv $(B)/shaders/0000000000000054.spv $(B)/shaders/0000000000000055.spv \
          $(B)/shaders/0000000000000056.spv $(B)/shaders/0000000000000057.spv $(B)/shaders/0000000000000058.spv $(B)/shaders/0000000000000059.spv $(B)/shaders/000000000000005a.spv $(B)/shaders/000000000000005b.spv \
-         $(B)/shaders/be5c489b134ec370.spv $(B)/shaders/9954f8894fadd956.spv $(B)/shaders/ee208c00f07f83b4.spv $(B)/shaders/7fe604cfab645fc7.spv
+         $(B)/shaders/be5c489b134ec370.spv $(B)/shaders/9954f8894fadd956.spv $(B)/shaders/ee208c00f07f83b4.spv $(B)/shaders/7fe604cfab645fc7.spv \
+         $(B)/shaders/98076dcbe001b8d9.spv $(B)/shaders/0f505d6a0231e82b.spv $(B)/shaders/ea957dc56076e186.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
 # Public recorder keys hash a 0x880-byte guest control section and one code byte per fixture stage.
 $(B)/shaders/be5c489b134ec370.spv: $(B)/shaders/0000000000000035.spv
@@ -91,6 +92,18 @@ $(B)/shaders/7fe604cfab645fc7.spv: tests/public_cube.frag
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	printf 'stage ps\nb 0 cis 1 tex 3 -1 samp_tex 3 view=3 num=0\nb 1 cis 1 tex 4 -1 samp_tex 4 view=3 num=0\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/98076dcbe001b8d9.spv: tests/public_buffers.vert
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage vs\nb 0 ubo 1 cbuf 7 -1 - -1\nb 1 ssbo 1 sbuf 3 -1 - -1\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/0f505d6a0231e82b.spv: tests/public_buffers.frag
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage ps\nb 0 ubo 1 cbuf 7 -1 - -1\nb 1 ssbo 1 sbuf 3 -1 - -1\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/ea957dc56076e186.spv: tests/public_buffers.comp
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 ubo 1 cbuf 7 -1 - -1\nb 1 ssbo 1 sbuf 3 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
 $(B)/shaders/000000000000005b.spv: tests/packed_streams.vert tests/packed_streams.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
@@ -223,7 +236,7 @@ recorded-transfer-test: $(B)/t_recorded_transfer fixture
 	DM_VK_DIR="$(abspath $(B)/shaders)" $(B)/t_recorded_transfer
 recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
-$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c tests/public_bindings.inc ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
+$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c tests/public_bindings.inc tests/public_buffers.inc ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) -DDM_NVN_VULKAN -DDM_VK_PUBLIC_BINDINGS $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
 
