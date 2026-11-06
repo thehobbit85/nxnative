@@ -1,0 +1,9 @@
+#version 450
+layout(local_size_x=1, local_size_y=1) in;
+layout(binding=0, r32ui) uniform uimage2D data;
+layout(binding=1, r32ui) uniform readonly uimage2D color;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint old = imageLoad(data, p).r;
+    imageStore(data, p, uvec4(old + imageLoad(color, p).r + 2u + uint(2*p.y + p.x)));
+}

@@ -3439,7 +3439,21 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
             case OP_COPY_T2B: copy_t2b((const p_copy_b2t *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
-            case OP_BARRIER: pass_end(); break;
+            case OP_BARRIER: {
+                // Early replay fixtures used a header-only pass boundary.
+                // A public NVN record always carries the guest's barrier bits.
+                uint32_t bits = UINT32_MAX;
+                if (h.size >= sizeof h + sizeof bits) memcpy(&bits, a, sizeof bits);
+                if (bits) {
+                    pass_end();
+                    // The ordinary end-of-pass dependency targets the next
+                    // graphics/transfer consumer. A guest barrier also orders
+                    // compute and indirect reads, even between render passes.
+                    barrier_all(C->cb);
+                    for (int i = 0; i < P.n; ++i) P.cwr[i] = 1;
+                }
+                break;
+            }
             case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.has_sc = 1; break;
             case OP_BIND_PROGRAM: { const p_bind_program *b = (const p_bind_program *)a; if (b->stages & 0x20) S.cprog = b->prog; for (int st = 0; st < 5; st++) if (b->stages >> st & 1) S.bst[st] = b->prog; break; }
             case OP_BIND_STATE: {
