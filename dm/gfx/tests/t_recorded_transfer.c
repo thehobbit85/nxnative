@@ -243,6 +243,11 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
     enum { texture_offset = 0x4000, read_offset = 0xa000, w = 7, h = 3 };
     NVNbufferAddress addr = API(nvnMemoryPoolGetBufferAddress)(pool);
     dm_guest_write_prep_register(delay_first_row);
+    NVNsync fence;
+    assert(API(nvnSyncInitialize)(&fence, device));
+    NVNcommandBuffer inner;
+    assert(API(nvnCommandBufferInitialize)(&inner, device));
+    API(nvnCommandBufferAddCommandMemory)(&inner, pool, 0x3000, 0x1000);
     for (int rt = 0; rt < 2; ++rt) {
         NVNtextureBuilder tb;
         API(nvnTextureBuilderSetDefaults)(&tb);
@@ -265,7 +270,7 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
         API(nvnTextureWriteTexels)(&tex, NULL, &region, pattern);
         NVNcommandBuffer cb;
         assert(API(nvnCommandBufferInitialize)(&cb, device));
-        API(nvnCommandBufferAddCommandMemory)(&cb, pool, 0, 0x4000);
+        API(nvnCommandBufferAddCommandMemory)(&cb, pool, 0, 0x3000);
         API(nvnCommandBufferBeginRecording)(&cb);
         API(nvnCommandBufferSetCopyRowStride)(&cb, 0);
         API(nvnCommandBufferSetCopyImageStride)(&cb, 0);
@@ -276,11 +281,19 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
         for (size_t i = 0; i < sizeof pattern; ++i) if (storage[read_offset + i] != ((uint8_t *)pattern)[i])
             die("linear GPU upload, render-target flag %d, byte %zu: %u expected %u", rt, i, storage[read_offset + i], ((uint8_t *)pattern)[i]);
         const NVNtexture *target = &tex;
+        API(nvnCommandBufferBeginRecording)(&inner);
+        API(nvnCommandBufferReportValue)(&inner, 37 + rt, addr + read_offset + 128);
+        API(nvnCommandBufferFenceSync)(&inner, &fence, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        NVNcommandHandle nested = API(nvnCommandBufferEndRecording)(&inner);
+        // Recording leaves the first generation unsignaled and the previous
+        // generation signaled until submission actually reaches this call.
+        assert(API(nvnSyncWait)(&fence, 0) == (rt ? NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED));
         API(nvnCommandBufferBeginRecording)(&cb);
         API(nvnCommandBufferSetRenderTargets)(&cb, 1, &target, NULL, NULL, NULL);
         API(nvnCommandBufferSetScissor)(&cb, 0, 0, w, h);
         float green[] = {0, 1, 0, 1};
         API(nvnCommandBufferClearColor)(&cb, 0, green, 15);
+        API(nvnCommandBufferCallCommands)(&cb, 1, &nested);
         commands = API(nvnCommandBufferEndRecording)(&cb);
         pthread_mutex_lock(&publish_gate.mutex);
         publish_gate.entered = publish_gate.release = 0;
@@ -290,6 +303,14 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
         pthread_mutex_lock(&publish_gate.mutex);
         while (!publish_gate.entered) pthread_cond_wait(&publish_gate.cond, &publish_gate.mutex);
         pthread_mutex_unlock(&publish_gate.mutex);
+        assert(API(nvnSyncWait)(&fence, 0) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+        assert(API(nvnSyncWait)(&fence, 1000000) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+        if (!rt && getenv("DM_VK_TEST_LONG_FENCE")) {
+            uint64_t start = now_ns(), timeout = 60001000000ull;
+            assert(API(nvnSyncWait)(&fence, timeout) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+            assert(now_ns() - start >= timeout);
+            puts("Public finite guest fence wait above one minute expired");
+        }
         pthread_t release;
         assert(!pthread_create(&release, NULL, release_first_row, NULL));
         NVNcopyRegion one = {2, 1, 0, 1, 1, 1};
@@ -300,7 +321,10 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
         pthread_cond_broadcast(&publish_gate.cond);
         pthread_mutex_unlock(&publish_gate.mutex);
         assert(!pthread_join(release, NULL));
-        API(nvnQueueFinish)(queue);
+        NVNsyncWaitResult waited = API(nvnSyncWait)(&fence, UINT64_MAX);
+        assert(waited == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED || waited == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+        assert(*(uint32_t *)(storage + read_offset + 128) == 37u + rt);
+        assert(API(nvnSyncWait)(&fence, 0) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
         pthread_mutex_lock(&publish_gate.mutex);
         publish_gate.row = NULL;
         pthread_mutex_unlock(&publish_gate.mutex);
@@ -313,6 +337,9 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
         API(nvnCommandBufferFinalize)(&cb);
         API(nvnTextureFinalize)(&tex);
     }
+    API(nvnCommandBufferFinalize)(&inner);
+    API(nvnSyncFinalize)(&fence);
+    puts("Public nested fence rearmed on submission, timed out during guest writeback and published both generations");
 }
 #endif
 
