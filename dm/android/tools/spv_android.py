@@ -176,7 +176,7 @@ def export_spirv(data, optimizer):
     # translator can retain unused texture declarations that SPIRV-Cross drops
     # from Metal's argument buffer (Link's Awakening's uber shaders).
     data = spv_texture_offsets.lower(data)
-    data = spv_warp_native.lower(spv_warp.lower(data))
+    data = spv_warp_native.lower(spv_warp.lower(data, optimizer))
     data = spv_half.lower(data)
     data, physical = lower_physical_addresses(prepare_spirv(data))
     result = subprocess.run([optimizer, '--eliminate-dead-variables', '-', '-o', '-'],

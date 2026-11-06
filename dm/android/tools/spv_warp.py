@@ -4,7 +4,7 @@ import struct
 
 from dm.android.tools.spv_capture import Module, instruction
 from dm.android.tools.spv_module import decode, opcode, pointer_operands, string_operand
-from dm.android.tools import spv_warp_flow, spv_warp_masks
+from dm.android.tools import spv_warp_flow, spv_warp_masks, spv_warp_predicated
 
 VOTE_ALL, VOTE_ANY, VOTE_EQUAL = 334, 335, 336
 BALLOT, SHUFFLE = 339, 345
@@ -18,6 +18,16 @@ def _workgroup_size(code):
     sizes = [inst[3:] for inst in code if opcode(inst) == 16 and inst[1:3] == (entries[0][2], 17)]
     if len(sizes) != 1 or len(sizes[0]) != 3 or min(sizes[0]) < 1:
         return 0
+    # A WorkgroupSize built-in overrides LocalSize. Only trust a literal
+    # vector that agrees in each dimension. Specialization can change the
+    # size at pipeline creation, after the scratch array has been allocated.
+    wg = [inst[1] for inst in code if opcode(inst) == 71 and inst[2:4] == (11, 25)]
+    if wg:
+        constants = {inst[2]: inst[3] for inst in code if opcode(inst) == 43 and len(inst) == 4}
+        values = [tuple(constants.get(v) for v in inst[3:]) for inst in code
+                  if opcode(inst) == 44 and inst[2] in wg]
+        if values != sizes:
+            return 0
     size = math.prod(sizes[0])
     return size if size <= 1024 else 0
 
@@ -161,7 +171,7 @@ class _Exchange:
                 code.append(instruction(166, m.boolean, inst[2], all_true, all_false))
 
 
-def lower(data):
+def lower(data, optimizer=None):
     _, code = decode(data)
     builtin_pairs = [(inst[3], inst[1]) for inst in code if opcode(inst) == 71 and inst[2] == 11]
     builtins = dict(builtin_pairs)
@@ -180,14 +190,20 @@ def lower(data):
     barriers = any(_shared_warp_barrier(module, inst) for inst in code)
     if not barriers and not needs_index:
         return data
-    # A WorkgroupSize built-in takes precedence over LocalSize. Its value
-    # may be specialized at pipeline creation, after we allocate the array.
-    if 25 in builtins or set(range(36, 41)).intersection(builtins) or not supported_subgroup_ops(module, lane):
+    if set(range(36, 41)).intersection(builtins) or not supported_subgroup_ops(module, lane):
         return data
     if exchanges and not _scratch_fits(module, size):
         return data
     sites = COLLECTIVES | {224} if barriers else COLLECTIVES
     if (exchanges or barriers) and not spv_warp_flow.converged(code, sites):
+        if optimizer and any(opcode(inst) == SHUFFLE for inst in code):
+            lifted = spv_warp_predicated.lift(data, optimizer)
+            if lifted is not None:
+                # Recheck convergence, scratch and all subgroup requirements
+                # before committing to the rearranged shader.
+                portable = lower(lifted)
+                if portable != lifted:
+                    return portable
         return data
     masks = spv_warp_masks.inputs(module, builtins)
     if masks is None:
