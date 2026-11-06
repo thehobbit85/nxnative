@@ -83,7 +83,7 @@ General host changes first needed here; each applies to every game:
 - [Vulkan target lowers dynamic texture offsets](../../../docs/reference/shaders.md#vulkan-target-lowers-dynamic-texture-offsets): the captured postprocess shader `9338e3f1b597fe7c` passes Vulkan 1.1 validation using the bundled Ryujinx lowering.
 
 - [Vulkan export removes unused descriptor declarations](../../../docs/reference/shaders.md#vulkan-export-removes-unused-descriptor-declarations): resolved the captured Android reflection failure.
-- [Vulkan textures from uniform-buffer handles](../../../docs/reference/shaders.md#vulkan-textures-from-uniform-buffer-handles): the 32-element 3D texture array in `bd619b15fcd2a711` now exports; synthetic replay verifies uniform handles, pool changes and compatible missing-texture views.
+- [Vulkan textures from uniform-buffer handles](../../../docs/reference/shaders.md#vulkan-textures-from-uniform-buffer-handles): the current chain exports this shader’s 8,192-entry 3D texture/sampler table from uniform slot 8. The targeted Android export passes validation. Synthetic GPU replay covers sparsely populated uniform tables and changes of pool.
 - [Android staged assets are unreadable by the app](../../../docs/reference/packing.md#android-staged-assets-are-unreadable-by-the-app): resolved the first launch's module-access failure.
 - [Checked out-of-line code repairs](../../../docs/reference/rewriter.md#checked-out-of-line-code-repairs): the actor sentinel guard uses a checked, build-gated detour without enabling frame-step behavior.
 

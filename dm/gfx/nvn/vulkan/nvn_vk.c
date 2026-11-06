@@ -44,7 +44,7 @@ static VkPhysicalDeviceMemoryProperties g_memp; static VkPhysicalDevicePropertie
 static uint64_t g_timestamp_mask;
 static int g_segment_timestamps;
 static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
-static int g_draw_parameters;
+static int g_draw_parameters, g_descriptor_tables;
 static uint32_t g_vertex_divisor_limit = 1;
 static VkPhysicalDeviceSubgroupProperties g_subgroup;
 static VkPhysicalDeviceSubgroupSizeControlProperties g_subgroup_sizes;
@@ -411,12 +411,13 @@ static void vk_init_(void) {
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
     int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0, has_calibrated = 0;
-    int divisor_ext = 0, divisor_khr = 0;
+    int divisor_ext = 0, divisor_khr = 0, descriptor_indexing = 0;
     for (uint32_t i = 0; i < ne; i++) {
         has_sc |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME); has_u8 |= !strcmp(ep[i].extensionName, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
         has_dr |= !strcmp(ep[i].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
         has_subgroup_sizes |= !strcmp(ep[i].extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
         has_calibrated |= !strcmp(ep[i].extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        descriptor_indexing |= !strcmp(ep[i].extensionName, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
         divisor_ext |= ep[i].specVersion >= 3 && !strcmp(ep[i].extensionName,VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
         divisor_khr |= !strcmp(ep[i].extensionName,VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     }
@@ -437,7 +438,8 @@ static void vk_init_(void) {
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceVulkan11Features f11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceShaderDrawParametersFeatures sdp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
-    void *chain = NULL;
+    VkPhysicalDeviceDescriptorIndexingFeatures indexing = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+    void *chain = dv < VK_API_VERSION_1_2 && descriptor_indexing ? &indexing : NULL;
     // EXT rev 3 guarantees firstInstance + localInstance/divisor. Its KHR
     // successor allows implementations without nonzero firstInstance support.
     const char *div_extension = divisor_ext ? VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME :
@@ -455,7 +457,11 @@ static void vk_init_(void) {
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     g_precise_visibility = f2.features.occlusionQueryPrecise;
     f13.robustImageAccess = VK_FALSE;
-    const char *ext[6]; uint32_t next = 0;
+    const char *ext[7]; uint32_t next = 0;
+    g_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
+        f12.runtimeDescriptorArray && f12.shaderSampledImageArrayNonUniformIndexing :
+        indexing.runtimeDescriptorArray && indexing.shaderSampledImageArrayNonUniformIndexing;
+    if (dv < VK_API_VERSION_1_2 && descriptor_indexing) ext[next++] = VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME;
     if (div_extension) {
         ext[next++]=div_extension;
         if (div_features.vertexAttributeInstanceRateDivisor)
@@ -1099,12 +1105,12 @@ static VkSampler samp_get(int sid) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
 static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
 }
-typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
+typedef struct { uint32_t binding, count; uint8_t type, kind, skind, read_only, table; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 typedef struct vin_module {
     uint64_t mask;
     VkShaderModule module;
@@ -1112,7 +1118,8 @@ typedef struct vin_module {
 } vin_module;
 typedef struct shader shader_t;
 struct shader {
-    shader_t *buffer_variants, *next_buffer_variant;
+    shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
+    int has_tables;
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
@@ -1343,6 +1350,47 @@ static VkShaderModule vertex_variant(shader_t *s, uint64_t mask) {
     *v = (vin_module){mask, module, s->vertex_variants}; s->vertex_variants = v;
     return module;
 }
+// Core descriptor limits apply across the layouts in a pipeline as well as per
+// shader stage. A large handle table can legitimately reach either limit.
+static int table_descriptor_limits(const shader_t *a, const shader_t *b) {
+    const VkPhysicalDeviceLimits *limit = &g_props.limits;
+    uint64_t all_images=0, all_samplers=0;
+    const shader_t *stages[]={a,b};
+    for (int st=0; st<2; st++) {
+        const shader_t *s=stages[st];
+        if (!s) continue;
+        uint64_t images=0, samplers=0, resources=0;
+        for (int i=0; i<s->nb; i++) {
+            const sbind *binding=&s->b[i];
+            unsigned type=binding->type;
+            if (type==BT_TEX || type==BT_CIS || type==BT_TBUF || type==BT_UTB) images+=binding->count;
+            if (type==BT_SAMP || type==BT_CIS) samplers+=binding->count;
+            if (type!=BT_SAMP) resources+=binding->count;
+        }
+        if (images>limit->maxPerStageDescriptorSampledImages || samplers>limit->maxPerStageDescriptorSamplers ||
+            resources>limit->maxPerStageResources) return 0;
+        all_images+=images; all_samplers+=samplers;
+    }
+    return all_images<=limit->maxDescriptorSetSampledImages && all_samplers<=limit->maxDescriptorSetSamplers;
+}
+static VkDescriptorSetLayout shader_layout(const shader_t *s) {
+    VkShaderStageFlags stage = s->stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT :
+        s->stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutBinding bindings[DM_VK_MAX_BINDINGS];
+    for (int i = 0; i < s->nb; i++) {
+        const sbind *b = &s->b[i];
+        bindings[i] = (VkDescriptorSetLayoutBinding){b->binding, descriptor_type[b->type], b->count, stage, NULL};
+    }
+    VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, (uint32_t)s->nb, bindings};
+    VkDescriptorSetLayout layout;
+    if (s->has_tables) {
+        if (!table_descriptor_limits(s,NULL)) return VK_NULL_HANDLE;
+        VkDescriptorSetLayoutSupport support = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_SUPPORT};
+        vkGetDescriptorSetLayoutSupport(g_dev, &info, &support);
+        if (!support.supported) return VK_NULL_HANDLE;
+    }
+    return vkCreateDescriptorSetLayout(g_dev, &info, NULL, &layout) == VK_SUCCESS ? layout : VK_NULL_HANDLE;
+}
 static shader_t *shader_get(const uint8_t md[8]) {
     char key[17]; for (int i = 0; i < 8; i++) sprintf(key + 2 * i, "%02x", md[i]);
     for (int i = 0; i < g_nsh; i++) if (!strcmp(g_sh[i]->key, key)) return g_sh[i];
@@ -1376,8 +1424,7 @@ static shader_t *shader_get(const uint8_t md[8]) {
             if (!strcmp(kind, "gmem_map") || !strcmp(kind, "gmem_log")) {
                 LOG("[RED] vk: shader %s requires physical-address pool replay", key); free(txt); free(spv); return s;
             }
-            if (!strcmp(kind, "tex_pool") || !strcmp(kind, "samp_pool") || !strcmp(kind, "pool_bounds") ||
-                !strcmp(kind, "tex_htab") || !strcmp(kind, "samp_htab") || !strcmp(kind, "htab_map")) {
+            if (!strcmp(kind, "tex_pool") || !strcmp(kind, "samp_pool") || !strcmp(kind, "pool_bounds")) {
                 LOG("[RED] vk: shader %s requires runtime descriptor pool replay", key); free(txt); free(spv); return s;
             }
             sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = off; e->sreg = (int16_t)sreg;
@@ -1397,8 +1444,42 @@ static shader_t *shader_get(const uint8_t md[8]) {
                       !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "sbuf_ubo") ? K_SBUFU : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : !strcmp(kind, "tex_ubo") ? K_TEXU : K_UNK;
             e->skind = sampler_source(sk);
             if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
+            if (!strcmp(kind, "htab_map")) {
+                if (e->type != BT_SSBO || cnt != 1 || reg < 0 || reg >= DM_VK_MAX_BINDINGS) goto bad_table;
+                e->kind = K_TABLE_MAP; e->slot = reg;
+            } else if (!strcmp(kind, "tex_htab") || !strcmp(kind, "samp_htab")) {
+                int slot;
+                field = strstr(ln, " runtime=1 pool_slot=");
+                if (!field || sscanf(field, " runtime=1 pool_slot=%d", &slot) != 1 ||
+                    slot < 0 || slot >= DM_VK_MAX_BINDINGS || cnt != 8192 || reg < 0 || reg >= 16 || off < 0 ||
+                    (!strcmp(kind,"samp_htab") ? e->type != BT_SAMP : e->type != BT_CIS && e->type != BT_TEX)) goto bad_table;
+                if (e->type == BT_CIS && (strcmp(sk, "samp_htab") || sreg < 0 || sreg >= 16 || e->soff < 0)) goto bad_table;
+                e->kind = e->type == BT_SAMP ? K_SAMPLER : K_TEXU;
+                if (e->type != BT_TEX) e->skind = S_SAMPU;
+                e->driver_sampler = -1;
+                if ((field = strstr(ln," c2_or="))) {
+                    int offset = atoi(field+7);
+                    if (offset < 0 || offset > 4092 || offset % 4) goto bad_table;
+                    e->driver_sampler = offset;
+                }
+                e->slot = slot; e->table = 1; e->count = 1;
+                s->has_tables = 1;
+            }
             if (e->kind == K_UNK) LOG("[RED] vk: shader %s binding %d has kind %s, not implemented (reads zero)", key, b, kind);
         }
+    }
+    for (int i = 0; i < s->nb; ++i) {
+        const sbind *b = &s->b[i];
+        if (!b->table && b->kind != K_TABLE_MAP) continue;
+        int arrays = 0, maps = 0;
+        for (int j = 0; j < s->nb; ++j) if (s->b[j].slot == b->slot) {
+            arrays += s->b[j].table; maps += s->b[j].kind == K_TABLE_MAP;
+        }
+        if (arrays != 1 || maps != 1) goto bad_table;
+    }
+    if (s->has_tables && !g_descriptor_tables) {
+        LOG("[RED] vk: shader %s requires runtime sampled-image descriptor indexing",key);
+        free(txt); free(spv); return s;
     }
     free(txt);
     if (s->stage < 0) { LOG("[RED] vk: shader %s needs a stage the renderer does not execute", key); free(spv); return s; }
@@ -1420,11 +1501,12 @@ static shader_t *shader_get(const uint8_t md[8]) {
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, ns, spv};
     VkResult r = vkCreateShaderModule(g_dev, &mi, NULL, &s->mod); free(spv);
     if (r != VK_SUCCESS) { LOG("[RED] vk: shader %s rejected (%d)", key, (int)r); s->mod = VK_NULL_HANDLE; }
-    VkDescriptorSetLayoutBinding lb[DM_VK_MAX_BINDINGS];
-    for (int i = 0; i < s->nb; i++) lb[i] = (VkDescriptorSetLayoutBinding){s->b[i].binding, descriptor_type[s->b[i].type], s->b[i].count, sf, NULL};
-    VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, (uint32_t)s->nb, lb};
-    VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &s->dsl));
+    s->dsl = shader_layout(s);
+    if (!s->dsl) { LOG("[RED] vk: shader %s descriptor layout exceeds device support", key); s->mod=VK_NULL_HANDLE; }
     return s;
+bad_table:
+    LOG("[RED] vk: shader %s has an invalid uniform handle table interface", key);
+    free(txt); free(spv); return s;
 }
 static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BINDINGS]) {
     int any=0;for(int i=0;i<base->nb;i++) any|=bias[i]!=0;
@@ -1452,6 +1534,9 @@ typedef struct { shader_t *vs, *fs; VkPipelineLayout pl; } prog_vk;
 static prog_vk *g_pl; static int g_npl;
 static VkPipelineLayout layout_get(shader_t *vs, shader_t *fs) {
     for (int i = 0; i < g_npl; i++) if (g_pl[i].vs == vs && g_pl[i].fs == fs) return g_pl[i].pl;
+    if ((vs->has_tables || (fs && fs->has_tables)) && !table_descriptor_limits(vs,fs)) {
+        RED_ONCE(83, "combined graphics handle tables exceed the device descriptor limits"); return VK_NULL_HANDLE;
+    }
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_empty_dsl)); }
     VkDescriptorSetLayout sl[2] = {vs ? vs->dsl : g_empty_dsl, fs ? fs->dsl : g_empty_dsl};
     VkPushConstantRange draw = {VK_SHADER_STAGE_VERTEX_BIT, 0, 16};
@@ -1863,13 +1948,13 @@ static void shader_cpu_ready(const shader_t *s, int stage) {
     if (!s) return;
     for (int i = 0; i < s->nb; i++) {
         const sbind *b = &s->b[i];
-        if (b->kind == K_TEXU) uniform_ready(stage, b->reg, b->off, b->count);
+        if (b->kind == K_TEXU) uniform_ready(stage, b->reg, b->off, b->table ? 8192 : b->count);
         if (b->kind == K_SBUFU) {
             uint64_t field = uniform_storage_field(stage, b->reg, b->off);
             if (field) cpu_ready(field, 8);
         }
-        if (b->skind == S_SAMPU) uniform_ready(stage, b->sreg, b->soff, b->count);
-        if (b->count == 1) {
+        if (b->skind == S_SAMPU) uniform_ready(stage, b->sreg, b->soff, b->table ? 8192 : b->count);
+        if (!b->table && b->count == 1) {
             if (b->kind == K_TEXU) uniform_ready(stage, b->twin.texture.reg, b->twin.texture.off, 1);
             if (b->skind == S_SAMPU) uniform_ready(stage, b->twin.sampler.reg, b->twin.sampler.off, 1);
         }
@@ -1911,6 +1996,7 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     }
     return (handle & 0xfffff) | sid << 20;
 }
+#include "uniform_table.inc"
 static VkImageView tex_slot(uint64_t h, const sbind *b, int *ok, vtex **vo) {
     VkImageView dummy = sampled_dummy(b->view, b->num);
     int tid = (int)(h & 0xfffff); *ok = 0; if (vo) *vo = NULL;
@@ -1970,9 +2056,9 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
     int want[8] = {0}, any = 0;
     for (int i = 0; i < fs->nb; i++) {
         const sbind *b = &fs->b[i];
-        if ((b->type != BT_CIS && b->type != BT_TEX) || (b->kind != K_TEX && b->kind != K_TEXU) || b->count > 32) continue;
+        if ((b->type != BT_CIS && b->type != BT_TEX) || (b->kind != K_TEX && b->kind != K_TEXU) || (!b->table && b->count > 32)) continue;
         for (uint32_t element = 0; element < b->count; ++element) {
-        int tid = (int)(sampled_handle(1, b, element) & 0xfffff); if (!tid) continue;
+        int tid = (int)(descriptor_handle(1, b, element) & 0xfffff); if (!tid) continue;
         treg_t tr; vtex *v = registered_texture(tid, &tr); if (!v) continue;
         for (int a = 0; a < P.n; a++) if (P.ct[a] == v && P.cv[a] && v->target != NVN_TEXTURE_TARGET_3D && (S.chmask.mask >> (4 * a) & 0xf)) { want[a] = 1; any = 1; }
         }
@@ -2046,6 +2132,7 @@ static int storage_order(const void *a, const void *b) {
 }
 static int prepare_storage(shader_t **first, shader_t **second) {
     g_nstorage = 0;
+    if (!prepare_tables(first) || (second && !prepare_tables(second))) return 0;
     shader_t *stages[] = {*first, second ? *second : NULL};
     for (int st = 0; st < 2; st++) {
         shader_t *s = stages[st]; if (!s) continue;
@@ -2202,7 +2289,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
     // Every statically used descriptor must be populated before submitting this pipeline.
     for (int i = 0; i < s->nb; ++i) {
         const sbind *b = &s->b[i];
-        if (b->type == BT_SIMG) continue;
+        if (b->type == BT_SIMG || b->table) continue;
         if (is_texel(b) && b->count <= 32) continue;
         if ((b->type == BT_CIS || b->type == BT_TEX) && b->count <= 32 && (b->kind == K_TEXU || b->kind == K_TEX)) continue;
         if (b->type == BT_SAMP && b->count <= 32 && b->skind != S_NONE) continue;
@@ -2227,7 +2314,13 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
         }
         if (b->type == BT_UBO || b->type == BT_SSBO) {
             VkDescriptorBufferInfo *d = &bi[nw]; *d = (VkDescriptorBufferInfo){g_zero_buf, 0, 65536};
-            if (b->kind == K_CBUF && b->reg >= 0 && b->reg < 16) {
+            if (b->kind == K_TABLE_MAP) {
+                const handle_table *table = table_cache[stage][b->slot];
+                VkDeviceSize bytes = (table->map[0]+2u) * sizeof(uint32_t);
+                VkDeviceSize offset = ring_put(table->map, bytes, g_props.limits.minStorageBufferOffsetAlignment);
+                if (offset == VK_WHOLE_SIZE) return VK_NULL_HANDLE;
+                *d = (VkDescriptorBufferInfo){C->ring, offset, bytes};
+            } else if (b->kind == K_CBUF && b->reg >= 0 && b->reg < 16) {
                 const p_bind_buf *u = &S.ubo[stage][b->reg];
                 uint64_t n = u->size > 65536 ? 65536 : u->size;
                 VkBuffer gb; VkDeviceSize go;
@@ -2280,28 +2373,33 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
             x->descriptorType = b->type == BT_UBO ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; x->pBufferInfo = d;
         } else if (b->type == BT_CIS || b->type == BT_TEX || b->type == BT_SAMP) {
             VkDescriptorImageInfo images[32] = {0};
-            for (uint32_t element = 0; element < b->count; ++element) {
-                uint64_t handle = sampled_handle(stage, b, element);
-                int ok = 0; vtex *tv = NULL;
-                if (b->type != BT_SAMP) {
-                    VkImageView view = tex_slot(handle, b, &ok, &tv);
-                    if (!view) return VK_NULL_HANDLE;
-                    if (stage == 1 && tv) for (int q = 0; q < g_fb_n; q++) if (tv == g_fb_src[q]) { view = g_fb_view[q]; break; }   // same-pass feedback: the snapshot (fb_prepare)
-                    images[element].imageView = view; images[element].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            // The driver consumes descriptor writes immediately. Stream large
+            // tables in bounded chunks; no scratch allocation scales with the layout.
+            for (uint32_t first = 0; first < b->count; first += 32) {
+                uint32_t count = b->count - first < 32 ? b->count - first : 32;
+                for (uint32_t element = 0; element < count; ++element) {
+                    uint64_t handle = descriptor_handle(stage, b, first + element);
+                    int ok = 0; vtex *tv = NULL;
+                    if (b->type != BT_SAMP) {
+                        VkImageView view = tex_slot(handle, b, &ok, &tv);
+                        if (!view) return VK_NULL_HANDLE;
+                        if (stage == 1 && tv) for (int q = 0; q < g_fb_n; q++) if (tv == g_fb_src[q]) { view = g_fb_view[q]; break; }   // same-pass feedback: the snapshot (fb_prepare)
+                        images[element].imageView = view; images[element].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    }
+                    if (b->type != BT_TEX) {
+                        pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20)); pthread_mutex_unlock(&g_rmu);
+                    }
+                    if (b->type == BT_CIS && !ok && b->num) {
+                        static VkSampler nearest;
+                        if (!nearest) { VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; VKCHECK(vkCreateSampler(g_dev, &si, NULL, &nearest)); }
+                        images[element].sampler = nearest;
+                    }
                 }
-                if (b->type != BT_TEX) {
-                    pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20)); pthread_mutex_unlock(&g_rmu);
-                }
-                if (b->type == BT_CIS && !ok && b->num) {
-                    static VkSampler nearest;
-                    if (!nearest) { VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; VKCHECK(vkCreateSampler(g_dev, &si, NULL, &nearest)); }
-                    images[element].sampler = nearest;
-                }
+                VkDescriptorType type = b->type == BT_CIS ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : b->type == BT_TEX ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
+                VkWriteDescriptorSet array = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, first,
+                    count, type, images, NULL, NULL};
+                vkUpdateDescriptorSets(g_dev, 1, &array, 0, NULL);
             }
-            VkDescriptorType type = b->type == BT_CIS ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : b->type == BT_TEX ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
-            VkWriteDescriptorSet array = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0,
-                b->count, type, images, NULL, NULL};
-            vkUpdateDescriptorSets(g_dev, 1, &array, 0, NULL);
             continue;
         }
         nw++;
@@ -2399,6 +2497,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (g_plog) LOG("plog:  draw vs %s fs %s n %u depth t%d w%d f%d stencil %d f%d ops %d/%d/%d ref %u vm %#x wm %#x blend %#x mask %#x cull %d", vs->key, fs ? fs->key : "-", dw ? dw->count : di->count,
                     S.ds.dt, S.ds.dw, S.ds.df, S.ds.st, S.ds.sf_f, S.ds.fail_f, S.ds.zfail_f, S.ds.zpass_f, S.st_ref[0], S.st_vmask[0], S.st_wmask[0], S.color.blend_en, S.chmask.mask, S.poly.cull);
     VkPipelineLayout pl = layout_get(vs, fs);
+    if (!pl) SKIP(6);
     VkPipeline pp = pso_get(&k, pl);
     if (!pp) SKIP(5);
     if (fs && P.n) fb_prepare(fs); else g_fb_n = 0;
@@ -2425,7 +2524,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
         vkCmdSetStencilCompareMask(cb, ff, S.st_vmask[f]); vkCmdSetStencilWriteMask(cb, ff, S.st_wmask[f]); vkCmdSetStencilReference(cb, ff, S.st_ref[f]);
     }
     // vertex streams: only the vertices this draw reads are copied (games bind whole vertex pools, tens of MB). Per-vertex streams are copied from vertex vlo on and the draw's
-    // vertex numbers shifted down by vlo (a shader reading its vertex index sees the shifted value); per-instance streams from instance 0 up to the last one drawn
+    // vertex fetch indices shifted down by vlo (the vertex shader restores guest IDs); per-instance streams from instance 0 up to the last one drawn
     uint32_t inst = dw ? (dw->instances ? (uint32_t)dw->instances : 1) : (di->instances ? (uint32_t)di->instances : 1);
     uint32_t isz = di ? (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4) : 0;
     const uint8_t *isrc = di ? (const uint8_t *)(uintptr_t)di->ibuf : NULL;

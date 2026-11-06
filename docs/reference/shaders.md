@@ -739,11 +739,11 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 
 ### Vulkan textures from uniform-buffer handles
 
-- **Symptom:** Android export stops with `unsupported guest binding kind: tex_ubo`; the Vulkan replay rejects a combined-image descriptor with count 32.
-- **Cause:** the donor Vulkan path resolves directly bound texture slots but does not resolve handles held in uniforms or apply the texture/sampler pool records at execution.
-- **Fix:** the exporter preserves the array length, texture and sampler uniform slots and byte offsets, and the sampled image's shape and numeric class. The replay follows the existing [uniform-handle layout](#an-array-of-handles-in-a-uniform-buffer) and [pool rebasing](#handles-from-uniform-buffers-take-the-bound-pools-bases): each 8-byte element supplies a texture ID and sampler ID, resolved against the active pools. Reads are bounded by the uniform binding and registered memory. Missing or dimension-incompatible entries receive a compatible black texture; feedback detection also examines the uniform array.
-- **Check:** `uniform_texture_array` in the Vulkan replay checks a 32-element 3D texture array, dynamic selection, independent sampler offsets, inline updates, missing entries, truncated uniform ranges, and switching texture/sampler pools while keeping local IDs unchanged. Export tests validate shape and float/signed/unsigned component reflection. GPU-produced handle tables within the same submission are not covered by these checks.
-- **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#found-on-this-game), shader `bd619b15fcd2a711`, a 32-element 3D texture/sampler array in uniform slot 8 at byte 352. The targeted export passes; commercial runtime validation remains separate.
+- **Symptom:** Android export rejects `tex_ubo` or `tex_htab`, or a draw samples an empty texture when the guest indexes its uniform buffer.
+- **Cause:** a shader can index a table at execution time. Each 8-byte element supplies pool-local texture and sampler IDs. A table can address 8,192 elements even when only a few distinct resources are bound.
+- **Fix:** fixed arrays use the reflected uniform slots and offsets directly. Large tables export as runtime descriptor arrays plus a read-only index map. Replay synchronizes GPU-written uniform bytes, resolves the active pool bases, and binds one descriptor per distinct live pair. The map preserves the guest index and sends empty and out-of-range entries to a compatible dummy. A fixed C2 sampler comes from the driver table. Replay checks the device's descriptor-indexing features and limits before creating the pipeline. See [the uniform-handle layout](#an-array-of-handles-in-a-uniform-buffer) and [pool rebasing](#handles-from-uniform-buffers-take-the-bound-pools-bases).
+- **Check:** `uniform_texture_array` samples slot 8,057, duplicate pairs, a hole, a truncated buffer, an incompatible image view and changed pool bases. The fixture covers CPU updates, GPU writes in the current and previous submission, and a fixed C2 sampler. The exporter test validates the resulting SPIR-V and its companion map.
+- **Found on:** [Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#found-on-this-game), shader `bd619b15fcd2a711`.
 
 ### Tested tools and compiler-specific shader caches
 
