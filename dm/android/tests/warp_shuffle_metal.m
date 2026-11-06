@@ -48,10 +48,10 @@ int main(int argc, const char **argv) { @autoreleasepool {
     id<MTLCommandQueue> queue = [device newCommandQueue];
     for (NSDictionary *test in cases) { @autoreleasepool {
         if (!check(directory, test, device, queue)) {
-            fprintf(stderr, "Metal warp comparison failed for %s\n", [test[@"key"] UTF8String]);
+            fprintf(stderr, "Metal compute comparison failed for %s\n", [test[@"key"] UTF8String]);
             return 1;
         }
     } }
-    printf("Metal verified %lu guest shuffle cases\n", (unsigned long)cases.count);
+    printf("Metal verified %lu guest compute cases\n", (unsigned long)cases.count);
     return 0;
 } }
