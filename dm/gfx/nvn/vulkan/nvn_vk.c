@@ -2493,13 +2493,14 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
         if (!(fp.bufferFeatures & (storage ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT : VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT))) ok=0;
         if (ok) {
             *out=(texel_range){.range={.addr=(uintptr_t)tr.t.mem,.size=size},.format=f.f,.bytes=(uint32_t)physical_bytes,.scaled=scaled};
-            uint8_t sw[4]={2,3,4,5};
-            sampled_swizzle(sw,f,&tr.t,&tr.v,tr.has_v);
-            for (unsigned c=0;c<4;c++) if (sw[c]>5) sw[c]=2+c;
-            uint32_t map=sw[0]|(sw[1]<<3)|(sw[2]<<6)|(sw[3]<<9);
-            if (map!=(2|3<<3|4<<6|5<<9)) {
-                if (storage) ok=0;
-                else out->swizzle=map+1;
+            if (!storage) {
+                // Storage operations address the original channels, like
+                // Metal's identity image view of a swizzled registration.
+                uint8_t sw[4]={2,3,4,5};
+                sampled_swizzle(sw,f,&tr.t,&tr.v,tr.has_v);
+                for (unsigned c=0;c<4;c++) if (sw[c]>5) sw[c]=2+c;
+                uint32_t map=sw[0]|(sw[1]<<3)|(sw[2]<<6)|(sw[3]<<9);
+                if (map!=(2|3<<3|4<<6|5<<9)) out->swizzle=map+1;
             }
             if ((fp.bufferFeatures & both)!=both)
                 out->single_usage=storage ? VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT : VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;

@@ -2741,8 +2741,8 @@ static void typed_writable_aliases(void) {
         tex_t views[2];
         for (int i=0;i<2;i++) {
             views[i]=(tex_t){.serial=0xfac0+2*shift+8*split+i, .mem=(uint8_t *)(first+i*shift),
-                .d={.width=i?4:7,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_BUFFER,.format=NVN_FORMAT_R32UI}};
-            nvn_tex_layout(&views[i].d,&views[i].L); mtl_reg_tex(984+i,&views[i],NULL);
+                .d={.width=i?4:7,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_BUFFER,.format=NVN_FORMAT_R32UI,.flags=NVN_TEXTURE_FLAGS_IMAGE}};
+            nvn_tex_layout(&views[i].d,&views[i].L);
         }
         view_t maps[]={{.set_swizzle=1,.swz={2,0,2,1}},{.set_swizzle=1,.swz={2,2,1,0}}};
         for (int i=0;i<2;i++) mtl_reg_tex(987+i,&views[i],&maps[i]);
@@ -2757,7 +2757,9 @@ static void typed_writable_aliases(void) {
         unsigned slot=getenv("DM_VK_TEST_TEXEL_DYNAMIC") ? (shift+split)%2 : 1;
         uint32_t params[]={shift,slot,0,0}; push_constants(&list,1,240,params,sizeof params);
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&texel_alias_program,.stages=0x20);
-        RECORD(OP_BIND_IMG,p_bind_handles,.stage=5,.first=0,.n=2,.h={984,985});
+        // The same registered views keep their component maps for sampling,
+        // but storage writes, reads and atomics use the identity mapping.
+        RECORD(OP_BIND_IMG,p_bind_handles,.stage=5,.first=0,.n=2,.h={987,988});
         RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=2,.h={987,988});
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)result,.size=sizeof result);
         RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
@@ -2769,7 +2771,7 @@ static void typed_writable_aliases(void) {
             if (i==1+shift) want=131;
             assert(words[i]==want);
         }
-        for (int i=0;i<2;i++) { mtl_reg_tex(984+i,NULL,NULL); mtl_reg_tex(987+i,NULL,NULL); mtl_tex_release(&views[i]); }
+        for (int i=0;i<2;i++) { mtl_reg_tex(987+i,NULL,NULL); mtl_tex_release(&views[i]); }
         mtl_queue_forget(984);
     }
     puts("Shifted typed views share in-dispatch writes, atomics, fetches and guest sizes");
