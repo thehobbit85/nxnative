@@ -7,8 +7,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / 'dm/tools/tests'), str(ROOT / 'dm/gfx/tests')]
 from dm.android.tests.compute_words_fixture import GUARD, export_cases
-from dm.android.tests.nvn2_layout_fixture import load, store
-from test_dmsh_ampere_alu import s2r_tid, waiting
+from dm.android.tests.ampere_buffer_ops import read_word, record_address
+from dm.android.tests.nvn2_layout_fixture import store
 from test_dmsh_control_flow import EXIT, assemble, bits
 from test_dmsh_hmma import hmma_msl
 
@@ -53,13 +53,10 @@ def matrices(width, k, fp32, iterations):
 
 def program(k, fp32, iterations):
     # Each lane owns 16 words: A0..3, B0..1, C0..3, D0..3 and guard words.
-    ops = [s2r_tid(9), load(4, 3, 56, 5),
-           waiting(bits((0, 12, 0x824), (12, 3, 7), (16, 8, 4), (24, 8, 9),
-                        (32, 32, 64), (64, 8, 4), (81, 3, 7), (110, 3, 7)))]
+    ops = record_address(64)
     for reg, word in ([(16 + i, i) for i in range(k // 4)] + [(20 + i, 4 + i) for i in range(k // 8)]
                       + [(24 + i, 6 + i) for i in range(4 if fp32 else 2)]):
-        ops.append(bits((0, 12, 0x381), (12, 3, 7), (16, 8, reg), (24, 8, 4), (40, 24, word * 4),
-                        (72, 1, 1), (73, 3, 4), (110, 3, 7)))
+        ops.append(read_word(reg, word))
     for i in range(iterations):
         ops.append(bits((0, 12, 0x23c), (12, 3, 7), (16, 8, 28), (24, 8, 16), (32, 8, 20),
                         (64, 8, 28 if i else 24), (75, 1, k == 16), (76, 1, fp32), (110, 3, 7)))

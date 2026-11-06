@@ -40,7 +40,19 @@ static BOOL check(NSString *directory, NSDictionary *test, id<MTLDevice> device,
     [enc endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
-    return cmd.status == MTLCommandBufferStatusCompleted && memcmp(words, expected.bytes, expected.length) == 0;
+    if (cmd.status != MTLCommandBufferStatusCompleted) {
+        fprintf(stderr, "%s\n", cmd.error.description.UTF8String);
+        return NO;
+    }
+    const uint32_t *reference = expected.bytes;
+    for (size_t i = 0; i < expected.length / sizeof(*words); i++) {
+        if (words[i] != reference[i]) {
+            fprintf(stderr, "%s word %zu: got %08x, expected %08x\n",
+                    [test[@"key"] UTF8String], i, words[i], reference[i]);
+            return NO;
+        }
+    }
+    return YES;
 }
 
 int main(int argc, const char **argv) { @autoreleasepool {
