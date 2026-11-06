@@ -14,11 +14,14 @@ import java.util.concurrent.atomic.AtomicReference;
 /** The native host still runs once per :game process. */
 public final class GameActivity extends NativeActivity {
     private final Binder processLifetime = new Binder();
+    private GameControllers controllers;
     private OfflineWeb web;
+    static native boolean nativePadAttach(int id, String descriptor);
+    static native void nativePadDetach(int id);
     private boolean paused;
     static native void nativeWebEvent(long id, int kind, int reason, byte[] message);
     static native long[] nativeWebPad();
-    private static native boolean nativeWebKey(int device, int key, int action);
+    private static native boolean nativeWebKey(int device, int key, int action, boolean controller);
     private static native void nativeWebAxes(int device, float[] axes);
     private static String text(byte[] bytes) { return bytes == null ? "" : new String(bytes, StandardCharsets.UTF_8); }
 
@@ -47,13 +50,17 @@ public final class GameActivity extends NativeActivity {
             }
         });
     }
+    @Override protected void onCreate(Bundle saved) {
+        super.onCreate(saved); // NativeActivity registers the native input methods here.
+        controllers = new GameControllers(this);
+    }
     @Override protected void onPause() { paused = true; if (web != null) web.pause(true); super.onPause(); }
     @Override protected void onResume() { super.onResume(); paused = false; if (web != null) web.pause(false); }
-    @Override protected void onDestroy() { if (web != null) { web.close(); web = null; } super.onDestroy(); }
+    @Override protected void onDestroy() { if (controllers != null) controllers.close(); if (web != null) { web.close(); web = null; } super.onDestroy(); }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if (web != null && web.active()) {
             if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) { if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) web.back(); return true; }
-            if (nativeWebKey(event.getDeviceId(), event.getKeyCode(), event.getAction())) return true;
+            if (nativeWebKey(event.getDeviceId(), event.getKeyCode(), event.getAction(), GameControllers.isController(event.getSource()))) return true;
         }
         return super.dispatchKeyEvent(event);
     }

@@ -13,7 +13,7 @@ from dm.tools.tests.test_nso import make_nso
 from dm.host.tests.gate.fixture import module
 
 
-def build(output, ndk, program=None, web=False, display=False, watch=False):
+def build(output, ndk, program=None, web=False, display=False, watch=False, controllers=False):
     output.mkdir(parents=True, exist_ok=True)
     tc = ndk / 'toolchains/llvm/prebuilt' / ('darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64') / 'bin'
     asm = output / 'entry.S'
@@ -43,6 +43,9 @@ def build(output, ndk, program=None, web=False, display=False, watch=False):
                        web_appear='_ZN2nn3web17OfflineWebSession6AppearEv', web_exit='_ZN2nn3web17OfflineWebSession11RequestExitEv',
                        web_send='_ZN2nn3web17OfflineWebSession21TrySendContentMessageEPKcm',
                        web_recv='_ZN2nn3web17OfflineWebSession24TryReceiveContentMessageEPmPcm')
+    if controllers:
+        imports['hid_full'] = '_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj'
+        imports['hid_ids'] = '_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm'
     if display:
         imports['vi_resolution'] = '_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE'
     source = '.section .start,"ax"\n.global _start\n_start: b nnMain\n.word 0\n'
@@ -58,6 +61,7 @@ def build(output, ndk, program=None, web=False, display=False, watch=False):
                     *(['-DAPP_PROGRAM=' + str(program)] if program is not None else []),
                     *(['-DAPP_WEB=1'] if web else []),
                     *(['-DAPP_DISPLAY=1'] if display else []),
+                    *(['-DAPP_CONTROLLERS=1'] if controllers else []),
                     *(['-DAPP_WATCH=' + str({'heap': 1, 'alias': 2, 'stack': 3}.get(watch, 1))] if watch else []),
                     '-I' + str(ROOT / 'dm/gfx/nvn'), '-I' + str(ROOT / 'dm/gfx/nvn/include'), ROOT / 'dm/android/tests/app_guest.c', asm, '-o', elf], check=True)
     symbols = {}
@@ -133,6 +137,7 @@ if __name__ == '__main__':
     p.add_argument('--web', action='store_true', help='offline HTML applet fixture')
     p.add_argument('--display', action='store_true', help='display resolution service fixture')
     p.add_argument('--watch', nargs='?', const='heap', choices=('heap', 'alias', 'stack'), help='managed write-watch diagnostic fixture')
+    p.add_argument('--controllers', action='store_true', help='sample two guest controllers for the Android input test')
     a = p.parse_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or --ndk')
-    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display, a.watch)
+    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display, a.watch, a.controllers)
