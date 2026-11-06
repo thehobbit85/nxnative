@@ -48,6 +48,11 @@ def _scratch_fits(module, size):
     return words <= 16384 // 4
 
 
+def _shared_warp_barrier(module, inst):
+    # The matrix helper exchanges workgroup words within the logical warp.
+    return opcode(inst) == 224 and tuple(module.constants.get(i) for i in inst[1:]) == (3, 3, 0x108)
+
+
 def _qualifies(module, lane):
     bools = set()
     in_function = False
@@ -69,7 +74,7 @@ def _qualifies(module, lane):
             # to removed variables. Only ordinary decorations are rewritten.
             return False
         scopes = inst[1:3] if op == 224 else inst[1:2] if op == 225 else ()
-        if any(module.constants.get(scope) == 3 for scope in scopes):
+        if any(module.constants.get(scope) == 3 for scope in scopes) and not _shared_warp_barrier(module, inst):
             # A subgroup barrier still synchronizes physical lanes.
             return False
         if 333 <= op <= 366:
@@ -156,7 +161,8 @@ def lower(data):
     builtins = dict(builtin_pairs)
     lane = builtins.get(41)
     exchanges = any(opcode(inst) in COLLECTIVES for inst in code)
-    if not exchanges and lane is None and not spv_warp_masks.MASKS.intersection(builtins):
+    needs_index = exchanges or lane is not None or bool(spv_warp_masks.MASKS.intersection(builtins))
+    if not needs_index and not any(opcode(i) == 224 for i in code):
         return data
     if len(builtins) != len(builtin_pairs):
         # A second, unused input variable may legally name the same built-in.
@@ -165,11 +171,17 @@ def lower(data):
     if not size:
         return data
     module = Module(data)
+    barriers = any(_shared_warp_barrier(module, inst) for inst in code)
+    if not barriers and not needs_index:
+        return data
     # A WorkgroupSize built-in takes precedence over LocalSize. Its value
     # may be specialized at pipeline creation, after we allocate the array.
     if 25 in builtins or set(range(36, 41)).intersection(builtins) or not _qualifies(module, lane):
         return data
-    if exchanges and (not _scratch_fits(module, size) or not spv_warp_flow.converged(code, COLLECTIVES)):
+    if exchanges and not _scratch_fits(module, size):
+        return data
+    sites = COLLECTIVES | {224} if barriers else COLLECTIVES
+    if (exchanges or barriers) and not spv_warp_flow.converged(code, sites):
         return data
     masks = spv_warp_masks.inputs(module, builtins)
     if masks is None:
@@ -179,7 +191,7 @@ def lower(data):
     input_types = {inst[2]: module.types[inst[1]][3] for inst in code if opcode(inst) == 59 and inst[3] == 1}
     if any(input_types.get(var) != module.uint for var in (lane, index) if var is not None):
         return data
-    if index is None:
+    if index is None and needs_index:
         index = module.variable(module.uint, 1)
         module.decorate(index, 11, 29)
     exchange = _Exchange(module, size, index) if exchanges else None
@@ -196,7 +208,7 @@ def lower(data):
             continue
         if masks and ((op in (5, 71) and inst[1] in masks) or (op in (59, 65, 66) and inst[2] in masks)):
             continue
-        if op == 15:
+        if op == 15 and index is not None:
             # A declared but previously unused index might be absent.
             end = next(i + 1 for i in range(3, len(inst)) if inst[i] < 0x01000000)
             interfaces = [key for key in inst[end:] if key not in (lane, index) and key not in masks]
@@ -206,6 +218,9 @@ def lower(data):
             output.append(instruction(199, module.uint, inst[2], linear, module.const(31)))
         elif op == 61 and inst[3] in masks:
             spv_warp_masks.emit(module, output, inst, index, *masks[inst[3]])
+        elif barriers and _shared_warp_barrier(module, inst):
+            scope = module.const(2)
+            output.append(instruction(224, scope, scope, inst[3]))
         elif op in COLLECTIVES and exchange is not None:
             exchange.emit(output, inst)
         else:

@@ -22,12 +22,18 @@ static BOOL check(NSString *directory, NSDictionary *test, id<MTLDevice> device,
     [args setArgumentBuffer:arguments offset:0];
     [args setBuffer:output offset:0 atIndex:[test[@"metal_slot"] unsignedIntegerValue]];
     uint32_t *words = output.contents;
-    for (size_t i = 0; i < output.length / sizeof(*words); i++) words[i] = 0xbaddecaf;
+    if (test[@"initial"]) {
+        NSData *initial = [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:test[@"initial"]]];
+        if (initial.length != output.length) return NO;
+        memcpy(words, initial.bytes, output.length);
+    } else {
+        for (size_t i = 0; i < output.length / sizeof(*words); i++) words[i] = 0xbaddecaf;
+    }
     id<MTLCommandBuffer> cmd = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:state];
     [enc setBuffer:arguments offset:0 atIndex:0];
-    [enc useResource:output usage:MTLResourceUsageWrite];
+    [enc useResource:output usage:(MTLResourceUsageRead | MTLResourceUsageWrite)];
     NSArray *local = test[@"local"];
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
         threadsPerThreadgroup:MTLSizeMake([local[0] unsignedIntegerValue], [local[1] unsignedIntegerValue], [local[2] unsignedIntegerValue])];
