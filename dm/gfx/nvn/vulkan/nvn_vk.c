@@ -49,6 +49,7 @@ static int g_segment_timestamps, g_cut_draws;
 static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
 static int g_draw_parameters, g_descriptor_tables;
 static uint32_t g_vertex_divisor_limit = 1;
+static VkPhysicalDeviceTexelBufferAlignmentProperties g_texel_limits;
 static VkPhysicalDeviceSubgroupProperties g_subgroup;
 static VkPhysicalDeviceSubgroupSizeControlProperties g_subgroup_sizes;
 static VkShaderStageFlags g_selectable_subgroup_stages;
@@ -466,12 +467,13 @@ static void vk_init_(void) {
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
     int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0, has_calibrated = 0;
     int divisor_ext = 0, divisor_khr = 0, descriptor_indexing = 0;
-    int border_ext = 0, border_swizzle_ext = 0;
+    int border_ext = 0, border_swizzle_ext = 0, texel_ext=0;
     for (uint32_t i = 0; i < ne; i++) {
         has_sc |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME); has_u8 |= !strcmp(ep[i].extensionName, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
         has_dr |= !strcmp(ep[i].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
         has_subgroup_sizes |= !strcmp(ep[i].extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
         has_calibrated |= !strcmp(ep[i].extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        texel_ext |= !strcmp(ep[i].extensionName,VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME);
         descriptor_indexing |= !strcmp(ep[i].extensionName, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
         border_ext |= !strcmp(ep[i].extensionName, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
         border_swizzle_ext |= !strcmp(ep[i].extensionName, VK_EXT_BORDER_COLOR_SWIZZLE_EXTENSION_NAME);
@@ -489,7 +491,13 @@ static void vk_init_(void) {
     else if (divisor_khr) props2.pNext=&div_khr_props;
     VkPhysicalDeviceCustomBorderColorPropertiesEXT border_props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT, props2.pNext};
     if (border_ext) props2.pNext = &border_props;
+    int relaxed_texels=!getenv("DM_VK_STRICT_TEXEL_ALIGNMENT") && (dv>=VK_API_VERSION_1_3 || texel_ext);
+    if (relaxed_texels) {
+        g_texel_limits=(VkPhysicalDeviceTexelBufferAlignmentProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_PROPERTIES,props2.pNext};
+        props2.pNext=&g_texel_limits;
+    }
     vkGetPhysicalDeviceProperties2(g_pd, &props2);
+    g_texel_limits.pNext=NULL;
     VkPhysicalDeviceSubgroupSizeControlFeatures size_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT u8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT};
     VkPhysicalDeviceDynamicRenderingFeaturesKHR dr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
@@ -499,6 +507,8 @@ static void vk_init_(void) {
     VkPhysicalDeviceShaderDrawParametersFeatures sdp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
     VkPhysicalDeviceDescriptorIndexingFeatures indexing = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
     void *chain = dv < VK_API_VERSION_1_2 && descriptor_indexing ? &indexing : NULL;
+    VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT texel_features={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_FEATURES_EXT,chain};
+    if (relaxed_texels && dv<VK_API_VERSION_1_3) chain=&texel_features;
     VkPhysicalDeviceCustomBorderColorFeaturesEXT border_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, chain};
     if (border_ext) chain = &border_features;
     VkPhysicalDeviceBorderColorSwizzleFeaturesEXT border_swizzle = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT, chain};
@@ -528,7 +538,12 @@ static void vk_init_(void) {
     if (getenv("DM_VK_NO_WIREFRAME")) f2.features.fillModeNonSolid = VK_FALSE;
     g_non_solid_fill = f2.features.fillModeNonSolid;
     f13.robustImageAccess = VK_FALSE;
-    const char *ext[9]; uint32_t next = 0;
+    const char *ext[10]; uint32_t next = 0;
+    if (dv<VK_API_VERSION_1_3) {
+        if (texel_features.texelBufferAlignment) ext[next++]=VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME;
+        else relaxed_texels=0;
+    }
+    if (!relaxed_texels) g_texel_limits=(VkPhysicalDeviceTexelBufferAlignmentProperties){0};
     if (border_features.customBorderColors && !getenv("DM_VK_NO_CUSTOM_BORDER")) {
         ext[next++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
         g_custom_border_limit = border_props.maxCustomBorderColorSamplers;
@@ -2376,10 +2391,21 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
 // ranges share one backing allocation, so writes and atomics through either
 // descriptor see the same bytes, including across vertex and fragment sets.
 #define MAX_BUFFER_BINDINGS (2 * DM_VK_MAX_BINDINGS * 32) // two stages, reflected bindings, descriptor-array elements
-typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; int has_texel; } storage_range;
+typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; VkDeviceSize texel_align; int writable, conflict; } storage_range;
 static storage_range g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
 static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
 typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes; } texel_range;
+// The staging buffers carry both texel usage bits. Their views must meet
+// both limits, even if this binding only reads. For three-component formats
+// Vulkan uses the component size for its single-texel alignment rule.
+static VkDeviceSize texel_alignment(uint32_t bytes) {
+    if (!g_texel_limits.uniformTexelBufferOffsetAlignmentBytes) return g_props.limits.minTexelBufferOffsetAlignment;
+    VkDeviceSize unit=bytes%3==0 ? bytes/3 : bytes;
+    VkDeviceSize u=g_texel_limits.uniformTexelBufferOffsetAlignmentBytes, s=g_texel_limits.storageTexelBufferOffsetAlignmentBytes;
+    if (g_texel_limits.uniformTexelBufferOffsetSingleTexelAlignment && unit<u) u=unit;
+    if (g_texel_limits.storageTexelBufferOffsetSingleTexelAlignment && unit<s) s=unit;
+    return u>s ? u : s;
+}
 static int texel_binding(const sbind *b, int stage, uint32_t element, texel_range *out) {
     *out = (texel_range){0};
     uint64_t handle = b->kind == K_IMG && b->reg >= 0 && (uint32_t)b->reg + element < 32 ? S.img[stage][b->reg + element] : sampled_handle(stage, b, element);
@@ -2444,38 +2470,45 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             if (count > 32) return 0;
             for (uint32_t element = 0; element < count; element++) {
             p_bind_buf u = storage_binding(b, s->stage);
-            if (is_texel(b)) { texel_range t; if (!texel_binding(b, s->stage, element, &t)) return 0; u = t.range; }
+            VkDeviceSize texel_align=0;
+            if (is_texel(b)) {
+                texel_range t; if (!texel_binding(b,s->stage,element,&t)) return 0;
+                u=t.range; if (u.addr) texel_align=texel_alignment(t.bytes);
+            }
             if (!u.addr || !u.size) continue;
             if (u.size > UINT64_MAX - u.addr) return 0;
             if (!is_texel(b) && u.size > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "storage range exceeds the device descriptor limit: requires shader address lowering"); return 0; }
             if (g_nstorage == sizeof g_storage / sizeof *g_storage) die("Vulkan: too many storage bindings");
-            g_storage[g_nstorage++] = (storage_range){.addr=u.addr, .size=u.size, .texel=u.addr, .has_texel=is_texel(b)};
+            g_storage[g_nstorage++] = (storage_range){.addr=u.addr, .size=u.size, .texel=u.addr, .texel_align=texel_align,
+                .writable=(b->type==BT_SSBO || b->type==BT_STB) && !b->read_only};
             }
         }
     }
     qsort(g_storage, g_nstorage, sizeof *g_storage, storage_order);
-    VkDeviceSize texel_align = g_props.limits.minTexelBufferOffsetAlignment;
     size_t n = 0;
     for (size_t i = 0; i < g_nstorage; i++) {
         storage_range *r = &g_storage[i];
         if (n && overlaps(g_storage[n-1].addr, g_storage[n-1].size, r->addr, r->size)) {
             storage_range *prev = &g_storage[n-1];
-            if (r->has_texel) {
-                if (prev->has_texel && prev->texel % texel_align != r->texel % texel_align) {
-                    RED_ONCE(23, "overlapping typed views have incompatible alignment: texel-coordinate lowering required"); return 0;
-                }
-                prev->has_texel = 1; prev->texel = r->texel;
-            }
+            // Both alignments are powers of two. The stricter residue satisfies
+            // both if they agree modulo the smaller alignment.
+            VkDeviceSize common=prev->texel_align<r->texel_align ? prev->texel_align : r->texel_align;
+            if (common && prev->texel%common!=r->texel%common) prev->conflict=1;
+            if (r->texel_align>prev->texel_align) { prev->texel_align=r->texel_align; prev->texel=r->texel; }
+            prev->writable|=r->writable;
             uint64_t end = r->addr + r->size;
             if (end > prev->addr + prev->size) prev->size = end - prev->addr;
         } else g_storage[n++] = *r;
     }
     g_nstorage = n;
-    VkDeviceSize align = g_props.limits.minStorageBufferOffsetAlignment;
-    if (align < g_props.limits.minTexelBufferOffsetAlignment) align = g_props.limits.minTexelBufferOffsetAlignment;
     for (size_t i = 0; i < n; i++) {
         storage_range *r = &g_storage[i];
-        VkDeviceSize prefix = r->has_texel ? (texel_align - (r->texel - r->addr) % texel_align) % texel_align : 0;
+        if (r->conflict && r->writable) {
+            RED_ONCE(23,"overlapping writable typed views require a shader texel-coordinate offset"); return 0;
+        }
+        VkDeviceSize ta=r->texel_align, align=g_props.limits.minStorageBufferOffsetAlignment;
+        if (ta>align) align=ta;
+        VkDeviceSize prefix=ta ? (ta-(r->texel-r->addr)%ta)%ta : 0;
         if (!prefix && gw_find(r->addr, r->size, align, &r->buf, &r->off, &r->p)) continue;
         VkDeviceSize offset = copy_in_at(r->addr, r->size, align, prefix);
         if (offset == VK_WHOLE_SIZE) return 0;
@@ -2497,11 +2530,11 @@ static int prepare_storage(shader_t **first, shader_t **second) {
     }
     return 1;
 }
-static int prepared_storage(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off, uint8_t **p) {
+static const storage_range *prepared_storage(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off, uint8_t **p) {
     for (size_t i = 0; i < g_nstorage; i++) {
         const storage_range *r = &g_storage[i];
         if (r->buf && addr >= r->addr && addr - r->addr < r->size && size <= r->size - (addr - r->addr)) {
-            *buf = r->buf; *off = r->off + addr - r->addr; *p = r->p + (addr - r->addr); return 1;
+            *buf = r->buf; *off = r->off + addr - r->addr; *p = r->p + (addr - r->addr); return r;
         }
     }
     return 0;
@@ -2513,10 +2546,18 @@ static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
         texel_range t; if (!texel_binding(b, stage, element, &t)) return 0;
         VkBuffer buffer = g_zero_buf; VkDeviceSize offset = 0, size = 256; uint8_t *mapped = NULL;
         if (t.range.addr) {
-            if (!prepared_storage(t.range.addr, t.range.size, &buffer, &offset, &mapped)) return 0;
+            const storage_range *group=prepared_storage(t.range.addr,t.range.size,&buffer,&offset,&mapped);
+            if (!group) return 0;
             size = t.range.size;
-            if (offset % g_props.limits.minTexelBufferOffsetAlignment) {
-                RED_ONCE(23, "overlapping typed buffers need texel-coordinate lowering for this alignment"); return 0;
+            VkDeviceSize align=texel_alignment(t.bytes);
+            if (offset%align) {
+                // prepare_storage certified that no shader stage can write
+                // this overlapping group. An independently aligned snapshot
+                // observes exactly the same prior GPU writes.
+                if (group->writable || (b->type==BT_STB && !b->read_only)) return 0;
+                offset=copy_in(t.range.addr,size,align);
+                if (offset==VK_WHOLE_SIZE) return 0;
+                buffer=C->ring;
             }
         } else t.format = b->num == 1 ? VK_FORMAT_R32G32B32A32_SINT : b->num == 2 ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT;
         VkBufferViewCreateInfo vi = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, buffer, t.format, offset, size};

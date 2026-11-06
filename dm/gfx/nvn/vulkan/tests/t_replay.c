@@ -2728,7 +2728,9 @@ static void typed_buffers(void) {
     const int offsets[] = {0,4,12,60,256};
     for (int missing = 0; missing < 2; missing++) for (int split = 0; split < 2; split++) for (unsigned c = 0; c < sizeof offsets/sizeof *offsets; c++) {
         int offset = offsets[c];
-        float f[2][N] = {{0.25f,0.5f,0.75f,1}, {2,3,4,5}};
+        // Both array elements cover the same bytes shifted by one R32F texel.
+        const float expected_samples[N+1]={.25f,.5f,.75f,1,2};
+        float samples[N+1]={0,0,0,0,2}; float *f[]={samples,samples+1};
         int32_t signed_values[N] = {-10,-20,-30,-40}; uint32_t unsigned_values[N] = {10,20,30,40};
         uint32_t storage[256], previous[N] = {0}, result[N][8] = {0}, consumer[N] = {0};
         for (int i = 0; i < 256; i++) storage[i] = 0xabcdef01;
@@ -2748,6 +2750,10 @@ static void typed_buffers(void) {
         view_t view = {.set_format = 1, .format = NVN_FORMAT_R32UI}; mtl_reg_tex(963, &tex[3], &view);
         if (missing) mtl_reg_tex(961, NULL, NULL);
         mtl_queue_activate(960); mtl_sub_begin(); list_t list = {0};
+        push_constants(&list,1,240,expected_samples,N*sizeof(float));
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)samples,.size=N*sizeof(float));
+        RECORD(OP_DISPATCH,p_dispatch,.x=N,.y=1,.z=1);
         uint32_t values[N] = {70,80,90,100}; push_constants(&list, 1, 240, values, sizeof values);
         RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &groups, .stages = 0x20);
         RECORD(OP_BIND_SSBO, p_bind_buf, .stage = 5, .index = 0, .addr = (uintptr_t)previous, .size = sizeof previous);
@@ -2770,7 +2776,7 @@ static void typed_buffers(void) {
         RECORD(OP_DISPATCH, p_dispatch, .x = N, .y = 1, .z = 1);
         put(&list, OP_END, NULL, 0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
         for (int i = 0; i < N; i++) {
-            uint32_t want[8] = {500+i,510+i,610+i,(uint32_t)(f[0][i]*16),missing?0:(uint32_t)(f[1][i]*16),(uint32_t)(signed_values[i]+100),unsigned_values[i]+values[i],3*N};
+            uint32_t want[8] = {500+i,510+i,610+i,(uint32_t)(expected_samples[i]*16),missing?0:(uint32_t)(expected_samples[i+1]*16),(uint32_t)(signed_values[i]+100),unsigned_values[i]+values[i],3*N};
             if (memcmp(result[i], want, sizeof want)) fprintf(stderr, "typed buffers split%d offset%d element%d: %u,%u,%u expected%u,%u,%u\n", split,offset,i,result[i][0],result[i][1],result[i][2],want[0],want[1],want[2]);
             assert(!memcmp(result[i], want, sizeof want)); assert(target[i] == 610u+i); assert(consumer[i] == 1610u+i);
         }
