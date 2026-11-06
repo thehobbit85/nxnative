@@ -697,6 +697,65 @@ static void nested_depth_ranges(void) {
     puts("Vulkan nested program binding, reversed depth and zero far depth passed");
 }
 
+static void scissored_attachment_clears(void) {
+    tex_t color[2], depth, sampled;
+    tex_t target = {.d = {.width = 8, .height = 8, .depth = 1, .levels = 1,
+        .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&target.d, &target.L);
+    color[0] = color[1] = sampled = depth = target;
+    color[0].serial = 0x8110; color[1].serial = 0x8111;
+    depth.serial = 0x8112; sampled.serial = 0x8113;
+    depth.d.format = NVN_FORMAT_DEPTH32F;
+    nvn_tex_layout(&depth.d, &depth.L);
+    uint8_t pixels[3][8*8*4];
+    list_t list = {0};
+    RECORD(OP_SET_RT, p_set_rt, .n = 2, .color = {color, color+1}, .depth = &depth);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 0, .mask = 15, .rgba = {0,0,1,1});
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 1, .mask = 15, .rgba = {1,0,1,1});
+    RECORD(OP_CLEAR_DS, p_clear_ds, .depth = 1, .depth_mask = 1);
+    RECORD(OP_SCISSOR, p_scissor, .x = -1, .y = 1, .w = 4, .h = 3);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 1, .mask = 15, .rgba = {0,1,0,1});
+    RECORD(OP_CLEAR_DS, p_clear_ds, .depth = 0.25f, .depth_mask = 1);
+    RECORD(OP_SCISSOR, p_scissor, .x = 5, .y = 3, .w = INT32_MAX, .h = 2);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 0, .mask = 15, .rgba = {1,0,0,1});
+    RECORD(OP_CLEAR_DS, p_clear_ds, .depth = 0.75f, .depth_mask = 1);
+    RECORD(OP_SCISSOR, p_scissor, .x = 12, .y = 0, .w = 2, .h = 8);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 1, .mask = 15, .rgba = {0,0,0,0});
+    RECORD(OP_CLEAR_DS, p_clear_ds, .depth = 0, .depth_mask = 1);
+    RECORD(OP_SCISSOR, p_scissor, .x = 0, .y = 0, .w = 8, .h = 8);
+    RECORD(OP_CLEAR_COLOR, p_clear_color, .index = 0, .mask = 0, .rgba = {0,0,0,0});
+    for (int i = 0; i < 2; ++i) {
+        RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &color[i], .src = (uintptr_t)pixels[i],
+               .r = {.width = 8, .height = 8, .depth = 1});
+    }
+    samp_par nearest = {0};
+    mtl_reg_tex(907, &depth, NULL); mtl_reg_samp(907, &nearest);
+    RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&sampled});
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &depth_copy_program, .stages = 3);
+    RECORD(OP_BIND_TEX1, p_bind_tex1, .stage = 1|BIND_TEX1_NOBASE, .slot = 0, .h = 907|(907ull<<20));
+    RECORD(OP_DRAW, p_draw, .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1);
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex = &sampled, .src = (uintptr_t)pixels[2],
+           .r = {.width = 8, .height = 8, .depth = 1});
+    put(&list, OP_END, NULL, 0);
+    for (int origin = 0; origin < 2; ++origin) {
+        mtl_queue_activate(0x8110);
+        mtl_set_origin_lower_left(origin); mtl_set_queue_origin_lower_left(origin);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {
+            int left = x < 3 && y >= 1 && y < 4;
+            int right = x >= 5 && y >= 3 && y < 5;
+            uint8_t expected[][4] = {{right?255:0,0,right?0:255,255}, {left?0:255,left?255:0,left?0:255,255},
+                                     {left?64:right?191:255,0,0,255}};
+            for (int i = 0; i < 3; ++i) if (memcmp(pixels[i] + 4*(8*y+x), expected[i], 4))
+                die("scissored clear origin %d attachment %d at %d,%d", origin, i, x, y);
+        }
+        mtl_queue_forget(0x8110);
+    }
+    mtl_reg_tex(907, NULL, NULL);
+    mtl_tex_release(&color[0]); mtl_tex_release(&color[1]); mtl_tex_release(&depth); mtl_tex_release(&sampled);
+    puts("Vulkan clipped clears preserved both color targets and sampled depth");
+}
+
 // Same expectations as Metal's t_queue_origin: queue-latched raster origin
 // changes facing; the device origin changes clip Y within the viewport only.
 static void origin_facing(void) {
@@ -1358,6 +1417,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
@@ -1411,5 +1471,6 @@ int main(void) {
     origin_facing();
     queue_viewport_origin();
     nested_depth_ranges();
+    scissored_attachment_clears();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
