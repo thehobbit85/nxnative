@@ -346,6 +346,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Cause:** a sampler built with `SamplerBuilderSetReductionFilter` (min / max) was averaged by the host. Metal 26 has the same thing (`MTLSamplerDescriptor.reductionMode`), but ignores it with a nearest or no mip filter.
 - **Fix:** reduction samplers filter mips linearly (`samp_by_id`): at the integer LODs reductions are used with, that is the same level.
+- **Android DrawTexture:** on the ARM64 emulator, a native R32F minimum or maximum sampler returned the weighted average even though the Vulkan 1.3 device advertised the feature. The same command list on its host Lavapipe driver returned the requested extrema. For ordinary 2D rectangle draws the Vulkan backend selects the contributing mip levels from the rectangle scale and sampler limits, point-samples using the sampler's addressing, then takes the component-wise minimum or maximum of texels with nonzero weight. The public recorder checks R32F and RGBA8, including repeat edges, exact texel centers and fractional mip levels. Anisotropic reduction and reduction in translated guest shaders remain open. Metal's native min/max mode requires Apple GPU family 10.
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md): its depth pyramid is built with a min-reduction sampler (`SamplerBuilderSetReductionFilter 1`; `151607c7a92386cc` samples the level above at an explicit LOD).
 
 ### Sampler LOD bias

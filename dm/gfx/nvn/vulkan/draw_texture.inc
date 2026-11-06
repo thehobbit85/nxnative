@@ -40,6 +40,44 @@ static VkImageView draw_texture_source(vtex *v, const treg_t *tr) {
     return tex_view(v,&tr->t,&vw,tr->has_v,VK_IMAGE_VIEW_TYPE_2D,VIEW_SAMPLED);
 }
 
+typedef struct {
+    float dst[2], src[2], scale[2];
+    int32_t reduction, linear, level0, level1;
+} draw_texture_params;
+
+// The rectangle's texel-to-pixel ratio is constant. Select its mip footprint
+// once and let the shader combine the actual texels before any averaging.
+static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *tr, draw_texture_params *params) {
+    if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) return sampler_for(p);
+    if (p.aniso > 1 || p.cmp_mode) {
+        RED_ONCE(103, "DrawTexture reduction with anisotropy or depth comparison is unavailable");
+        return sampler_for(p);
+    }
+    uint32_t levels = v->levels;
+    if (tr->has_v && tr->v.set_levels) {
+        if (tr->v.base_level >= levels) return VK_NULL_HANDLE;
+        levels -= tr->v.base_level;
+        if (tr->v.nlevels && tr->v.nlevels < levels) levels = tr->v.nlevels;
+    }
+    float rho = fmaxf(fabsf(params->scale[0]), fabsf(params->scale[1]));
+    float lod = log2f(rho) + fminf(15.99f, fmaxf(-16, p.lod_bias));
+    if (p.minf >= NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST) lod = fminf(p.lod_max, fmaxf(p.lod_min, lod));
+    params->reduction = p.reduction;
+    params->linear = lod > 0 ? (p.minf & 1) : p.magf;
+    lod = p.minf < NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST ? 0 : fminf(levels-1, fmaxf(0,lod));
+    if (p.minf >= NVN_MIN_FILTER_NEAREST_MIPMAP_LINEAR) {
+        params->level0 = (int)floorf(lod);
+        params->level1 = (int)ceilf(lod);
+    } else {
+        params->level0 = params->level1 = (int)ceilf(lod - .5f);
+    }
+    // Point samples retain the registered sampler's addressing and border.
+    p.minf = NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST; p.magf = NVN_MAG_FILTER_NEAREST;
+    p.reduction = NVN_SAMPLER_REDUCTION_AVERAGE; p.lod_bias = 0;
+    p.lod_min = 0; p.lod_max = VK_LOD_CLAMP_NONE;
+    return sampler_for(p);
+}
+
 static void draw_texture(const p_draw_tex *c) {
     static const uint32_t code[] =
 #include "draw_texture.frag.inc"
@@ -52,8 +90,9 @@ static void draw_texture(const p_draw_tex *c) {
     treg_t tr;
     vtex *v = registered_texture((int)(c->h & 0xfffff), &tr);
     int sid = (int)(c->h >> 20);
+    draw_texture_params params = {{c->d.x0,c->d.y0}, {c->s.x0,c->s.y0}, {(c->s.x1-c->s.x0)/dw,(c->s.y1-c->s.y0)/dh}};
     pthread_mutex_lock(&g_rmu);
-    VkSampler sampler = sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? samp_get(sid) : VK_NULL_HANDLE;
+    VkSampler sampler = v && sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? draw_texture_sampler(g_sreg[sid],v,&tr,&params) : VK_NULL_HANDLE;
     pthread_mutex_unlock(&g_rmu);
     if (!v || !sampler) { RED_ONCE(102, "DrawTexture handle has no texture or sampler"); return; }
     int type = tr.has_v && tr.v.set_target ? tr.v.target : tr.t.d.target;
@@ -65,7 +104,6 @@ static void draw_texture(const p_draw_tex *c) {
     barrier_all(C->cb);
     VkImageView source = draw_texture_source(v,&tr);
     if (!source) return;
-    float params[] = {c->d.x0,c->d.y0,c->s.x0,c->s.y0,(c->s.x1-c->s.x0)/dw,(c->s.y1-c->s.y0)/dh};
     if (!layout) layout = image_draw_layout(&fragment,sizeof params);
     clear_shader(&fragment,code,sizeof code);
     VkDescriptorSet set = image_draw_set(&fragment,source,sampler);
@@ -90,7 +128,7 @@ static void draw_texture(const p_draw_tex *c) {
         begin_tracked_pass(&pass);
         clear_draw_state(pipeline,rect,size,0);
         vkCmdBindDescriptorSets(C->cb,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,1,&set,0,NULL);
-        vkCmdPushConstants(C->cb,layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof params,params);
+        vkCmdPushConstants(C->cb,layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof params,&params);
         vkCmdDraw(C->cb,3,1,0,0);
         rp_end(C->cb);
         barrier_all(C->cb);
