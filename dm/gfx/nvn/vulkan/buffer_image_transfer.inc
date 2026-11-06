@@ -6,19 +6,24 @@ typedef struct {
     size_t bytes, rows, row_pitch, image_pitch, span;
 } buffer_image_layout;
 
-static int buffer_image_region(const vtex *v, const p_copy_b2t *c, buffer_image_layout *layout) {
+static int buffer_image_region(const vtex *v, const p_copy_b2t *c, uint32_t record_size, buffer_image_layout *layout) {
     const NVNcopyRegion *r = &c->r;
+    // New recordings carry the command buffer's pitches after the texture
+    // snapshot. Older captures changed queue state with OP_COPY_STRIDE.
+    const p_copy_strides *strides = copy_strides(c, record_size);
+    int64_t row_stride = strides ? strides->row : S.copy_stride;
+    int64_t image_stride = strides ? strides->image : S.copy_img_stride;
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     VkBufferImageCopy region = {0};
     if (!bpb || !c->src || r->xoffset % bw || r->yoffset % bh ||
-        S.copy_stride < 0 || S.copy_img_stride < 0 || v->samples != VK_SAMPLE_COUNT_1_BIT ||
+        row_stride < 0 || image_stride < 0 || v->samples != VK_SAMPLE_COUNT_1_BIT ||
         !texture_copy_region(v, c->has_view ? &c->view : NULL, r, &region.imageSubresource,
                              &region.imageOffset, &region.imageExtent)) return 0;
     uint32_t slices = r->depth ? (uint32_t)r->depth : 1;
     size_t bytes = ((size_t)r->width + bw - 1) / bw * bpb, rows = ((size_t)r->height + bh - 1) / bh;
-    size_t row = S.copy_stride ? (size_t)S.copy_stride : bytes;
+    size_t row = row_stride ? (size_t)row_stride : bytes;
     if (row < bytes || row > SIZE_MAX / rows) return 0;
-    size_t image = S.copy_img_stride ? (size_t)S.copy_img_stride : row * rows;
+    size_t image = image_stride ? (size_t)image_stride : row * rows;
     size_t end = (rows - 1) * row + bytes;
     if (image < end || (slices > 1 && image > (SIZE_MAX - end) / (slices - 1))) return 0;
     size_t span = (slices - 1) * image + end;
@@ -77,13 +82,13 @@ static VkDeviceSize transfer_alignment(const vtex *v) {
 
 #include "stored_transfer.inc"
 
-static void copy_b2t(const p_copy_b2t *c) {
+static void copy_b2t(const p_copy_b2t *c, uint32_t record_size) {
     if (!c->tex || (vk_skip() & SK_B2T)) return;
     if (g_plog) LOG("plog:  b2t serial %llu fmt %#x %dx%d at %d,%d,%d", (unsigned long long)c->tex->serial, c->tex->d.format, c->r.width, c->r.height, c->r.xoffset, c->r.yoffset, c->r.zoffset);
     vtex *v = tex_get(c->tex, 0);
     if (!v) return;
     buffer_image_layout l;
-    if (!buffer_image_region(v, c, &l)) { RED_ONCE(50, "invalid buffer-to-texture region or strides"); return; }
+    if (!buffer_image_region(v, c, record_size, &l)) { RED_ONCE(50, "invalid buffer-to-texture region or strides"); return; }
     pass_end();
     if (mirror_upload(c->tex,v)) {
         if (stored_transfer(c,&l,1)) C->cut_copy=1;
@@ -97,13 +102,13 @@ static void copy_b2t(const p_copy_b2t *c) {
     v->gpu = 1;
 }
 
-static void copy_t2b(const p_copy_b2t *c) {
+static void copy_t2b(const p_copy_b2t *c, uint32_t record_size) {
     if (!c->tex || (vk_skip() & SK_T2B)) return;
     pass_end();
     vtex *v = tex_get(c->tex, 0);
     if (!v) return;
     buffer_image_layout l;
-    if (!buffer_image_region(v, c, &l)) { RED_ONCE(51, "invalid texture-to-buffer region or strides"); return; }
+    if (!buffer_image_region(v, c, record_size, &l)) { RED_ONCE(51, "invalid texture-to-buffer region or strides"); return; }
     if (v->f.dec) {
         if (!stored_transfer(c,&l,0)) RED_ONCE(51,"unavailable original BC blocks for format %#x",c->tex->d.format);
         return;

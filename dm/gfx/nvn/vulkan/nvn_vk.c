@@ -4043,9 +4043,9 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_DRAW: { p_draw t; if (!conditional_skip) draw(draw_rec(a, h.size, &t), NULL); break; }
             case OP_DRAW_IDX: { p_draw_idx t; if (!conditional_skip) draw(NULL, draw_idx_rec(a, h.size, &t)); break; }
             case OP_DISPATCH: dispatch((const p_dispatch *)a); break;
-            case OP_COPY_B2T: copy_b2t((const p_copy_b2t *)a); break;
+            case OP_COPY_B2T: copy_b2t((const p_copy_b2t *)a, h.size); break;
             case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
-            case OP_COPY_T2B: copy_t2b((const p_copy_b2t *)a); break;
+            case OP_COPY_T2B: copy_t2b((const p_copy_b2t *)a, h.size); break;
             case OP_DLSS: dlss_eval((const p_dlss *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
             case OP_BARRIER: {
