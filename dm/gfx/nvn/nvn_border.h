@@ -8,11 +8,14 @@
 #include <string.h>
 
 static const float nvn_mtl_border[3][4] = { {0, 0, 0, 0}, {0, 0, 0, 1}, {1, 1, 1, 1} };
+static inline int nvn_stock_border(const float B[4]) {
+    return B[3] > 0.5f ? (B[0] > 0.5f ? 2 : 1) : 0;
+}
 // B: NVN's border colour; wrap: the s, t, r wrap modes (NVN: 4 mirror-clamp-to-border, 5 clamp-to-border); reduction: NVN's (1 min, 2 max). → whether a twin is needed; bn always,
 // bw and k only then
 static inline int nvn_border(const float B[4], const uint8_t wrap[3], int reduction, int *bn, int *bw, float k[4]) {
-    *bn = B[3] > 0.5f ? (B[0] > 0.5f ? 2 : 1) : 0;
-    for (int c = 0; c < 3; c++) if (!memcmp(B, nvn_mtl_border[c], sizeof nvn_mtl_border[c])) { *bn = c; return 0; }
+    *bn = nvn_stock_border(B);
+    if (!memcmp(B, nvn_mtl_border[*bn], sizeof nvn_mtl_border[*bn])) return 0;
     int border = 0; for (int i = 0; i < 3; i++) border |= wrap[i] == 4 || wrap[i] == 5;
     if (!border || reduction == 1 || reduction == 2) return 0;
     for (int pass = 0; pass < 2; pass++) {

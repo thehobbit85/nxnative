@@ -21,6 +21,7 @@ static prog_t restart_program={.nstage=2};
 static prog_t table_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t warp_program[2] = {{.nstage = 1}, {.nstage = 1}};
 static prog_t driver_program = {.nstage = 1};
+static prog_t typed_border_program = {.nstage=1};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -62,6 +63,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p==&typed_border_program) { assert(stage==0); memset(key,0,8); key[7]=0x69; return 1; }
     if (p==&mixed_color_program) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x67 : 0x52; return 1; }
     for (int i=0;i<2;++i) if (p==&logic_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x64+i : 0x52; return 1; }
     for (int i=0;i<3;++i) if (p==&alpha_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x61+i : 0x52; return 1; }
@@ -228,7 +230,7 @@ static void textured_draw(int compact, int split_submit) {
     }
 }
 
-static VkPhysicalDeviceFeatures replay_features(void) {
+static VkPhysicalDeviceFeatures replay_features(int *custom_border) {
     VkInstance instance;
     VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "upload replay", 0, NULL, 0, VK_API_VERSION_1_1};
@@ -240,6 +242,20 @@ static VkPhysicalDeviceFeatures replay_features(void) {
     assert((result == VK_SUCCESS || result == VK_INCOMPLETE) && count);
     VkPhysicalDeviceFeatures features;
     vkGetPhysicalDeviceFeatures(physical, &features);
+    if (custom_border) {
+        uint32_t n=0;
+        assert(vkEnumerateDeviceExtensionProperties(physical,NULL,&n,NULL)==VK_SUCCESS);
+        VkExtensionProperties *ext=calloc(n?n:1,sizeof *ext);
+        assert(ext && vkEnumerateDeviceExtensionProperties(physical,NULL,&n,ext)==VK_SUCCESS);
+        *custom_border=0;
+        for (uint32_t i=0; i<n; ++i) if (!strcmp(ext[i].extensionName,VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME)) {
+            VkPhysicalDeviceCustomBorderColorFeaturesEXT b={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT};
+            VkPhysicalDeviceFeatures2 f={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,&b};
+            vkGetPhysicalDeviceFeatures2(physical,&f);
+            *custom_border=b.customBorderColors && !getenv("DM_VK_NO_CUSTOM_BORDER");
+        }
+        free(ext);
+    }
     vkDestroyInstance(instance, NULL);
     return features;
 }
@@ -342,7 +358,8 @@ static void initial_texture_content(void) {
     puts("CPU-uncached, flushed and inaccessible texture initial content and GPU ownership passed");
 }
 
-static void uniform_texture_array(int table) {
+enum { STOCK_BORDER, CUSTOM_BORDER, STOCK_FALLBACK };
+static void uniform_texture_array(int table, int custom_border) {
     tex_t textures[3], output = {.serial = 0x5100, .d = {.width = 4, .height = 4,
         .depth = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&output.d, &output.L);
@@ -353,6 +370,10 @@ static void uniform_texture_array(int table) {
         mtl_reg_tex(2053 + i, &textures[i], NULL);
     }
     samp_par edge = {0}, border = {.ws = NVN_WRAP_MODE_CLAMP_TO_BORDER, .border = {1,1,1,1}};
+    if (custom_border) {
+        memcpy(border.border, (float[]){96.f/255,32.f/255,160.f/255,127.f/255}, sizeof border.border);
+        border.minf=NVN_MIN_FILTER_LINEAR; border.magf=NVN_MAG_FILTER_LINEAR;
+    }
     mtl_reg_samp(257, &edge); mtl_reg_samp(258, &border); mtl_reg_samp(513, &border);
     mtl_reg_tex(4101, &textures[1], NULL);
     uint64_t handles[8192] = {0}, samplers[8192] = {0};
@@ -360,11 +381,23 @@ static void uniform_texture_array(int table) {
     mtl_pool_add(handles, sizeof handles); mtl_pool_add(samplers, sizeof samplers);
     handles[44 + index] = 5; samplers[16 + index] = 1u << 20;
     float positions[] = {-1,-1, 3,-1, -1,3}, white[] = {1,1,1,1};
-    const uint8_t expected[][4] = {{0,255,0,255}, {0,0,255,255}, {0,0,0,255},
+    uint8_t expected[][4] = {{0,255,0,255}, {0,0,255,255}, {0,0,0,255},
                                    {255,255,255,255}, {0,0,0,255}, {0,0,0,255}, {0,0,255,255}, {255,255,255,255}};
+    if (custom_border) {
+        // Slot 258 samples halfway between blue and the guest border.
+        if (custom_border==STOCK_FALLBACK) {
+            memcpy(expected[3], (uint8_t[]){0,0,128,128}, 4);
+            memset(expected[7], 0, 4);
+        } else {
+            memcpy(expected[3], (uint8_t[]){48,16,208,191}, 4);
+            memcpy(expected[7], (uint8_t[]){96,32,160,127}, 4);
+        }
+    }
     for (int gpu=0;gpu<4;gpu++) for (int pass = 0; pass < 8; ++pass) {
+        if (custom_border && pass!=3 && pass!=7) continue;
         list_t list = {0}; uint8_t pixels[64] = {0};
         struct { uint32_t index; float coordinate; uint32_t pad[2]; } parameters = {pass == 2 ? index+24 : index, pass == 3 || pass == 7 ? 1.5f : 0.5f, {0}};
+        if (custom_border && pass==3) parameters.coordinate=1.0f;
         for (int i = 0; i < 3; ++i) {
             p_clear_tex clear = {.tex = &textures[i], .r = {.width = 1, .height = 1, .depth = 1}, .mask = 15};
             clear.c.f[i == 0 ? 1 : i == 1 ? 2 : 0] = 1; clear.c.f[3] = 1;
@@ -433,6 +466,48 @@ static void uniform_texture_array(int table) {
     mtl_tex_release(&output);
     if (table) puts("Sparse NVN uniform handle tables passed");
     else puts("Uniform texture arrays, GPU-produced handles, known overwrites without waits, pool bases and independent samplers passed");
+}
+
+// A single guest sampler is used with three different numerical types in one dispatch.
+static void typed_sampler_border(int native) {
+    NVNformat formats[] = {NVN_FORMAT_RGBA32I,NVN_FORMAT_RGBA32UI,NVN_FORMAT_RGBA32F};
+    tex_t textures[3];
+    for (int i=0; i<3; ++i) {
+        textures[i] = (tex_t){.serial=0xe530+i,.d={.width=1,.height=1,.depth=1,.levels=1,.samples=1,
+            .target=NVN_TEXTURE_TARGET_2D,.format=formats[i]}};
+        nvn_tex_layout(&textures[i].d,&textures[i].L);
+        mtl_reg_tex(1410+i,&textures[i],NULL);
+    }
+    samp_par sampler = {.ws=NVN_WRAP_MODE_CLAMP_TO_BORDER,.border={-7.5f,2,129,1}};
+    mtl_reg_samp(1417,&sampler);
+    struct { int32_t s[4]; uint32_t u[4]; float f[4]; } result;
+    memset(&result,0xcc,sizeof result); mtl_pool_add(&result,sizeof result);
+    list_t list={0};
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&typed_border_program,.stages=0x20);
+    for (uint32_t i=0; i<3; ++i)
+        RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=i,.h=(1417ull<<20)|(1410+i));
+    RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&result,.size=sizeof result);
+    RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+    put(&list,OP_END,NULL,0); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for (int i=0; i<4; ++i) {
+        float f=native ? sampler.border[i] : (float)(i==3);
+        int32_t si=(int32_t)f; uint32_t ui=f>0 ? (uint32_t)f : 0;
+        if (result.s[i]!=si || result.u[i]!=ui || result.f[i]!=f) {
+            fprintf(stderr,"sampler border channel %d got %d %u %g expected %d %u %g\n", i,result.s[i],result.u[i],result.f[i],si,ui,f);
+            abort();
+        }
+    }
+    for (int i=0; i<3; ++i) { mtl_reg_tex(1410+i,NULL,NULL); mtl_tex_release(&textures[i]); }
+    mtl_pool_del(&result);
+}
+
+static void custom_borders(void) {
+    int native;
+    replay_features(&native);
+    typed_sampler_border(native);
+    for (int table=0; table<3; ++table) uniform_texture_array(table,native ? CUSTOM_BORDER : STOCK_FALLBACK);
+    puts(native ? "Custom sampler borders: float/sint/uint, linear edge and full border through fixed and indexed bindings passed"
+                : "Sampler fallback: typed stock colors through fixed and indexed bindings passed");
 }
 
 static void vertex_output_defaults(void) {
@@ -1117,7 +1192,7 @@ static void visibility_reports(void) {
         if (i==5) mtl_queue_activate(0x8125);
     }
     const unsigned expected[] = {16,16,32,0,16,0,32};
-    int precise = replay_features().occlusionQueryPrecise;
+    int precise = replay_features(NULL).occlusionQueryPrecise;
     for (unsigned i=0;i<7;i++)
         if ((precise ? reports[i][0]!=expected[i] : !!reports[i][0]!=!!expected[i]) || !reports[i][1]) die("visibility report %u: got %llu, expected %u",i,
             (unsigned long long)reports[i][0],expected[i]);
@@ -2689,7 +2764,8 @@ int main(void) {
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
     if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
-    if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features().fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
+    if (getenv("DM_VK_TEST_CUSTOM_BORDER")) { custom_borders(); return 0; }
+    if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features(NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_OFFSET")) { polygon_offset(&offset_program); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_CLAMP")) { depth_clamp(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
@@ -2718,7 +2794,7 @@ int main(void) {
     const char *buffers=getenv("DM_VK_TEST_BUFFERS");
     if(buffers) { if(!strcmp(buffers,"pools")) pool_ranges();else if(!strcmp(buffers,"large")) buffer_range_lifetime();else simultaneous_aliases();return 0; }
     pool_ranges();
-    if(getenv("DM_VK_TEST_HANDLES")) { uniform_texture_array(0); uniform_texture_array(1); uniform_texture_array(2);return 0; }
+    if(getenv("DM_VK_TEST_HANDLES")) { uniform_texture_array(0,0); uniform_texture_array(1,0); uniform_texture_array(2,0);return 0; }
     gpu_indices();
     graphics_storage_alias();
     simultaneous_aliases();
@@ -2734,10 +2810,11 @@ int main(void) {
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);
-    if (replay_features().textureCompressionASTC_LDR) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
+    if (replay_features(NULL).textureCompressionASTC_LDR) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
     initial_texture_content();
-    uniform_texture_array(0); uniform_texture_array(1); uniform_texture_array(2);
+    uniform_texture_array(0,STOCK_BORDER); uniform_texture_array(1,STOCK_BORDER); uniform_texture_array(2,STOCK_BORDER);
+    custom_borders();
     compute_driver_constants();
     many_resource_bindings();
     vertex_output_defaults();
@@ -2755,7 +2832,7 @@ int main(void) {
     nested_depth_ranges();
     depth_clamp();
     polygon_offset(&offset_program);
-    polygon_fill(&fill_program,replay_features().fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME"));
+    polygon_fill(&fill_program,replay_features(NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME"));
     alpha_references();
     logic_operations();
     sparse_mrt_outputs();
