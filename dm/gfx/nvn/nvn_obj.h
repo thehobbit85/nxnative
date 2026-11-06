@@ -150,8 +150,32 @@ static inline const p_bind_buf *bind_buf_rec(uint32_t op, const void *a, p_bind_
     const p_bind_ubo_small *b = a;
     *t = (p_bind_buf){b->stage, b->index, b->addr, b->size}; return t;
 }
-// defer / src: the handles of BindTexturesDeferred are read from src at execution time (h at recording time is only a fallback); the replay layer refreshes them with bh_fresh before reading the record (nvn_mtl.m)
+// Deferred binds read src at execution. A nondefault pool adds its saved bases immediately after the n snapshot handles.
 typedef struct { int32_t stage, first, n, defer; uint64_t src; uint64_t h[32]; } p_bind_handles; // Separate texture / sampler handles
+enum { BIND_DEFERRED = 1, BIND_DEFERRED_BASES = 2 };
+typedef struct { int32_t texture, sampler; } bind_bases;
+static inline size_t bind_payload_bytes(int n, int defer) {
+    return offsetof(p_bind_handles, h) + sizeof(uint64_t) * (size_t)n + (defer == BIND_DEFERRED_BASES ? sizeof(bind_bases) : 0);
+}
+static inline uint64_t combined_pool_handle(uint32_t handle, bind_bases bases) {
+    uint64_t tex = handle & 0xfffff, samp = handle >> 20;
+    return (tex ? tex + bases.texture : 0) | (samp ? samp + bases.sampler : 0) << 20;
+}
+// The Vulkan caller first publishes any GPU writes to src. Keep the result local:
+// a reusable recording can also be inspected by a different queue or capture pass.
+static inline const p_bind_handles *bind_deferred(const p_bind_handles *b, p_bind_handles *out) {
+    if (!b->defer || !b->src || (unsigned)b->n > 32 || !b->n) return b;
+    bind_bases bases = {0};
+    if (b->defer == BIND_DEFERRED_BASES)
+        memcpy(&bases, (const uint8_t *)b + bind_payload_bytes(b->n, 0), sizeof bases);
+    memcpy(out, b, offsetof(p_bind_handles, h));
+    for (int i = 0; i < b->n; ++i) {
+        uint64_t raw;
+        memcpy(&raw, (const uint8_t *)(uintptr_t)b->src + i * sizeof raw, sizeof raw);
+        out->h[i] = combined_pool_handle((uint32_t)raw, bases);
+    }
+    return out;
+}
 // nvnCommandBufferBindTexture (one combined handle) is laid out as the hardware's command: the handle 16 bytes from the start of the record, where an engine that patches its recorded commands
 // in place writes a new one. Luigi's Mansion 3 takes the command memory base + GetCommandMemoryUsed before each such bind (main+0x7c8964) and stores a handle there + 0x10 every frame
 // (main+0xb7d0d4); in a p_bind_handles record that word is the count, and the replay read a handle as a count of 535 million. h is the handle as the game gives it (32 bits: texture ID |
@@ -162,10 +186,10 @@ typedef struct { int32_t stage, slot; uint64_t h; int32_t tbase, sbase; } p_bind
 #define BIND_TEX1_NOBASE 0x100
 static inline const p_bind_handles *bind_rec(uint32_t op, const void *a, p_bind_handles *t) {
     if (op != OP_BIND_TEX1) return a;
-    const p_bind_tex1 *b = a; uint64_t tid = b->h & 0xfffff, sid = (uint32_t)b->h >> 20;
+    const p_bind_tex1 *b = a;
     int nobase = b->stage & BIND_TEX1_NOBASE; int32_t tb = nobase ? 0 : b->tbase, sb = nobase ? 0 : b->sbase;
     t->stage = b->stage & ~BIND_TEX1_NOBASE; t->first = b->slot; t->n = 1; t->defer = 0; t->src = 0;
-    t->h[0] = (tid ? tid + (uint64_t)tb : 0) | (sid ? sid + (uint64_t)sb : 0) << 20; return t;
+    t->h[0] = combined_pool_handle((uint32_t)b->h, (bind_bases){tb, sb}); return t;
 }
 // Texture slots of a stage: 0-127 nvnCommandBufferBindTexture's (combined handles), 128-255 the separate texture binds. The driver keeps the two in tables of their own (c2 DMSH_C2_TEX + 8 r and
 // DMSH_C2_SEPTEX + 8 r, dmsh_abi.h), which the shaders' reflection names as these slots, so a game may bind both kinds in the same frame (Monster Hunter Rise: BindTexture slot 0 beside separate slots 0-4)

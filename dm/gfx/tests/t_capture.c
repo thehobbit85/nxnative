@@ -1,6 +1,7 @@
 // DM_NVN_CAPTURE's format and record relocation without a GPU or game files (CI): synthetic records as hle_nvn.c writes them (pointers to pools, objects, snapshots
 // inside the record, calls and jumps between segments) are encoded with the field walk, written as chunks, read back, decoded against regions at fresh addresses and checked
 // field by field, and every byte the walk does not name must come back unchanged.
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -114,6 +115,10 @@ int main(int argc, char **argv) {
     p_bind_buf *ub = emit(&s0, OP_BIND_UBO, sizeof *ub); *ub = (p_bind_buf){1, 3, (uint64_t)(uintptr_t)pool_b + 0x800, 0x100};
     p_bind_ubo_small *us = emit(&s0, OP_BIND_UBO_SMALL, sizeof *us); *us = (p_bind_ubo_small){0, 2, 64, (uint64_t)(uintptr_t)pool_b + 0x1000};
     p_bind_handles *bh = emit(&s0, OP_BIND_TEX, offsetof(p_bind_handles, h) + 4 * 8); bh->stage = 1; bh->n = 4; bh->defer = 1; bh->src = (uint64_t)(uintptr_t)heap_handles;
+    p_bind_handles *pooled = emit(&s0, OP_BIND_TEX, bind_payload_bytes(4, BIND_DEFERRED_BASES));
+    pooled->n = 4; pooled->defer = BIND_DEFERRED_BASES; pooled->src = (uintptr_t)heap_handles;
+    bind_bases bases = {512, 256};
+    memcpy((uint8_t *)pooled + bind_payload_bytes(4, 0), &bases, sizeof bases);
     p_draw_idx *di = emit(&s0, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->count = 3; di->ibuf = (uint64_t)(uintptr_t)pool_a + 0x3000; di->ind = (uint64_t)(uintptr_t)pool_a + 0x3100;
     p_multi_draw *multi = emit(&s0, OP_MULTI_DRAW, sizeof *multi);
     *multi = (p_multi_draw){(uint64_t)(uintptr_t)pool_a + 0xf000, (uint64_t)(uintptr_t)pool_b, di->ibuf, -20, 1025, 4, 2};
@@ -150,6 +155,15 @@ int main(int argc, char **argv) {
     CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
     const char *strides_layout = strstr(lay, "p_copy_strides");
     CHECK(strides_layout && cap_layout_matches(lay, (size_t)(strides_layout - lay)), "the layout before the copy strides' tail remains readable");
+    const char *base_layout = strstr(lay, "p_bind_handles defer 2:");
+    CHECK(base_layout && cap_layout_matches(lay, (size_t)(base_layout - lay)), "multi-draw captures before pooled deferred handles remain readable");
+    size_t multi_size = (size_t)(strides_layout - lay), deferred_size = strlen(base_layout);
+    char *previous_android = malloc(multi_size + deferred_size); assert(previous_android);
+    memcpy(previous_android, lay, multi_size); memcpy(previous_android + multi_size, base_layout, deferred_size);
+    CHECK(cap_layout_matches(previous_android, multi_size + deferred_size), "Android captures before upstream copy strides remain readable");
+    previous_android[multi_size] ^= 1;
+    CHECK(!cap_layout_matches(previous_android, multi_size + deferred_size), "a changed deferred handle layout is rejected");
+    free(previous_android);
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
@@ -192,6 +206,12 @@ int main(int argc, char **argv) {
     CHECK(AT(0, ub, p_bind_buf).addr == (uint64_t)(uintptr_t)new_base[1] + 0x800, "uniform buffer relocated");
     CHECK(AT(0, us, p_bind_ubo_small).addr == (uint64_t)(uintptr_t)new_base[1] + 0x1000, "compact uniform buffer relocated");
     CHECK(AT(0, bh, p_bind_handles).src == (uint64_t)(uintptr_t)new_base[2] && !memcmp(new_base[2], heap_handles, sizeof heap_handles), "deferred handles: their own region, relocated");
+    p_bind_handles decoded;
+    const p_bind_handles *fresh = bind_deferred(&AT(0, pooled, p_bind_handles), &decoded);
+    CHECK(fresh == &decoded && fresh->h[0] == ((257ull << 20) | 513) && fresh->h[3] == ((260ull << 20) | 516),
+          "relocated deferred handles use the recorded pool bases");
+    CHECK(!cap_rec_fields(OP_BIND_TEX, (uint8_t *)pooled, 8 + bind_payload_bytes(4, 0), &enc, NULL),
+          "a deferred record missing its pool bases is refused");
     CHECK(AT(0, di, p_draw_idx).ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && AT(0, di, p_draw_idx).ind == (uint64_t)(uintptr_t)new_base[0] + 0x3100, "index buffer and indirect arguments");
     p_multi_draw moved = AT(0, multi, p_multi_draw);
     CHECK(moved.ind == (uint64_t)(uintptr_t)new_base[0] + 0xf000 && moved.cnt == (uint64_t)(uintptr_t)new_base[1] &&

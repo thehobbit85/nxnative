@@ -3460,11 +3460,12 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: {
                 p_bind_handles tmp; const p_bind_handles *b = bind_rec(h.op, a, &tmp);
                 if ((unsigned)b->stage >= 6 || (unsigned)b->n > 32) die("Vulkan: invalid NVN binding record");
-                uint64_t hh[32]; memcpy(hh, b->h, 8 * b->n);
-                if (b->defer && b->src) { cpu_ready(b->src, 8 * b->n); memcpy(hh, (const void *)(uintptr_t)b->src, 8 * b->n); }   // BindTexturesDeferred: the handles as they are now
+                if (h.op != OP_BIND_TEX1 && h.size < sizeof h + bind_payload_bytes(b->n, b->defer))
+                    die("Vulkan: truncated NVN binding record");
+                if (b->defer && b->src) { cpu_ready(b->src, 8 * b->n); b = bind_deferred(b, &tmp); }
                 uint64_t *dst = (h.op == OP_BIND_TEX || h.op == OP_BIND_TEX1) ? S.tex[b->stage] : h.op == OP_BIND_SAMP ? S.samp[b->stage] : S.img[b->stage];
                 int lim = (h.op == OP_BIND_TEX || h.op == OP_BIND_TEX1) ? NTEX : h.op == OP_BIND_SAMP ? 128 : 32;
-                if (b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) memcpy(dst + b->first, hh, 8 * b->n);
+                if (b->first >= 0 && b->first <= lim - b->n) memcpy(dst + b->first, b->h, 8 * b->n);
                 break;
             }
             case OP_STENCIL: { const p_stencil *b = (const p_stencil *)a; for (int f = 0; f < 2; f++) if (b->face & (1 << f)) { if (b->which == 0) S.st_vmask[f] = b->value_mask; else if (b->which == 1) S.st_wmask[f] = b->mask; else S.st_ref[f] = b->ref; } break; }
