@@ -41,6 +41,7 @@ public final class ProgramActivity extends Activity {
         Intent next = new Intent(this, GameActivity.class);
         next.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
         next.putExtra("handoff", true).putExtra("previous", getIntent().getIntExtra("previous", -1));
+        next.putExtra("gameRoot", getIntent().getStringExtra("gameRoot"));
         startActivity(next); finish();
     }
     @Override protected void onDestroy() {

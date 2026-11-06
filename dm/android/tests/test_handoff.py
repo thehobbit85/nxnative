@@ -29,12 +29,13 @@ STUBS = {
         public static final int FLAG_ACTIVITY_CLEAR_TOP=0x04000000; public Class<?> target; public int flags; private Bundle extras=new Bundle();
         public Intent(Object context,Class<?> t){target=t;} public Intent putExtras(Bundle b){extras=b;return this;}
         public Intent putExtra(String k,int v){extras.putInt(k,v);return this;} public Intent putExtra(String k,boolean v){extras.values.put(k,v);return this;}
+        public Intent putExtra(String k,String v){extras.putString(k,v);return this;}
         public Intent addFlags(int f){flags|=f;return this;} public Bundle getExtras(){return extras;}
         public String getStringExtra(String k){return (String)extras.values.get(k);}
         public int getIntExtra(String k,int d){return (Integer)extras.values.getOrDefault(k,d);}
     }''',
     'android/app/Activity.java': '''package android.app; import android.os.Bundle; import android.content.Intent; public class Activity {
-        public final java.util.List<Intent> started=new java.util.ArrayList<>(); public Intent intent; public boolean finished,failStart;
+        public final java.util.List<Intent> started=new java.util.ArrayList<>(); public Intent intent=new Intent(this,getClass()); public boolean finished,failStart;
         public Intent getIntent(){return intent;} public void runOnUiThread(Runnable r){r.run();}
         public void startActivity(Intent i){if(failStart)throw new IllegalStateException("start failed");started.add(i);}
         public void finish(){finished=true;} public boolean isFinishing(){return finished;} public void setContentView(Object v){}

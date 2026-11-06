@@ -49,6 +49,8 @@ public class MenuActivity extends Activity {
     private TextView status; private android.widget.ProgressBar bar; private volatile boolean unpacking;
     private GameAssets.Manifest manifest;
     private boolean externalAssets;
+    private GameStorage storage;
+    private File gameRoot;
     private String preparationError;
     private static boolean installationActive; // Accessed on the UI thread, including worker completion callbacks.
 
@@ -57,11 +59,6 @@ public class MenuActivity extends Activity {
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         prefs = getSharedPreferences("menu", MODE_PRIVATE);
         try {
-            File ext = getExternalFilesDir(null);
-            if (ext == null) throw new java.io.IOException("Game storage is unavailable");
-            if (!installationActive) {
-                try (AssetInstall.Guard guard = AssetInstall.acquire(ext)) { AssetInstall.recover(ext); }
-            }
             try (InputStream in = getAssets().open("game/files.txt")) { manifest = GameAssets.Manifest.read(in); }
             catch (java.io.FileNotFoundException e) {
                 try (InputStream in = getAssets().open("game/external-files.txt")) {
@@ -69,6 +66,11 @@ public class MenuActivity extends Activity {
                 }
             }
             TargetContract.checkApk(new File(getApplicationInfo().sourceDir), manifest, getPackageName());
+            storage = new GameStorage(getFilesDir(),getExternalFilesDirs(null));
+            gameRoot = storage.selected();
+            if (!installationActive) {
+                try (AssetInstall.Guard guard = AssetInstall.acquire(gameRoot)) { AssetInstall.recover(gameRoot); }
+            }
         } catch (Exception e) { preparationError = e.getMessage() != null ? e.getMessage() : e.toString(); }
         if (preparationError == null) seedFiles();
         if (!prefs.contains("lang")) {
@@ -78,7 +80,7 @@ public class MenuActivity extends Activity {
         }
         buildUi();
         if (installationActive) { waitForInstallation(); return; }
-        if (preparationError != null) { preparationFailed(preparationError); dataButton.setVisibility(View.GONE); return; }
+        if (preparationError != null) { preparationFailed(preparationError); dataButton.setOnClickListener(v -> recreate()); return; }
         if (needsUnpack()) { if (pendingData() != null) askData(null); else unpack(); return; }
         boolean forced = new File(getFilesDir(), "show_menu").delete();
         if (prefs.getBoolean("skip", false) && !forced && b == null && gameFilesPresent()) play();
@@ -95,12 +97,12 @@ public class MenuActivity extends Activity {
         File save = new File(getFilesDir(), "save");
         String[] have = save.list();
         if (have == null || have.length == 0) copyAssetDir("save", save);
-        File env = new File(getExternalFilesDir(null), "env.txt");
+        File diagnostics = getExternalFilesDir(null);
+        File env = new File(diagnostics == null ? getFilesDir() : diagnostics, "env.txt");
         if (!env.exists()) copyAsset("default.env", env);
         copyAsset("cheats.txt", new File(getFilesDir(), "cheats.txt"));
         copyAssetDir("cheats", new File(getFilesDir(), "cheats"));
         copyAsset("cheats-build.txt", new File(getFilesDir(), "cheats-build.txt"));
-        getExternalFilesDir(null);   // makes the external folder the game files go into
     }
     private void copyAssetDir(String dir, File to) {
         try {
@@ -126,7 +128,7 @@ public class MenuActivity extends Activity {
     private boolean needsUnpack() {
         if (preparationError != null) return true;
         if (!bundled()) return false;
-        try { return !manifest.identity.equals(AssetInstall.identity(getExternalFilesDir(null))); }
+        try { return !manifest.identity.equals(AssetInstall.identity(gameRoot)); }
         catch (Exception e) { return true; }
     }
     private void waitForInstallation() {
@@ -144,7 +146,7 @@ public class MenuActivity extends Activity {
     private String recoverInstallation(Exception error) {
         String message = error.getMessage() != null ? error.getMessage() : error.toString();
         try {
-            AssetInstall.recover(getExternalFilesDir(null));
+            AssetInstall.recover(gameRoot);
             if (!needsUnpack()) return null; // All roots committed; only cleanup had failed.
         } catch (Exception recovery) { message += "; recovery failed: " + recovery.getMessage(); }
         return message;
@@ -158,7 +160,7 @@ public class MenuActivity extends Activity {
         new Thread(() -> {
             String err = null;
             try {
-                File ext = getExternalFilesDir(null);
+                File ext = gameRoot;
                 AssetInstall.recover(ext); AssetInstall.remove(new File(ext, ".nx-install"));
                 if (manifest.total > ext.getUsableSpace() - (200L << 20)) throw new Exception(String.format(Locale.ROOT, "Not enough storage: %.1f GB free is required.", manifest.total / 1e9));
                 File stage = AssetInstall.prepare(ext, manifest.identity);
@@ -200,8 +202,8 @@ public class MenuActivity extends Activity {
         catch (Exception e) { return "datos.zip"; }
     }
     private List<GameAssets.Entry> pendingData() {
-        if (manifest == null) return null;
-        File stage = new File(getExternalFilesDir(null), ".nx-install"); List<GameAssets.Entry> out = new ArrayList<>();
+        if (manifest == null || gameRoot == null) return null;
+        File stage = new File(gameRoot, ".nx-install"); List<GameAssets.Entry> out = new ArrayList<>();
         try {
             if (!manifest.identity.equals(AssetInstall.read(new File(stage, ".pending_data"))) ||
                 !manifest.identity.equals(AssetInstall.read(new File(stage, ".identity")))) return null;
@@ -234,7 +236,7 @@ public class MenuActivity extends Activity {
         installationActive = unpacking = true; dataButton.setVisibility(View.GONE); bar.setVisibility(View.VISIBLE); status.setTextColor(Color.WHITE);
         status.setText("Copying game data...");
         new Thread(() -> {
-            String err = null; File ext = getExternalFilesDir(null);
+            String err = null; File ext = gameRoot;
             try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(new java.io.BufferedInputStream(getContentResolver().openInputStream(uri), 1 << 20))) {
                 File stage = AssetInstall.prepare(ext, manifest.identity);
                 GameAssets.DataImport assets = new GameAssets.DataImport(stage, left, hashes);
@@ -269,7 +271,7 @@ public class MenuActivity extends Activity {
         }).start();
     }
     private boolean gameFilesPresent() {
-        File ext = getExternalFilesDir(null);
+        File ext = gameRoot;
         if (ext == null) return false;
         try { if (manifest == null || !manifest.identity.equals(AssetInstall.identity(ext))) return false; }
         catch (Exception e) { return false; }
@@ -300,6 +302,43 @@ public class MenuActivity extends Activity {
         s.setAdapter(a); s.setSelection(Math.max(0, Math.min(sel, items.length - 1)));
         parent.addView(s); return s;
     }
+    private void chooseLocation() {
+        if (installationActive) return;
+        File[] dirs = storage.locations.keySet().toArray(new File[0]);
+        String[] labels = new String[dirs.length];
+        for (int i = 0; i < dirs.length; i++) {
+            File dir = dirs[i], volume = dir.isDirectory() ? dir : dir.getParentFile();
+            labels[i] = String.format(Locale.ROOT,"%s (%.1f GB free)",storage.locations.get(dir),volume.getUsableSpace()/1e9);
+        }
+        new android.app.AlertDialog.Builder(this).setTitle("Choose game data location")
+            .setItems(labels,(dialog,which) -> {
+                if (dirs[which].equals(gameRoot) && preparationError == null) return;
+                save();
+                installationActive = unpacking = true;
+                playButton.setEnabled(false); dataButton.setVisibility(View.GONE);
+                status.setVisibility(View.VISIBLE); status.setTextColor(Color.WHITE);
+                status.setText("Preparing " + storage.locations.get(dirs[which]) + "…");
+                new Thread(() -> {
+                    String error = null;
+                    try { storage.select(gameRoot,dirs[which],manifest,bundled()); }
+                    catch (Exception e) { error = e.getMessage() == null ? e.toString() : e.getMessage(); }
+                    final String failed = error;
+                    runOnUiThread(() -> {
+                        installationActive = unpacking = false;
+                        if (isFinishing() || isDestroyed()) return;
+                        if (failed == null) { recreate(); return; }
+                        String message = "Could not switch game storage: " + failed;
+                        if (pendingData() != null) { askData(message); return; }
+                        if (!gameFilesPresent()) {
+                            preparationFailed(message); dataButton.setOnClickListener(v -> recreate()); return;
+                        }
+                        status.setText(message); status.setTextColor(Color.rgb(255,120,120));
+                        playButton.setEnabled(true);
+                    });
+                }).start();
+            }).setNegativeButton("Cancel",null).show();
+    }
+
     private void buildUi() {
         ScrollView sv = new ScrollView(this); sv.setBackgroundColor(Color.rgb(16, 18, 28));
         LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setPadding(56, 32, 56, 48);
@@ -310,6 +349,13 @@ public class MenuActivity extends Activity {
         bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal); bar.setMax(100); bar.setVisibility(View.GONE); col.addView(bar);
         dataButton = new Button(this); dataButton.setText("Choose data file"); dataButton.setTextSize(18); dataButton.setVisibility(View.GONE);
         dataButton.setOnClickListener(v -> pickData()); col.addView(dataButton);
+        if (storage != null) {
+            Button location = new Button(this);
+            String current = storage.locations.get(gameRoot);
+            location.setText("Game data location" + (current == null ? "" : " — " + current));
+            location.setOnClickListener(v -> chooseLocation());
+            col.addView(location);
+        }
         if (!gameFilesPresent() && !bundled()) {
             TextView w = text("Game data is missing or belongs to another build. Install this APK's matching game data from your computer, then reopen the app.", 15, true);
             w.setTextColor(Color.rgb(255, 120, 120)); col.addView(w);
@@ -383,6 +429,7 @@ public class MenuActivity extends Activity {
         if (!new File(getFilesDir(), "settings.env").exists()) save();
         launched = true;
         Intent i = new Intent(this, GameActivity.class);
+        i.putExtra("gameRoot", gameRoot.getPath());
         startActivity(i);
     }
 
