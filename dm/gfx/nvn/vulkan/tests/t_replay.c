@@ -6,6 +6,7 @@
 #include "../../tex/nvn_deswizzle.h"
 #include <vulkan/vulkan.h>
 #include <assert.h>
+#include <math.h>
 #include <time.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -36,6 +37,7 @@ static prog_t image_draw = {.nstage = 2}, image_compute = {.nstage = 1};
 static prog_t feedback_program = {.nstage = 2};
 static prog_t depth_clamp_program = {.nstage = 2};
 static prog_t offset_program = {.nstage=2};
+static prog_t alpha_program[3] = {{.nstage=2},{.nstage=2},{.nstage=2}};
 static prog_t depth_range_program = {.nstage = 2};
 static prog_t one_sample_program = {.nstage = 2};
 static prog_t blend_mrt_program = {.nstage = 2};
@@ -55,6 +57,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    for (int i=0;i<3;++i) if (p==&alpha_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x61+i : 0x52; return 1; }
     if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
     if (p == &blend_mrt_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x55 : 0x52; return 1; }
     if (p == &divisor_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x56+stage; return 1; }
@@ -2627,6 +2630,7 @@ static void typed_graphics(void) {
     puts("Shared vertex/fragment typed-buffer atomics, GPU-produced uniform handles, ordered updates and compute consumers passed");
 }
 #include "uniform_storage.inc"
+#include "alpha.inc"
 #include "split_handle.inc"
 #include "driver_c2.inc"
 #include "resource_shapes.inc"
@@ -2654,6 +2658,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_ALPHA")) { alpha_references(); return 0; }
     if (getenv("DM_VK_TEST_DIVISORS")) { instance_divisors(); return 0; }
     if (getenv("DM_VK_TEST_BLEND_CONSTANTS")) { blend_constants(); return 0; }
     if (getenv("DM_VK_TEST_STENCIL_FACES")) { stencil_faces(); return 0; }
@@ -2734,6 +2739,7 @@ int main(void) {
     nested_depth_ranges();
     depth_clamp();
     polygon_offset(&offset_program);
+    alpha_references();
     scissored_attachment_clears();
     conditional_rendering();
     integer_attachment_clears();

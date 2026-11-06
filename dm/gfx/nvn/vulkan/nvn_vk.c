@@ -18,6 +18,7 @@
 #include "dmsh_abi.h"
 #include "spv_vertex_fetch.h"
 #include "spv_output_defaults.h"
+#include "spv_alpha.h"
 #include "spv_draw_parameters.h"
 #include "spv_buffer_bias.h"
 #include "shader_contract.h"
@@ -1164,7 +1165,7 @@ struct shader {
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
-    VkShaderModule mod; VkDescriptorSetLayout dsl;
+    VkShaderModule mod, alpha_mod; int tried_alpha; VkDescriptorSetLayout dsl;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
     sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask; int pack_locations;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
     uint8_t *c1; uint32_t c1_len; uint32_t tg[3];
@@ -1590,6 +1591,7 @@ static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BI
     shader_t *s=malloc(sizeof *s);
     if(!s) return NULL;
     *s=*base;s->buffer_variants=NULL;s->vertex_variants=NULL;s->cpp=VK_NULL_HANDLE;s->cpl=VK_NULL_HANDLE;s->mod=VK_NULL_HANDLE;
+    s->alpha_mod=VK_NULL_HANDLE; s->tried_alpha=0;
     memcpy(s->buffer_bias,bias,sizeof s->buffer_bias);
     s->next_buffer_variant=base->buffer_variants;base->buffer_variants=s;
     char path[1024];size_t bytes;
@@ -1604,6 +1606,25 @@ static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BI
     return s;
 }
 static VkDescriptorSetLayout g_empty_dsl;
+static VkShaderModule alpha_module(shader_t *fs) {
+    if (fs->tried_alpha) return fs->alpha_mod;
+    fs->tried_alpha=1;
+    char path[1024]; size_t bytes=0, words=0;
+    snprintf(path,sizeof path,"%s/%s.spv",g_vkdir,fs->key);
+    uint32_t *spv=read_file(path,&bytes);
+    if (spv) spv=stage_spv(spv,&bytes,fs); // includes this variant's SSBO offsets and descriptor set
+    const char *reason="cannot reload fragment shader";
+    uint32_t *variant=spv ? spv_alpha(spv,bytes/4,&words,&reason) : NULL;
+    free(spv);
+    if (variant) {
+        VkShaderModuleCreateInfo mi={VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,NULL,0,words*4,variant};
+        VkResult r=vkCreateShaderModule(g_dev,&mi,NULL,&fs->alpha_mod); free(variant);
+        if (r==VK_SUCCESS) return fs->alpha_mod;
+        fs->alpha_mod=VK_NULL_HANDLE; reason="driver rejected fragment variant";
+    }
+    LOG("[RED] vk: alpha test unavailable for %s (%s)",fs->key,reason);
+    return VK_NULL_HANDLE;
+}
 typedef struct { shader_t *vs, *fs; VkPipelineLayout pl; } prog_vk;
 static prog_vk *g_pl; static int g_npl;
 static VkPipelineLayout layout_get(shader_t *vs, shader_t *fs) {
@@ -1613,9 +1634,11 @@ static VkPipelineLayout layout_get(shader_t *vs, shader_t *fs) {
     }
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_empty_dsl)); }
     VkDescriptorSetLayout sl[2] = {vs ? vs->dsl : g_empty_dsl, fs ? fs->dsl : g_empty_dsl};
-    VkPushConstantRange draw = {VK_SHADER_STAGE_VERTEX_BIT, 0, 16};
+    VkPushConstantRange ranges[2]; unsigned count=0;
+    if (vs->draw_push) ranges[count++]=(VkPushConstantRange){VK_SHADER_STAGE_VERTEX_BIT,0,16};
+    if (fs) ranges[count++]=(VkPushConstantRange){VK_SHADER_STAGE_FRAGMENT_BIT,DM_VK_ALPHA_PUSH_OFFSET,DM_VK_ALPHA_PUSH_BYTES};
     VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, fs ? 2 : 1, sl,
-        vs->draw_push ? 1 : 0, vs->draw_push ? &draw : NULL};
+        count,ranges};
     VkPipelineLayout pl; VKCHECK(vkCreatePipelineLayout(g_dev, &pi, NULL, &pl));
     g_pl = realloc(g_pl, (g_npl + 1) * sizeof *g_pl); g_pl[g_npl++] = (prog_vk){vs, fs, pl};
     return pl;
@@ -1686,7 +1709,7 @@ static struct {
     p_prim_restart restart; p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; p_scissor sc; int has_sc, rasterizer_discard;
     uint8_t vp_sw[16][4];   // component selectors XOR the identity, as recorded by NVN
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
-    float blend_color[4]; int64_t copy_stride, copy_img_stride;
+    float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;
     int tex_base, samp_base;
 } S;
 static int g_depth_zero = 1, g_queue_origin_ll;
@@ -1812,6 +1835,7 @@ static VkCompareOp cop(int f) { return f >= 1 && f <= 8 ? (VkCompareOp)(f - 1) :
 static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, k->vs->mod, "main", NULL},
                                              {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, k->fs ? k->fs->mod : VK_NULL_HANDLE, "main", NULL}};
+    if (k->color.alpha_func) st[1].module=k->fs->alpha_mod;
     if (k->vs->subgroup.requiredSubgroupSize) st[0].pNext = &k->vs->subgroup;
     if (k->fs && k->fs->subgroup.requiredSubgroupSize) st[1].pNext = &k->fs->subgroup;
     VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[32]; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
@@ -2508,6 +2532,9 @@ static VkRect2D render_scissor(void) {
 }
 
 #include "primitive_replay.h"
+enum clear_type { CLEAR_FLOAT, CLEAR_UINT, CLEAR_SINT };
+static enum clear_type clear_color_type(VkFormat format);
+
 static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_index) {
     g_nwb = 0;
     if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
@@ -2546,6 +2573,10 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     }
     k.nc = P.n; memcpy(k.cf, P.cf, sizeof k.cf); memcpy(k.blend, S.blend, P.n * sizeof *k.blend);
     k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.samples;
+    // Like the Metal side entry, all compare functions share one pipeline.
+    // Integer color 0 bypasses the test; a depth-only pass may still discard.
+    k.color.alpha_func = fs && S.color.alpha_func && S.color.alpha_func!=NVN_ALPHA_FUNC_ALWAYS &&
+        clear_color_type(P.cf[0])==CLEAR_FLOAT && alpha_module(fs);
     if (P.dt) { k.df = P.dt->f.f; k.stencil = P.dt->f.stencil; k.ds = S.ds; }
     if (g_plog) LOG("plog:  draw vs %s fs %s n %u depth t%d w%d f%d stencil %d f%d ops %d/%d/%d ref %u vm %#x wm %#x blend %#x mask %#x cull %d", vs->key, fs ? fs->key : "-", dw ? dw->count : di->count,
                     S.ds.dt, S.ds.dw, S.ds.df, S.ds.st, S.ds.sf_f, S.ds.fail_f, S.ds.zfail_f, S.ds.zpass_f, S.st_ref[0], S.st_vmask[0], S.st_wmask[0], S.color.blend_en, S.chmask.mask, S.poly.cull);
@@ -2560,6 +2591,12 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     if (!sets[0] || (fs && !sets[1])) SKIP(6);
     VkCommandBuffer cb = C->cb;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
+    if (k.color.alpha_func) {
+        static const uint32_t accept[]={15,0,1,2,3,4,13,6,15};
+        struct { uint32_t mask; float reference; } alpha={
+            S.color.alpha_func<sizeof accept/sizeof *accept ? accept[S.color.alpha_func] : 15,S.alpha_ref};
+        vkCmdPushConstants(cb,pl,VK_SHADER_STAGE_FRAGMENT_BIT,DM_VK_ALPHA_PUSH_OFFSET,sizeof alpha,&alpha);
+    }
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, fs ? 2 : 1, sets, 0, NULL);
     // As in Metal, the device origin changes clip Y inside the viewport.
     // Viewport/scissor coordinates always address the same image memory rows.
@@ -2828,7 +2865,6 @@ static void clear_draw_state(VkPipeline pipeline, VkRect2D rect, VkExtent2D size
     vkCmdSetDepthBias(cb, 0, 0, 0);
     vkCmdSetBlendConstants(cb, (const float[4]){0});
 }
-enum clear_type { CLEAR_FLOAT, CLEAR_UINT, CLEAR_SINT };
 static enum clear_type clear_color_type(VkFormat format) {
     switch (format) {
         case VK_FORMAT_R8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R32_UINT:
@@ -3457,6 +3493,7 @@ static void mtl_exec_(const uint8_t *p) {
                 break;
             }
             case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
+            case OP_ALPHA_REF: S.alpha_ref=((const p_alpha_ref *)a)->ref; break;
             case OP_COPY_STRIDE: { const p_copy_stride *cs = (const p_copy_stride *)a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
             default: {
                 static uint8_t warned[256];
