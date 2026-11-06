@@ -2,6 +2,7 @@
 #include "hle.h"
 #include "nvn_obj.h"
 #include "nvn_mtl.h"
+#include "nvn_timestamp.h"
 #include "../../tex/nvn_deswizzle.h"
 #include <vulkan/vulkan.h>
 #include <assert.h>
@@ -933,6 +934,35 @@ static void visibility_reports(void) {
     puts("Vulkan visibility counters accumulate only guest samples and survive pass, submission and queue changes");
 }
 
+static void segment_timestamps(void) {
+    const char *mode=getenv("DM_NVN_GPU_TS");
+    int segment = mode && *mode ? !strcmp(mode,"segment") : DM_GAME_GPU_TS_SEGMENT;
+    tex_t color={.serial=0x8129,.d={.width=128,.height=128,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&color.d,&color.L);
+    NVNcounterData reports[4] = {0};
+    list_t list={0};
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&color});
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_range_program,.stages=3);
+    for (int i=0;i<4;i++) {
+        uint64_t report[]={i % 2 ? NVN_COUNTER_TYPE_TIMESTAMP : NVN_COUNTER_TYPE_TIMESTAMP_TOP,(uintptr_t)&reports[i]};
+        put(&list,OP_REPORT_COUNTER,report,sizeof report);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    }
+    put(&list,OP_END,NULL,0); mtl_queue_activate(0x8129);
+    uint64_t lo=nvn_timestamp_from_ns(guest_ns());
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    uint64_t hi=nvn_timestamp_from_ns(guest_ns());
+    if (reports[0].timestamp!=reports[2].timestamp || reports[1].timestamp!=reports[3].timestamp ||
+        (segment ? reports[0].timestamp>=reports[1].timestamp : reports[0].timestamp!=reports[1].timestamp) ||
+        reports[0].timestamp<lo || reports[1].timestamp>hi)
+        die("GPU %s timestamp boundaries did not match their guest clock interval", segment ? "segment" : "submission");
+    for (int i=0;i<4;i++) assert(reports[i].counter==(DM_GAME_RENDER_COND ? 0 : reports[i].timestamp));
+    mtl_queue_forget(0x8129); mtl_tex_release(&color);
+    puts(segment ? "Vulkan segment top/bottom timestamps bracket GPU work on the guest clock" :
+                   "Vulkan submission reports share a single timestamp on the guest clock");
+}
+
 static void texture_clear_regions(void) {
     for (int volume = 0; volume < 2; volume++) {
         tex_t texture = {.serial=0x8119 + volume, .d={.width=8,.height=8,.depth=4,.levels=2,
@@ -1787,7 +1817,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
-    if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); return 0; }
+    if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); segment_timestamps(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
@@ -1848,5 +1878,6 @@ int main(void) {
     multisample_colors();
     multisample_depth();
     visibility_reports();
+    segment_timestamps();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
