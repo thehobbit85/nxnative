@@ -45,6 +45,7 @@ static uint64_t g_timestamp_mask;
 static int g_segment_timestamps;
 static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
 static int g_draw_parameters;
+static uint32_t g_vertex_divisor_limit = 1;
 static VkPhysicalDeviceSubgroupProperties g_subgroup;
 static VkPhysicalDeviceSubgroupSizeControlProperties g_subgroup_sizes;
 static VkShaderStageFlags g_selectable_subgroup_stages;
@@ -410,17 +411,24 @@ static void vk_init_(void) {
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
     int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0, has_calibrated = 0;
+    int divisor_ext = 0, divisor_khr = 0;
     for (uint32_t i = 0; i < ne; i++) {
         has_sc |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME); has_u8 |= !strcmp(ep[i].extensionName, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
         has_dr |= !strcmp(ep[i].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
         has_subgroup_sizes |= !strcmp(ep[i].extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
         has_calibrated |= !strcmp(ep[i].extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        divisor_ext |= ep[i].specVersion >= 3 && !strcmp(ep[i].extensionName,VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+        divisor_khr |= !strcmp(ep[i].extensionName,VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     }
     free(ep);
     g_subgroup_sizes = (VkPhysicalDeviceSubgroupSizeControlProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
     g_subgroup = (VkPhysicalDeviceSubgroupProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
     if (has_subgroup_sizes || dv >= VK_API_VERSION_1_3) g_subgroup.pNext = &g_subgroup_sizes;
     VkPhysicalDeviceProperties2 props2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &g_subgroup};
+    VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT div_ext_props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT, props2.pNext};
+    VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR div_khr_props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_KHR, props2.pNext};
+    if (divisor_ext) props2.pNext=&div_ext_props;
+    else if (divisor_khr) props2.pNext=&div_khr_props;
     vkGetPhysicalDeviceProperties2(g_pd, &props2);
     VkPhysicalDeviceSubgroupSizeControlFeatures size_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT u8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT};
@@ -430,6 +438,13 @@ static void vk_init_(void) {
     VkPhysicalDeviceVulkan11Features f11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceShaderDrawParametersFeatures sdp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
     void *chain = NULL;
+    // EXT rev 3 guarantees firstInstance + localInstance/divisor. Its KHR
+    // successor allows implementations without nonzero firstInstance support.
+    const char *div_extension = divisor_ext ? VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME :
+        div_khr_props.supportsNonZeroFirstInstance ? VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME : NULL;
+    if (getenv("DM_VK_NO_VERTEX_DIVISOR")) div_extension=NULL;
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT};
+    if (div_extension) { div_features.pNext=chain; chain=&div_features; }
     if (has_subgroup_sizes && dv < VK_API_VERSION_1_3) { size_features.pNext = chain; chain = &size_features; }
     if (has_u8) { u8.pNext = chain; chain = &u8; }
     if (dv >= VK_API_VERSION_1_3) { f13.pNext = chain; chain = &f13; } else if (has_dr) { dr.pNext = chain; chain = &dr; }
@@ -442,7 +457,13 @@ static void vk_init_(void) {
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     g_precise_visibility = f2.features.occlusionQueryPrecise;
     f13.robustImageAccess = VK_FALSE;
-    const char *ext[5]; uint32_t next = 0;
+    const char *ext[6]; uint32_t next = 0;
+    if (div_extension) {
+        ext[next++]=div_extension;
+        if (div_features.vertexAttributeInstanceRateDivisor)
+            g_vertex_divisor_limit=divisor_ext ? div_ext_props.maxVertexAttribDivisor : div_khr_props.maxVertexAttribDivisor;
+    }
+    LOG("vk: native vertex instance divisor limit %u",g_vertex_divisor_limit);
     if (g_segment_timestamps && has_calibrated) ext[next++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
     g_selectable_subgroup_stages = 0;
     if (f13.subgroupSizeControl || size_features.subgroupSizeControl) {
@@ -1628,6 +1649,7 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     if (k->vs->subgroup.requiredSubgroupSize) st[0].pNext = &k->vs->subgroup;
     if (k->fs && k->fs->subgroup.requiredSubgroupSize) st[1].pNext = &k->fs->subgroup;
     VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[16]; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
+    VkVertexInputBindingDivisorDescriptionEXT divisors[16]; uint32_t ndiv=0;
     uint64_t fetch_mask = 0;
     for (int i = 0; i < 32; i++) {
         if (!(k->vs->vin_mask >> i & 1)) continue;
@@ -1676,10 +1698,15 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     }
     for (int s = 0; s < 16; s++) if (used >> s & 1) {
         uint32_t stride = s < k->nstream ? k->stream[s].stride : 0, div = s < k->nstream ? k->stream[s].divisor : 0;
-        if (div > 1) RED_ONCE(11, "instance divisor %u: drawn as 1", div);
+        if (div > 1 && stride) {
+            if (div<=g_vertex_divisor_limit) divisors[ndiv++]=(VkVertexInputBindingDivisorDescriptionEXT){(uint32_t)s,div};
+            else RED_ONCE(11, "instance divisor %u exceeds native vertex input limit %u",div,g_vertex_divisor_limit);
+        }
         vb[nvb++] = (VkVertexInputBindingDescription){(uint32_t)s, stride, div ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX};
     }
     VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, NULL, 0, nvb, vb, nva, va};
+    VkPipelineVertexInputDivisorStateCreateInfoEXT rates = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT,NULL,ndiv,divisors};
+    if (ndiv) vi.pNext=&rates;
     static const VkPrimitiveTopology TOPO[] = {VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY,
@@ -2392,7 +2419,12 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
         VkDeviceSize o = 0; VkBuffer b = g_zero_buf;
         uint64_t stride = s < S.nstream ? S.stream[s].stride : 0, size = S.vbuf[s].size, from, to;
         int per_inst = s < S.nstream && S.stream[s].divisor;
-        if (per_inst) { from = 0; to = ((uint64_t)(dw ? dw->base_instance : di->base_instance) + inst - 1) * stride + ext[s]; }
+        if (per_inst) {
+            uint32_t divisor=S.stream[s].divisor;
+            if (divisor>g_vertex_divisor_limit) divisor=1;
+            from=0;
+            to=((uint64_t)g_draw_base_instance+(inst-1)/divisor)*stride+ext[s];
+        }
         else { from = (uint64_t)vlo * stride; to = (uint64_t)vhi * stride + ext[s]; }
         if (to > size) to = size;
         if (S.vbuf[s].address && to > from && gw_find(S.vbuf[s].address + from, to - from, 1, &b, &o, NULL)) {}   // vertices a dispatch wrote (GPU particles)

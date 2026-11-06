@@ -32,6 +32,7 @@ static prog_t depth_copy_program = {.nstage = 2};
 static prog_t depth_range_program = {.nstage = 2};
 static prog_t one_sample_program = {.nstage = 2};
 static prog_t blend_mrt_program = {.nstage = 2};
+static prog_t divisor_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
 static prog_t origin_program = {.nstage = 2};
 static prog_t draw_parameters_program = {.nstage = 2};
@@ -45,6 +46,7 @@ int nvn_dpool_base(const void *pool, int texture) {
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
     if (p == &blend_mrt_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x55 : 0x52; return 1; }
+    if (p == &divisor_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x56+stage; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
     if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
@@ -1296,6 +1298,44 @@ static void blend_constants(void) {
     puts("Vulkan blend constants update across draws and respect two independent target equations");
 }
 
+static void instance_divisors(void) {
+    tex_t color={.serial=0x8175,.d={.width=7,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&color.d,&color.L);
+    uint8_t red[12][3], green[12][2], gpu_green[sizeof green];
+    for (int i=0;i<12;i++) { memset(red[i],13*i+1,sizeof red[i]); memset(green[i],17*i+3,sizeof green[i]); }
+    uint16_t indices[]={0,1,2,3,4,5};
+    mtl_queue_activate(0x8175);
+    for (int indexed=0;indexed<2;indexed++) for (int div=1;div<=3;div++) {
+        memset(gpu_green,0,sizeof gpu_green);
+        uint8_t pixels[7][4];
+        list_t list={0};
+        uint64_t copy[]={(uintptr_t)green,(uintptr_t)gpu_green,sizeof green};
+        put(&list,OP_COPY_B2B,copy,sizeof copy);
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&color});
+        RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={0,0,1,1});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&divisor_program,.stages=3);
+        p_bind_vattr attr={.n=2}; va_st va[]={{.fmt=NVN_FORMAT_R8},{.fmt=NVN_FORMAT_R8,.stream=1}};
+        memcpy(attr.st,va,sizeof va); put(&list,OP_BIND_VATTR,&attr,sizeof attr);
+        RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=2,.st={{.stride=3,.divisor=div},{.stride=2,.divisor=3}});
+        RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sizeof red,.addr=(uintptr_t)red);
+        RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=1,.size=sizeof green,.addr=(uintptr_t)gpu_green);
+        if (indexed) {
+            RECORD(OP_DRAW_IDX,p_draw_idx,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.itype=1,.count=6,.instances=5,.base_instance=5,.ibuf=(uintptr_t)indices);
+        } else {
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=6,.instances=5,.base_instance=5);
+        }
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&color,.r={.width=7,.height=1,.depth=1},.src=(uintptr_t)pixels);
+        put(&list,OP_END,NULL,0); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (int x=0;x<7;x++) {
+            uint8_t want[]={0,0,255,255};
+            if (x>0 && x<6) { want[0]=red[5+(x-1)/div][0]; want[1]=green[5+(x-1)/3][0]; want[2]=0; }
+            if (memcmp(pixels[x],want,4)) die("instance divisor %d indexed %d pixel %d got %u,%u wanted %u,%u",div,indexed,x,pixels[x][0],pixels[x][1],want[0],want[1]);
+        }
+    }
+    mtl_tex_release(&color); mtl_queue_forget(0x8175);
+    puts("Vulkan vertex streams use base instance plus divided instance offset for direct and indexed draws");
+}
+
 static void downsample_view(void) {
     tex_t src = {.serial=0x8160,.d={.width=8,.height=8,.depth=2,.levels=2,.target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA8}};
     tex_t dst = src; dst.serial++; dst.d.width=dst.d.height=4; dst.d.format=NVN_FORMAT_RG8;
@@ -2030,6 +2070,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_DIVISORS")) { instance_divisors(); return 0; }
     if (getenv("DM_VK_TEST_BLEND_CONSTANTS")) { blend_constants(); return 0; }
     if (getenv("DM_VK_TEST_STENCIL_FACES")) { stencil_faces(); return 0; }
     if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
@@ -2069,7 +2110,7 @@ int main(void) {
     buffer_range_lifetime();
     ordered_buffers();
     draw_parameters();
-    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies(); stencil_faces(); blend_constants();
+    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies(); stencil_faces(); blend_constants(); instance_divisors();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);
