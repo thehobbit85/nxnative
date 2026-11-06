@@ -1,18 +1,12 @@
 """Translate Maxwell SHFL register exchanges and write independent per-lane expectations."""
 import argparse
-import json
 import math
-import os
 from pathlib import Path
-import shutil
-import struct
-import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / 'dm/tools/tests')]
-from dm.android.tools import spv_android
-from test_dmsh_pool_arrays import NS
+from dm.android.tests.compute_words_fixture import GUARD, export_cases
 from test_txq_type import base, mov, shader
 
 # (SHFL mode, immediate source or distance, segment mask and clamp)
@@ -21,7 +15,6 @@ SHUFFLES = (
     ((3, 16, 31),), ((3, 1, 31),), ((0, 2, 0x1c03),),
     ((3, 16, 31), (2, 1, 31), (3, 2, 31)),  # reuses scratch repeatedly
 )
-GUARD = 0xbaddecaf
 SEED = 0x123400
 
 
@@ -66,60 +59,16 @@ def expected(width, steps):
 
 
 def generate(work):
-    work.mkdir(parents=True, exist_ok=True)
-    jobs = []
-    cases = []
+    programs = []
     for local in ([32, 1, 1], [64, 1, 1], [128, 1, 1], [8, 4, 2], [36, 1, 1]):
         width = math.prod(local)
         # The last partial warp has four active lanes. Compare only shuffles
         # whose selected source exists; inactive sources have undefined data.
         variants = SHUFFLES if width % 32 == 0 else [SHUFFLES[i] for i in (0, 2, 5, 6)]
         for steps in variants:
-            key = f'{0xfeed9d00 + len(jobs):016x}'
-            code = work / (key + '.bin')
-            code.write_bytes(guest_code(steps, local))
-            jobs.append(dict(key=key, stage='cs', code=str(code), local=local))
-            cases.append(dict(key=key, local=local, expected=expected(width, steps)))
-
-    translator = os.environ.get('DMSH_TEST_XLATE', ROOT / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate')
-    for target in ('apple', 'vulkan'):
-        directory = work / target
-        directory.mkdir(exist_ok=True)
-        manifest = directory / 'jobs.json'
-        manifest.write_text(json.dumps(jobs if target == 'apple' else [dict(j, host_target='vulkan') for j in jobs]))
-        subprocess.run([translator, manifest, directory], check=True, capture_output=True)
-
-    out = work / 'export'
-    out.mkdir(exist_ok=True)
-    cross = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'
-    for case in cases:
-        key = case['key']
-        apple = work / 'apple' / (key + '.spv')
-        msl = subprocess.run([cross, '--msl', '--msl-version', '20300', '--msl-argument-buffers', apple],
-                             check=True, capture_output=True, text=True).stdout
-        (work / (key + '.metal')).write_text(msl)
-        res = json.loads(apple.with_suffix('.res.json').read_text())
-        if res['notes']:
-            raise ValueError(res['notes'])
-        bindings = NS['reflect'](key, 'cs', msl, res)
-        if len(bindings) != 1 or bindings[0]['kind'] != 'sbuf_ubo' or bindings[0]['off'] != 56:
-            raise ValueError(bindings)
-        case['metal_slot'] = bindings[0]['arg_id']
-        reflection = dict(stage='cs', threadgroup_size=case['local'], bindings=bindings)
-        spv_android.write_stage(key, (work/'vulkan'/apple.name).read_bytes(), reflection, out,
-                                shutil.which('spirv-val'), shutil.which('spirv-opt'))
-        records = [line.split() for line in (out/(key+'.vk.txt')).read_text().splitlines() if line.startswith('b ')]
-        if len(records) != 1 or records[0][2:7] != ['ssbo', '1', 'sbuf_ubo', '0', '56']:
-            raise ValueError(records)
-        words = case.pop('expected')
-        (work/(key+'.expected')).write_bytes(struct.pack(f'<{len(words)}I', *words))
-        script = [f'#!amber\nSHADER compute guest SPIRV-BIN FILE "{key}.spv"',
-                  f'BUFFER out DATA_TYPE uint32 SIZE {len(words)} FILL {GUARD}', 'PIPELINE compute check',
-                  '  ATTACH guest', f'  BIND BUFFER out AS storage DESCRIPTOR_SET 0 BINDING {records[0][1]}',
-                  'END', 'RUN check 1 1 1', 'EXPECT out IDX 0 EQ ' + ' '.join(map(str, words))]
-        (out/(key+'.amber')).write_text('\n'.join(script) + '\n')
-    (work/'cases.json').write_text(json.dumps(cases, indent=2) + '\n')
-    return out
+            key = f'{0xfeed9d00 + len(programs):016x}'
+            programs.append((key, local, guest_code(steps, local), expected(width, steps), {}))
+    return export_cases(work, programs)
 
 
 if __name__ == '__main__':
