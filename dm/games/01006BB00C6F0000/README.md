@@ -103,7 +103,7 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- Android runtime: broader progression, device performance and physical-device qualification remain open beyond the [verified opening route](#android-integration). The bound-geometry warning comes from the program's stage mask; the exported game shaders are vertex, fragment and compute stages, with no geometry stage to execute. Packed D24 guest uploads and linearly filtered depth copies remain renderer gaps; the tested route uses nearest scaled depth/stencil copies.
+- Android runtime: broader progression, device performance and physical-device qualification remain open beyond the [verified opening route](#android-integration). The bound-geometry warning comes from the program's stage mask; the exported game shaders are vertex, fragment and compute stages, with no geometry stage to execute. Packed D24 buffer transfers passed the Android public-command tests with native D24 and D32 backing. Linearly filtered depth copies remain open. The tested route uses nearest scaled depth/stencil copies.
 
 - **`SR_Y_DIRECTION`.** 2,487 of its pixel shaders read the window's Y-direction system register, which is −1 under a lower-left origin. The Ryujinx recompiler answers a constant +1 (a TODO in `InstEmitMove.cs`; LASRecomp answers −1). In the room shader the value only scales a depth slope under `abs()`; other shaders may use its sign (`dFdy`-based effects). Answering it per profile means a translator change, i.e. every game's chain.
 - development.md calls SDK 8.2.0 "the oldest so far"; Mario Kart 8 Deluxe (SDK 4.4.0) is older now.

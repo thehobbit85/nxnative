@@ -148,7 +148,7 @@ static void check_event_lists(NVNdevice *device, NVNqueue *queue, NVNmemoryPool 
 #ifdef DM_VK_PUBLIC_BINDINGS
 // Depth/stencil planes are copied separately by Vulkan. Maxwell Z24S8 places
 // stencil in the low byte; ZF32_X24S8 stores the float before that byte.
-static void check_packed_texels(NVNdevice *device, NVNqueue *queue, NVNmemoryPool *pool) {
+static void check_packed_texels(NVNdevice *device, NVNqueue *queue, NVNmemoryPool *pool, uint8_t *storage) {
     const NVNformat formats[] = {NVN_FORMAT_STENCIL8, NVN_FORMAT_DEPTH24, NVN_FORMAT_DEPTH24_STENCIL8, NVN_FORMAT_DEPTH32F_STENCIL8};
     for (size_t i = 0; i < sizeof formats / sizeof *formats; ++i) {
         NVNtexture tex;
@@ -196,11 +196,52 @@ static void check_packed_texels(NVNdevice *device, NVNqueue *queue, NVNmemoryPoo
             for (size_t k = 0; k < sizeof got; ++k) if (got[k] != expected[k])
                 die("packed format %#x pass %d byte %zu returned %#x expected %#x", formats[i], pass, k, got[k], expected[k]);
         }
+        // Copy a subregion through the public command stream. The second GPU
+        // copy consumes the packed result before the queue publishes CPU bytes.
+        enum { input = 0x9000, output = 0x9200, copied = 0x9400, row = 37, size = 96 };
+        NVNbufferAddress addr = API(nvnMemoryPoolGetBufferAddress)(pool);
+        memset(storage+input,0xa5,size); memset(storage+output,0xc3,size); memset(storage+copied,0x77,size);
+        uint8_t want[size]; memset(want,0xc3,sizeof want);
+        NVNcopyRegion upload = {1,0,0,3,2,1};
+        for (int y=0; y<2; ++y) for (int x=0; x<4; ++x) {
+            uint8_t value[8]; memcpy(value,cleared,bpp);
+            if (x) {
+                unsigned k=4*y+x;
+                if (formats[i]==NVN_FORMAT_STENCIL8) value[0]=17*k;
+                else if (formats[i]==NVN_FORMAT_DEPTH32F_STENCIL8) {
+                    float depth=(float)k/8; memcpy(value,&depth,4); value[4]=17*k;
+                } else {
+                    uint32_t word=(((0x173aa1u*k)&0xffffffu)<<8) | (formats[i]==NVN_FORMAT_DEPTH24_STENCIL8 ? 17*k : 0);
+                    memcpy(value,&word,4);
+                }
+                memcpy(storage+input+y*row+(x-1)*bpp,value,bpp);
+            }
+            memcpy(want+3+y*row+x*bpp,value,bpp);
+        }
+        // This texel will come from an earlier GPU command, even when the
+        // rest of the same source row comes directly from guest memory.
+        memcpy(storage+input+128,storage+input,bpp);
+        memset(storage+input,0,bpp);
+        API(nvnCommandBufferBeginRecording)(&cb);
+        API(nvnCommandBufferCopyBufferToBuffer)(&cb,addr+input+128,addr+input,bpp,0);
+        API(nvnCommandBufferSetCopyRowStride)(&cb,row);
+        API(nvnCommandBufferCopyBufferToTexture)(&cb,addr+input,&tex,NULL,&upload,0);
+        API(nvnCommandBufferCopyTextureToBuffer)(&cb,&tex,NULL,&all,addr+output+3,0);
+        API(nvnCommandBufferCopyBufferToBuffer)(&cb,addr+output,addr+copied,size,0);
+        commands=API(nvnCommandBufferEndRecording)(&cb);
+        API(nvnQueueSubmitCommands)(queue,1,&commands);
         API(nvnQueueFinish)(queue);
+        for (size_t k=0; k<size; ++k)
+            if (want[k]!=storage[output+k] || want[k]!=storage[copied+k])
+                die("packed transfer format %#x byte %zu: texture %02x, same-list buffer %02x, expected %02x",
+                    formats[i],k,storage[output+k],storage[copied+k],want[k]);
+        memset(got,0xc3,size);
+        API(nvnTextureReadTexelsStrided)(&tex,NULL,&all,got+3,row,size);
+        assert(!memcmp(want,got,size));
         API(nvnCommandBufferFinalize)(&cb);
         API(nvnTextureFinalize)(&tex);
     }
-    puts("Public depth/stencil texels: NVN packed planes, subregions and padded rows verified");
+    puts("Public depth/stencil texels: packed upload, same-list GPU readback, CPU reads and padding verified");
 }
 
 // Hold publication of the first row after the GPU fence. A CPU writer can
@@ -561,7 +602,7 @@ int main(void) {
     API(nvnTextureFinalize)(&tex);
 #ifdef DM_VK_PUBLIC_BINDINGS
     check_linear_transfer(&device, &queue, &pool, storage);
-    check_packed_texels(&device, &queue, &pool);
+    check_packed_texels(&device, &queue, &pool, storage);
 #endif
     API(nvnQueueFinalize)(&queue);
     API(nvnMemoryPoolFinalize)(&pool);
