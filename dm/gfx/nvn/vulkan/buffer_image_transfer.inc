@@ -86,13 +86,14 @@ static void copy_b2t(const p_copy_b2t *c) {
     if (!buffer_image_region(v, c, &l)) { RED_ONCE(50, "invalid buffer-to-texture region or strides"); return; }
     pass_end();
     if (mirror_upload(c->tex,v)) {
-        if (!stored_transfer(c,&l,1)) RED_ONCE(50,"unsupported upload storage for format %#x",c->tex->d.format);
+        if (stored_transfer(c,&l,1)) C->cut_copy=1;
+        else RED_ONCE(50,"unsupported upload storage for format %#x",c->tex->d.format);
         return;
     }
     VkDeviceSize align = transfer_alignment(v);
     VkDeviceSize off = upload_rows(c->src, &l, align);
     VkDescriptorBufferInfo guest = {C->ring,off,l.bytes*l.rows*l.slices};
-    buffer_image_transfer(v,l.region,guest,1,align);
+    buffer_image_transfer(v,l.region,guest,1,align); C->cut_copy=1;
     v->gpu = 1;
 }
 

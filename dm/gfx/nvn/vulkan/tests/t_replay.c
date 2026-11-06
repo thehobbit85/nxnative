@@ -234,7 +234,7 @@ static void textured_draw(int compact, int split_submit) {
     }
 }
 
-static VkPhysicalDeviceFeatures replay_features(int *custom_border) {
+static VkPhysicalDeviceFeatures replay_features(int *custom_border, uint32_t *timestamp_bits) {
     VkInstance instance;
     VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "upload replay", 0, NULL, 0, VK_API_VERSION_1_1};
@@ -246,6 +246,15 @@ static VkPhysicalDeviceFeatures replay_features(int *custom_border) {
     assert((result == VK_SUCCESS || result == VK_INCOMPLETE) && count);
     VkPhysicalDeviceFeatures features;
     vkGetPhysicalDeviceFeatures(physical, &features);
+    if (timestamp_bits) {
+        VkQueueFamilyProperties families[16]; uint32_t count=16;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical,&count,families);
+        *timestamp_bits=0;
+        for (uint32_t i=0;i<count;i++) if (families[i].queueFlags&VK_QUEUE_GRAPHICS_BIT) {
+            if (!getenv("DM_VK_NO_GPU_TIMESTAMPS")) *timestamp_bits=families[i].timestampValidBits;
+            break;
+        }
+    }
     if (custom_border) {
         uint32_t n=0;
         assert(vkEnumerateDeviceExtensionProperties(physical,NULL,&n,NULL)==VK_SUCCESS);
@@ -511,7 +520,7 @@ static void typed_sampler_border(int native, int separate) {
 
 static void custom_borders(void) {
     int native;
-    replay_features(&native);
+    replay_features(&native,NULL);
     typed_sampler_border(native,0); typed_sampler_border(native,1);
     for (int table=0; table<3; ++table) uniform_texture_array(table,native ? CUSTOM_BORDER : STOCK_FALLBACK);
     puts(native ? "Custom sampler borders: float/sint/uint, linear edge and full border through fixed and indexed bindings passed"
@@ -1200,7 +1209,7 @@ static void visibility_reports(void) {
         if (i==5) mtl_queue_activate(0x8125);
     }
     const unsigned expected[] = {16,16,32,0,16,0,32};
-    int precise = replay_features(NULL).occlusionQueryPrecise;
+    int precise = replay_features(NULL,NULL).occlusionQueryPrecise;
     for (unsigned i=0;i<7;i++)
         if ((precise ? reports[i][0]!=expected[i] : !!reports[i][0]!=!!expected[i]) || !reports[i][1]) die("visibility report %u: got %llu, expected %u",i,
             (unsigned long long)reports[i][0],expected[i]);
@@ -1257,6 +1266,77 @@ static void segment_timestamps(void) {
     mtl_queue_forget(0x8129); mtl_tex_release(&color);
     puts(segment ? "Vulkan segment top/bottom timestamps bracket GPU work on the guest clock" :
                    "Vulkan submission reports share a single timestamp on the guest clock");
+}
+
+// TOP and BOTTOM share the boundaries of each logical render segment. A
+// target switch below the draw threshold stays inside the same segment.
+static void counter_boundaries(void) {
+    const char *mode=getenv("DM_NVN_GPU_TS");
+    int segmented=mode && *mode ? !strcmp(mode,"segment") : DM_GAME_GPU_TS_SEGMENT;
+    const char *cut_env=getenv("DM_NVN_CUT");
+    int interval=cut_env ? atoi(cut_env) : 64;
+    if (interval>256) return;
+    uint32_t bits; replay_features(NULL,&bits);
+    enum { segments=3 };
+    tex_t target[2]={{.serial=0x8a20,.d={.width=64,.height=64,.depth=1,.samples=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}}};
+    nvn_tex_layout(&target[0].d,&target[0].L); target[1]=target[0]; target[1].serial++;
+    NVNcounterData results[segments][2]={0};
+    mtl_queue_activate(target[0].serial);
+    uint64_t earliest=nvn_timestamp_from_ns(guest_ns());
+    mtl_sub_begin();
+    for (int i=0;i<segments;i++) {
+        list_t list={0};
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target[i%2]});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_range_program,.stages=3);
+        RECORD(OP_SCISSOR,p_scissor,.w=64,.h=64);
+        uint64_t top[]={NVN_COUNTER_TYPE_TIMESTAMP_TOP,(uintptr_t)&results[i][0]};
+        uint64_t bottom[]={NVN_COUNTER_TYPE_TIMESTAMP,(uintptr_t)&results[i][1]};
+        put(&list,OP_REPORT_COUNTER,top,sizeof top); put(&list,OP_END,NULL,0); mtl_exec(list.bytes);
+        list=(list_t){0};
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        put(&list,OP_END,NULL,0);
+        int draws=i==1 ? 1 : (interval>0 ? interval : 2);
+        for (int k=0;k<draws;k++) mtl_exec(list.bytes);
+        list=(list_t){0}; put(&list,OP_REPORT_COUNTER,bottom,sizeof bottom); put(&list,OP_END,NULL,0);
+        mtl_exec(list.bytes);
+    }
+    assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    uint64_t latest=nvn_timestamp_from_ns(guest_ns());
+    for (int i=0;i<segments;i++) {
+        uint64_t a=results[i][0].timestamp, b=results[i][1].timestamp;
+        assert(earliest<=a && a<=b && b<=latest);
+        assert(results[i][0].counter==(DM_GAME_RENDER_COND ? 0 : a));
+        assert(results[i][1].counter==(DM_GAME_RENDER_COND ? 0 : b));
+        if (i && segmented && bits && (i==1 ? interval>0 : interval==1)) {
+            assert(results[i-1][0].timestamp<a && results[i-1][1].timestamp==a && a<b);
+        } else if (i) {
+            assert(a==results[i-1][0].timestamp && b==results[i-1][1].timestamp);
+        }
+    }
+    // Each successful B2T creates a boundary at the next target change even
+    // with draw cuts disabled. Cross a query page, then recycle the context.
+    if (segmented) {
+        NVNcounterData many[259]; uint32_t pixel=0xff4080e0;
+        for (int round=0;round<4;round++) {
+            int count=round ? 4 : 259;
+            mtl_sub_begin();
+            for (int k=0;k<count;k++) {
+                list_t list={0};
+                uint64_t top[]={NVN_COUNTER_TYPE_TIMESTAMP_TOP,(uintptr_t)&many[k]};
+                put(&list,OP_REPORT_COUNTER,top,sizeof top);
+                RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&target[0],.src=(uintptr_t)&pixel,.r={.width=1,.height=1,.depth=1});
+                RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target[k%2]});
+                put(&list,OP_END,NULL,0); mtl_exec(list.bytes);
+            }
+            assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+            for (int k=1;k<count;k++) assert(many[k-1].timestamp<=many[k].timestamp);
+            if (bits) assert(many[0].timestamp<many[count-1].timestamp);
+            else assert(many[0].timestamp==many[count-1].timestamp);
+        }
+    }
+    mtl_tex_release(&target[0]); mtl_tex_release(&target[1]); mtl_queue_forget(target[0].serial);
+    puts("Counter timestamps preserve GPU render-segment boundaries and guest clock bounds");
 }
 
 static void texture_clear_regions(void) {
@@ -2525,7 +2605,7 @@ static void retired_texture_pool(void) {
     puts("Pool retirement preserves submitted draws, invalidates warm/cold IDs and requires registration after address reuse");
 }
 static void separate_descriptors(int mixed_formats) {
-    int caps; replay_features(&caps);
+    int caps; replay_features(&caps,NULL);
     tex_t images[2],output={.serial=0xd002,.d={.width=4,.height=4,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&output.d,&output.L);
     for(int i=0;i<2;i++) {
@@ -2795,13 +2875,13 @@ int main(void) {
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
-    if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); segment_timestamps(); return 0; }
+    if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); segment_timestamps(); counter_boundaries(); return 0; }
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
     if (getenv("DM_VK_TEST_DISCARD")) { graphics_storage(); return 0; }
     if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
     if (getenv("DM_VK_TEST_CUSTOM_BORDER")) { custom_borders(); return 0; }
-    if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features(NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
+    if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features(NULL,NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_OFFSET")) { polygon_offset(&offset_program); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_CLAMP")) { depth_clamp(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
@@ -2846,7 +2926,7 @@ int main(void) {
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);
-    if (replay_features(NULL).textureCompressionASTC_LDR) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
+    if (replay_features(NULL,NULL).textureCompressionASTC_LDR) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
     initial_texture_content();
     uniform_texture_array(0,STOCK_BORDER); uniform_texture_array(1,STOCK_BORDER); uniform_texture_array(2,STOCK_BORDER);
@@ -2870,7 +2950,7 @@ int main(void) {
     nested_depth_ranges();
     depth_clamp();
     polygon_offset(&offset_program);
-    polygon_fill(&fill_program,replay_features(NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME"));
+    polygon_fill(&fill_program,replay_features(NULL,NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME"));
     alpha_references();
     logic_operations();
     sparse_mrt_outputs();
@@ -2883,6 +2963,6 @@ int main(void) {
     multisample_colors();
     multisample_depth();
     visibility_reports();
-    segment_timestamps();
+    segment_timestamps(); counter_boundaries();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }

@@ -45,7 +45,8 @@
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkPhysicalDeviceMemoryProperties g_memp; static VkPhysicalDeviceProperties g_props;
 static uint64_t g_timestamp_mask;
-static int g_segment_timestamps;
+static int g_segment_timestamps, g_cut_draws;
+static uint64_t g_stat_draws;
 static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
 static int g_draw_parameters, g_descriptor_tables;
 static uint32_t g_vertex_divisor_limit = 1;
@@ -164,7 +165,7 @@ static void feedback_release(feedback_control *control) {
         free(control);
     }
 }
-enum { POST_VISIBILITY_ADD = 4, POST_VISIBILITY_RESET, POST_FEEDBACK_RELEASE };
+enum { POST_VISIBILITY_ADD = 4, POST_VISIBILITY_RESET, POST_FEEDBACK_RELEASE, POST_TIME_BOUNDARY };
 typedef struct { int kind; void *dst; uint32_t mode, v; uint64_t addr; uint32_t type; const uint8_t *src; size_t n;
                  visibility_counter *visibility; const uint64_t *samples; } post_t;   // kind 1 event, 2 counter, 3 copy ring → guest
 typedef struct vtex vtex;
@@ -178,6 +179,9 @@ typedef struct {
     VkQueryPool qp;   // GPU timestamps at the start and the end of the submission
     int timed_reports; uint64_t submitted_ns;
     visibility_queries visibility;
+    query_pages time_boundaries;
+    uint64_t cut_draw0;
+    int cut_copy;
     VkFramebuffer *fb; int nfb, cfb;   // render passes' framebuffers (no dynamic rendering), destroyed when the submission is done
     VkBuffer ring0; VkDeviceMemory ringm0; uint8_t *ringp0;   // the context's own ring; ring / ringp move to extra rings when a submission outgrows it (loading screens upload hundreds of MB)
     struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize size; } *extra; int nextra;
@@ -310,9 +314,20 @@ static void gw_expire(uint64_t fence) {   // completion: the submission's writes
     g_ngw = keep;
     pthread_mutex_unlock(&g_gwmu);
 }
+// Find the end of the next logical segment. Map its device timestamp onto
+// the same calibrated guest interval as the submission's start and end.
+static uint64_t next_boundary(const ctx_t *c, int *cursor, uint64_t gpu_end, uint64_t lo, uint64_t hi) {
+    while (*cursor<c->npost) {
+        const post_t *p=&c->post[(*cursor)++];
+        if (p->kind!=POST_TIME_BOUNDARY) continue;
+        uint64_t ago=nvn_timestamp_from_ns(elapsed_gpu_ns(*p->samples,gpu_end));
+        return ago<hi-lo ? hi-ago : lo;
+    }
+    return hi;
+}
 static void ctx_complete(ctx_t *c) {
     uint64_t ts[2] = {0}, ticks[2] = {0}, duration = 0;
-    visibility_read(&c->visibility);
+    query_read(&c->visibility.pages); query_read(&c->time_boundaries);
     if (c->qp) {
         VKCHECK(vkGetQueryPoolResults(g_dev, c->qp, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT));
         duration = elapsed_gpu_ns(ts[0], ts[1]);
@@ -320,6 +335,8 @@ static void ctx_complete(ctx_t *c) {
     }
     if (c->timed_reports) segment_ticks(c, ts, duration, ticks);
     else if (c->npost) ticks[0] = ticks[1] = nvn_timestamp_from_ns(guest_time_ns());
+    int next_cut=0;
+    uint64_t lo=ticks[0], hi=c->timed_reports ? next_boundary(c,&next_cut,ts[1],lo,ticks[1]) : ticks[1];
     for (int i = 0; i < c->npost; i++) {
         post_t *p = &c->post[i];
         if (p->kind == 1) {
@@ -327,7 +344,7 @@ static void ctx_complete(ctx_t *c) {
             volatile uint32_t *v = p->dst; if (p->mode == 1) *v += p->v; else *v = p->v;
         }
         else if (p->kind == 2) {
-            uint64_t t = ticks[p->type != NVN_COUNTER_TYPE_TIMESTAMP_TOP];
+            uint64_t t = p->type==NVN_COUNTER_TYPE_TIMESTAMP_TOP ? lo : hi;
             int timestamp = p->type == NVN_COUNTER_TYPE_TIMESTAMP || p->type == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
             uint64_t rec[2] = {timestamp && !DM_GAME_RENDER_COND ? t : 0, t};
             if (p->visibility) rec[0] = p->visibility->samples;
@@ -341,6 +358,9 @@ static void ctx_complete(ctx_t *c) {
         else if (p->kind == POST_VISIBILITY_ADD) p->visibility->samples += *p->samples;
         else if (p->kind == POST_VISIBILITY_RESET) p->visibility->samples = 0;
         else if (p->kind == POST_FEEDBACK_RELEASE) feedback_release(p->dst);
+        else if (p->kind==POST_TIME_BOUNDARY && c->timed_reports) {
+            lo=hi; hi=next_boundary(c,&next_cut,ts[1],lo,ticks[1]);
+        }
         visibility_release(p->visibility);
     }
     c->npost = 0;
@@ -434,10 +454,12 @@ static void vk_init_(void) {
     VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(g_pd, &nq, qp);
     for (g_qf = 0; g_qf < nq && !(qp[g_qf].queueFlags & VK_QUEUE_GRAPHICS_BIT); g_qf++) {}
     if (g_qf == nq) die("Vulkan: no graphics queue");
-    uint32_t bits = qp[g_qf].timestampValidBits;
+    uint32_t bits = getenv("DM_VK_NO_GPU_TIMESTAMPS") ? 0 : qp[g_qf].timestampValidBits;
     g_timestamp_mask = bits == 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    const char *cut=getenv("DM_NVN_CUT"); g_cut_draws=cut ? atoi(cut) : 64;
     const char *timer = getenv("DM_NVN_GPU_TS");
     g_segment_timestamps = timer && *timer ? !strcmp(timer,"segment") : DM_GAME_GPU_TS_SEGMENT;
+    if (g_segment_timestamps && !bits) LOG("[RED] vk: graphics queue has no GPU timestamps; segment reports use the guest submission interval");
     // Every feature the GPU has is enabled (the translated shaders may use any of them), except the costly robustness beyond robustBufferAccess. The feature structures
     // chained are only those of the GPU's Vulkan version and extensions (1.1 phones have neither the 1.2 / 1.3 structures nor dynamic rendering)
     uint32_t dv = g_props.apiVersion;
@@ -536,6 +558,7 @@ static void vk_init_(void) {
     // Keep its original BaseInstance in the existing draw-parameter push block.
     if (g_vertex_divisor_limit<UINT32_MAX || getenv("DM_VK_NO_DRAW_PARAMETERS")) g_draw_parameters=0;
     if (!g_draw_parameters) LOG("vk: shader draw parameters supplied by host push constants");
+    has_calibrated=has_calibrated && bits && !getenv("DM_VK_NO_CALIBRATED_TIMESTAMPS");
     if (g_segment_timestamps && has_calibrated) ext[next++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
     g_selectable_subgroup_stages = 0;
     if (f13.subgroupSizeControl || size_features.subgroupSizeControl) {
@@ -1963,7 +1986,22 @@ static int pass_begin(void) {
     begin_tracked_pass(&d); P.open = 1;
     return 1;
 }
+// The Apple timing mode advances at a pass break after a texture upload or
+// the draw threshold. Vulkan can timestamp that boundary without submitting
+// early or changing when a guest fence sees the reports.
+static void timestamp_cut(void) {
+    if (!C->cut_copy && (g_cut_draws<=0 || g_stat_draws-C->cut_draw0<(uint64_t)g_cut_draws)) return;
+    uint32_t slot;
+    query_page *page=query_slot(&C->time_boundaries,VK_QUERY_TYPE_TIMESTAMP,C->up,&slot);
+    vkCmdWriteTimestamp(C->cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,page->pool,slot);
+    post_add((post_t){.kind=POST_TIME_BOUNDARY,.samples=&page->samples[slot]});
+    C->cut_draw0=g_stat_draws; C->cut_copy=0;
+}
 static void set_rt(const p_set_rt *r) {
+    int timing=g_segment_timestamps && C->qp;
+    VkImageView old_color[8], old_depth=P.dv;
+    int continued=timing && P.open && P.n==r->n;
+    if (continued) memcpy(old_color,P.cv,sizeof old_color);
     pass_end();
     memset(&P, 0, sizeof P);
     P.n = r->n > 8 ? 8 : r->n; P.w = P.h = 0x7fffffff;
@@ -1989,6 +2027,7 @@ static void set_rt(const p_set_rt *r) {
     if (P.incompatible_samples) RED_ONCE(95, "render target sample counts differ");
     if (!P.samples) P.samples = VK_SAMPLE_COUNT_1_BIT;
     if (P.w == 0x7fffffff) P.w = P.h = 1;
+    if (timing && (!continued || old_depth!=P.dv || memcmp(old_color,P.cv,sizeof old_color))) timestamp_cut();
 }
 
 // Pipelines, cached by everything they are built from
@@ -2725,7 +2764,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
     return ds;
 }
 static _Atomic uint64_t g_wait_ns, g_rec_ns, g_pwait_ns;   // time the submit thread waited for the GPU, spent recording, and the present waited for its slot
-static uint64_t g_stat_draws, g_stat_skip, g_skip_why[8];   // why: 0 no program, 1 shader missing / rejected, 2 no render target, 3 indirect, 4 primitive, 5 pipeline, 6 descriptors
+static uint64_t g_stat_skip, g_skip_why[8];   // why: 0 no program, 1 shader missing / rejected, 2 no render target, 3 indirect, 4 primitive, 5 pipeline, 6 descriptors
 #define SKIP(w) do { g_stat_skip++; g_skip_why[w]++; return; } while (0)
 static int draw_begin(uint32_t write_mask) {
     if (!pass_begin()) return 0;
@@ -3610,6 +3649,7 @@ static void begin_segment(void) {
     pthread_mutex_lock(&g_mu); while (c->fence_val > g_done) pthread_cond_wait(&g_cv, &g_mu); pthread_mutex_unlock(&g_mu);
     atomic_fetch_add(&g_wait_ns, now_ns() - w0);
     C = c; C->used = 0; C->capacity = RING; C->up_used = 0; g_ndc = 0; g_wgen++; C->ring = C->ring0; C->ringp = C->ringp0;
+    C->cut_draw0=g_stat_draws; C->cut_copy=0;
     C->dp = C->dp0; VKCHECK(vkResetDescriptorPool(g_dev, C->dp, 0));
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     VKCHECK(vkBeginCommandBuffer(C->cb, &bi)); VKCHECK(vkBeginCommandBuffer(C->up, &bi));
