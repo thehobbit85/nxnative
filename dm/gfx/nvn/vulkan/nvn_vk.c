@@ -2201,6 +2201,16 @@ static int draw_begin(void) {
     for (int a = 0; a < P.n; a++) if (S.chmask.mask >> (4 * a) & 0xf) P.cwr[a] = P.cdrawn[a] = 1;
     return 1;
 }
+static VkRect2D render_scissor(void) {
+    if (!S.has_sc) return (VkRect2D){{0, 0}, {P.w, P.h}};
+    int64_t right = (int64_t)S.sc.x + S.sc.w, bottom = (int64_t)S.sc.y + S.sc.h;
+    int32_t x = S.sc.x > 0 ? S.sc.x : 0, y = S.sc.y > 0 ? S.sc.y : 0;
+    if (right > P.w) right = P.w;
+    if (bottom > P.h) bottom = P.h;
+    if (right <= x || bottom <= y) return (VkRect2D){0};
+    return (VkRect2D){{x, y}, {(uint32_t)(right - x), (uint32_t)(bottom - y)}};
+}
+
 static void draw(const p_draw *dw, const p_draw_idx *di) {
     g_nwb = 0;
     if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
@@ -2252,12 +2262,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (S.has_vp) { x = S.vp[0][0]; y = S.vp[0][1]; w = S.vp[0][2]; h = S.vp[0][3]; }
     VkViewport vv = {x, g_origin_ll ? y : y + h, w, g_origin_ll ? h : -h, S.dr[0], S.dr[1]};
     vkCmdSetViewport(cb, 0, 1, &vv);
-    VkRect2D sc = {{0, 0}, {P.w, P.h}};
-    if (S.has_sc) {
-        int32_t sx = S.sc.x < 0 ? 0 : S.sc.x, sy = S.sc.y < 0 ? 0 : S.sc.y, ex = S.sc.x + S.sc.w, ey = S.sc.y + S.sc.h;
-        if (ex > (int32_t)P.w) ex = (int32_t)P.w; if (ey > (int32_t)P.h) ey = (int32_t)P.h;
-        sc = (VkRect2D){{sx, sy}, {ex > sx ? (uint32_t)(ex - sx) : 0, ey > sy ? (uint32_t)(ey - sy) : 0}};
-    }
+    VkRect2D sc = render_scissor();
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdSetDepthBias(cb, S.po.units, S.po.clamp, S.po.factor);
     vkCmdSetBlendConstants(cb, S.blend_color);
@@ -2427,21 +2432,31 @@ static void dispatch(const p_dispatch *d) {
     g_stat_draws++;
 }
 static void clear_color(const p_clear_color *c) {
-    if (c->index < 0 || c->index >= P.n || !P.cv[c->index]) return;
+    if (c->index < 0 || c->index >= P.n || !P.cv[c->index] || !(c->mask & 15)) return;
+    VkClearRect r = {.rect = render_scissor(), .layerCount = 1};
+    if (!r.rect.extent.width || !r.rect.extent.height) return;
     if ((c->mask & 15) != 15) RED_ONCE(40, "a color clear with a partial channel mask clears every channel");
-    if (!P.open) { P.clr_c[c->index] = 1; memcpy(&P.cc[c->index], c->rgba, 16); return; }   // before the pass's first draw: its load action
+    P.cwr[c->index] = 1;
+    if (!P.open && r.rect.extent.width == P.w && r.rect.extent.height == P.h) {
+        P.clr_c[c->index] = 1; memcpy(&P.cc[c->index], c->rgba, 16); return;
+    }
+    if (!pass_begin()) return;
     VkClearAttachment a = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)c->index, {.color = {{c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]}}}};
-    VkClearRect r = {{{0, 0}, {P.w, P.h}}, 0, 1};
     vkCmdClearAttachments(C->cb, 1, &a, 1, &r);
+    P.cdrawn[c->index] = 1;
 }
 static void clear_ds(const p_clear_ds *c) {
     if (!P.dt) return;
-    if (!P.open) { if (c->depth_mask) { P.clr_d = 1; P.cd = c->depth; } if (P.dt->f.stencil && c->stencil_mask) { P.clr_s = 1; P.cs = (uint32_t)c->stencil; } return; }
+    VkClearRect r = {.rect = render_scissor(), .layerCount = 1};
+    VkImageAspectFlags asp = (c->depth_mask ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (P.dt->f.stencil && (c->stencil_mask & 0xff) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+    if (!asp || !r.rect.extent.width || !r.rect.extent.height) return;
+    if (!P.open && r.rect.extent.width == P.w && r.rect.extent.height == P.h) {
+        if (asp & VK_IMAGE_ASPECT_DEPTH_BIT) { P.clr_d = 1; P.cd = c->depth; }
+        if (asp & VK_IMAGE_ASPECT_STENCIL_BIT) { P.clr_s = 1; P.cs = (uint32_t)c->stencil; }
+        return;
+    }
     if (!pass_begin()) return;
-    VkImageAspectFlags asp = (c->depth_mask ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (P.dt->f.stencil && c->stencil_mask ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
-    if (!asp) return;
     VkClearAttachment a = {asp, 0, {.depthStencil = {c->depth, (uint32_t)c->stencil}}};
-    VkClearRect r = {{{0, 0}, {P.w, P.h}}, 0, 1};
     vkCmdClearAttachments(C->cb, 1, &a, 1, &r);
 }
 // Copies and blits are checked against the image before they are recorded: a region past a level's extent, a level or layer the image lacks, or a blit the format does not support
