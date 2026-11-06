@@ -284,7 +284,7 @@ uint64_t mtl_upload_gpu_ns_take(void);   // Take and zero: GPU execution time of
 void mtl_create_stats(uint64_t *lib, uint64_t *pso);   // Cumulative: number of shader libraries loaded synchronously on the submit thread, number of render + compute pipelines created synchronously (those taken from warm-up do not count)
 // CPU texture read: starting at level / layer0, written into dst with row / img byte strides
 #ifdef DM_NVN_VULKAN
-int dm_vk_write_owned_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r,
+void dm_vk_write_owned_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r,
                              const uint8_t *src, size_t row, size_t img);
 #endif
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img);

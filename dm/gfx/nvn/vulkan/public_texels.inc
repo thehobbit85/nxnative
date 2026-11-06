@@ -164,16 +164,18 @@ static int gpu_texels(const vtex *v, unsigned level, const NVNcopyRegion *r, con
 // Explicit CPU writes still update guest memory. An image the GPU already
 // owns needs the same region on-device; re-uploading its whole backing would
 // discard render-target contents outside the region.
-int dm_vk_write_owned_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r,
+void dm_vk_write_owned_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r,
                              const uint8_t *src, size_t row, size_t img) {
+    // An earlier linear-image writeback can still be publishing bytes into
+    // guest backing after its GPU fence. It must finish before the caller's
+    // CPU write to that backing, including writes through an aliased texture.
+    gw_wait_prior((uintptr_t)t->mem, t->L.size);
     pthread_mutex_lock(&g_rmu);
     vtex *v = tex_find(t->serial);
-    int gpu = v && v->gpu;
-    if (gpu) {
+    if (v && v->gpu) {
         texel_extent ext;
         if (!texel_region(t, level, layer0, r, row, img, &ext) || !gpu_texels(v, level, r, src, NULL, row, img, ext))
             RED_ONCE(81, "unsupported CPU write to GPU-owned texture (format %#x, samples %u)", t->d.format, t->d.samples);
     }
     pthread_mutex_unlock(&g_rmu);
-    return gpu;
 }

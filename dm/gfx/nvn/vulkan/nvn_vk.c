@@ -1085,7 +1085,9 @@ int mtl_tex_gpu_owned(uint64_t serial) {
 }
 void mtl_tex_cpu_written(const tex_t *t) {
     pthread_mutex_lock(&g_rmu);
-    vtex *v = tex_find(t->serial); if (v) v->dirty = 1;
+    vtex *v = tex_find(t->serial);
+    if (v && v->gpu) { pthread_mutex_unlock(&g_rmu); return; }
+    if (v) v->dirty = 1;
     if (!cpu_written(t->serial)) { if (g_ncpu == g_ccpu) { g_ccpu = g_ccpu ? 2 * g_ccpu : 64; g_cpu_written = realloc(g_cpu_written, g_ccpu * sizeof *g_cpu_written); } g_cpu_written[g_ncpu++] = t->serial; }
     pthread_mutex_unlock(&g_rmu);
 }

@@ -13,7 +13,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** a CPU-written linear texture samples padding from the second row onward, or a render pass overwrites the bytes between guest rows. Publishing a readback into a protected guest pool can also fault on the completion thread.
 - **Cause:** upload assumed tightly packed rows. Writeback published padding along with pixel data and copied it to guest memory without preparing dirty-tracked pages.
-- **Fix:** read linear rows at their allocated stride, stage the GPU copy tightly, publish only pixel bytes and prepare guest destinations before completion writes.
+- **Fix:** read linear rows at their allocated stride, stage the GPU copy tightly, publish only pixel bytes and prepare guest destinations before completion writes. A newer public CPU write waits for older writebacks to its backing range before updating either the live image or guest memory.
 - **Found on:** the public recorder fixture uploads distinct rows into 7×3 linear textures with explicit and implicit pitches, then clears each as a render target and checks every pixel and padding byte.
 
 ## Textures and formats
