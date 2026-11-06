@@ -31,6 +31,8 @@ int dm_players_reported(void);   // the players the game sees: player 1 and each
 // (0, 0, -1) face up) and rotation rate in rad/s, in Apple's controller frame. While samples keep coming the player's six-axis sensor follows the controller; dm_motion_clear stops it
 void dm_motion_set(int player, const float acc[3], const float rot[3]);
 void dm_motion_set_switch(int player, const float acc[3], const float rot[3]);   // player 0 only: the phone's own sensors in the Switch frame, kept separate; DM_MOTION_AXES does not apply
+void dm_motion_set_sample(int player, const float acc[3], const float rot[3], uint64_t sample_ns, int handheld);
+void dm_motion_clear_switch(void);   // drop the phone source immediately on suspend
 void dm_motion_clear(int player);   // clears GameController motion; another fresh source can take over
 // Passive controller HID, already in the Switch frame (G, rad/s). sample_ns is the sample's host now_ns() time, not the packet's arrival; stale / reordered samples are ignored.
 // Kept separate from GameController and the phone; used while GameController supplies no fresh motion for that player. DM_MOTION_AXES / ACC_SIGN apply only to GameController.

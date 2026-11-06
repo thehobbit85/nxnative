@@ -79,6 +79,10 @@ static void web_register(JNIEnv *env, jobject activity) {
     const JNINativeMethod methods[] = {
         {"nativeWebEvent", "(JII[B)V", (void *)Java_com_nxnative_GameActivity_nativeWebEvent},
         {"nativeWebPad", "()[J", (void *)Java_com_nxnative_GameActivity_nativeWebPad},
+        {"nativeMotionModes", "()I", (void *)motion_modes},
+        {"nativeMotionClockOffset", "()J", (void *)motion_clock_offset},
+        {"nativeMotionSample", "(IIJFFFFFF)V", (void *)motion_sample},
+        {"nativeMotionClear", "(I)V", (void *)motion_clear},
         {"nativePadAttach", "(ILjava/lang/String;)Z", (void *)pad_attach},
         {"nativePadDetach", "(I)V", (void *)pad_detach},
         {"nativeWebKey", "(IIIZ)Z", (void *)Java_com_nxnative_GameActivity_nativeWebKey},

@@ -521,6 +521,28 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+static void t_motion_sample(void) {
+    uint32_t phone = 0, second = 1 << 8;
+    SixAxisState st;
+    float flat[] = {0, 0, -1}, turn[] = {0, 0, 2 * (float)M_PI};
+    dm_pad_players(3); ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); g_phone_mode = 1;
+    motion_now += 1000000000;
+    for (int handheld = 0; handheld <= 1; handheld++) {
+        int player = handheld ? 0 : 1;
+        const uint32_t *handle = handheld ? &phone : &second;
+        dm_motion_set_sample(player, flat, turn, motion_now - 20000000, handheld);
+        dm_motion_set_sample(player, flat, turn, motion_now - 10000000, handheld);
+        dm_motion_set_sample(player, flat, turn, motion_now - 15000000, handheld);
+        h_hid_SixStates(&st, 1, handle);
+        CHECK(fabsf(st.angle[2] - .01f) < 1e-6f, "sensor timestamps, independent of delivery, drive the selected player");
+        if (handheld) dm_motion_clear_switch(); else dm_motion_clear(player);
+        dm_motion_set_sample(player, flat, turn, motion_now - MOTION_STALE_NS - 1, handheld);
+        h_hid_SixStates(&st, 1, handle);
+        CHECK(st.gyro[2] == 0 && st.angle[2] == 0, "a stale queued sample cannot restart a cleared sensor");
+    }
+    dm_pad_players(1); g_phone_mode = -1;
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -532,6 +554,7 @@ int main(void) {
     t_motion_threads();
     t_motion_live();
     t_motion_hid();
+    t_motion_sample();
     t_rec();
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;

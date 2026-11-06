@@ -7,9 +7,12 @@ import java.util.HashMap;
 /** Observe gamepads independently of button presses so idle players stay connected. */
 final class GameControllers implements InputManager.InputDeviceListener {
     private final InputManager input;
+    private final GameMotion motion;
+    private boolean closed;
     private final HashMap<Integer, String> attached = new HashMap<>();
 
-    GameControllers(GameActivity activity) {
+    GameControllers(GameActivity activity, GameMotion motion) {
+        this.motion = motion;
         input = activity.getSystemService(InputManager.class);
         input.registerInputDeviceListener(this, null);
         refresh();
@@ -21,10 +24,12 @@ final class GameControllers implements InputManager.InputDeviceListener {
     }
 
     private void refresh() {
+        if (closed) return;
         // Retire devices first. A ninth controller can take a slot when one opens.
         for (int id : new java.util.ArrayList<>(attached.keySet())) {
             InputDevice d = input.getInputDevice(id);
             if (d == null || !isController(d.getSources()) || !attached.get(id).equals(d.getDescriptor())) {
+                motion.remove(id);
                 GameActivity.nativePadDetach(id);
                 attached.remove(id);
             }
@@ -33,17 +38,26 @@ final class GameControllers implements InputManager.InputDeviceListener {
             if (attached.containsKey(id)) continue;
             InputDevice d = input.getInputDevice(id);
             if (d != null && !d.isVirtual() && isController(d.getSources()) &&
-                GameActivity.nativePadAttach(id, d.getDescriptor())) attached.put(id, d.getDescriptor());
+                GameActivity.nativePadAttach(id, d.getDescriptor())) {
+                attached.put(id, d.getDescriptor());
+                motion.controller(d);
+            }
         }
     }
 
     @Override public void onInputDeviceAdded(int id) { refresh(); }
-    @Override public void onInputDeviceChanged(int id) { refresh(); }
+    @Override public void onInputDeviceChanged(int id) {
+        String previous = attached.get(id);
+        refresh();
+        InputDevice d = input.getInputDevice(id);
+        if (d != null && previous != null && previous.equals(attached.get(id))) motion.controller(d);
+    }
     @Override public void onInputDeviceRemoved(int id) { refresh(); }
 
     void close() {
+        closed = true;
         input.unregisterInputDeviceListener(this);
-        for (int id : attached.keySet()) GameActivity.nativePadDetach(id);
+        for (int id : attached.keySet()) { motion.remove(id); GameActivity.nativePadDetach(id); }
         attached.clear();
     }
 }

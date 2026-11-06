@@ -46,6 +46,9 @@ static void sleep_frame(void) {
     __asm__ volatile("svc #0x0b" : "+r"(x0) : : "memory");
 }
 static void require(int ok) { if (!ok) { NOTE("APP_FIXTURE_FAILED\n"); for (;;) sleep_frame(); } }
+#ifdef APP_MOTION
+#include "app_motion.h"
+#endif
 #ifdef APP_KEYBOARD
 #include "app_keyboard.h"
 #endif
@@ -216,6 +219,9 @@ void nnMain(void) {
 #endif
     uint64_t last_buttons = 0;
     for (unsigned frame = 0;; frame++) {
+#ifdef APP_MOTION
+        if (!(frame % 10)) report_motion();
+#endif
 #ifdef APP_KEYBOARD
         if (frame == 10) check_keyboard();
 #endif

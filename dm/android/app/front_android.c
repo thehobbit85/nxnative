@@ -77,6 +77,7 @@ static uint64_t key_bit(int32_t k) {
 static _Atomic int g_menu_request;
 static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER;
 #include "controllers_android.h"
+#include "motion_android.h"
 
 static void back_to_menu(void);
 static void *latch_thread(void *a) {
