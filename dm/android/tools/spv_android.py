@@ -187,7 +187,7 @@ def export_spirv(data, optimizer):
 VERTEX_TYPES = {'float': 0, 'half': 0, 'uint': 1, 'ushort': 1, 'uchar': 1, 'int': 2, 'short': 2, 'char': 2}
 RESOURCE_KINDS = {'cbuf', 'c1', 'support', 'drvcb', 'tex', 'tex_ubo', 'tex_c2a', 'samp_c2a', 'img', 'sbuf', 'sbuf_ubo', 'tbuf', 'ubo_ptr',
                   'samp', 'samp_ubo', 'samp_tex', 'samp_id', 'geometry', 'mesh', 'gmem_map', 'gmem_log',
-                  'tex_pool', 'samp_pool', 'pool_bounds', 'tex_slots', 'samp_slots'}
+                  'tex_pool', 'samp_pool', 'tex_htab', 'samp_htab', 'htab_map', 'pool_bounds', 'tex_slots', 'samp_slots'}
 
 
 def requirements(data):

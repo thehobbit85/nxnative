@@ -25,6 +25,36 @@ class ResourcePoolMetadata(unittest.TestCase):
             with self.subTest(count=count), self.assertRaises(ValueError):
                 spv_pool.fields(dict(kind='pool_bounds', type='ubo', count=1, reg=count))
 
+    @unittest.skipUnless(all(shutil.which(t) for t in ('glslangValidator', 'spirv-opt', 'spirv-val')),
+                         'requires GLSL and SPIRV-Tools')
+    def test_uniform_handle_table_with_combined_sampler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            source = work / 'table.comp'
+            source.write_text("""#version 450
+layout(local_size_x=1) in;
+layout(binding=12) uniform sampler3D handles[8192];
+layout(binding=8204) buffer Result { vec4 value[]; } result;
+void main() {
+    uint i=gl_GlobalInvocationID.x;
+    result.value[i]=textureLod(handles[i],vec3(0.5),0);
+}
+""")
+            raw = work / 'table.spv'
+            subprocess.run(['glslangValidator', '-V', '--target-env', 'vulkan1.1', str(source), '-o', str(raw)],
+                           check=True, capture_output=True)
+            reflection = dict(stage='cs', threadgroup_size=[1, 1, 1], bindings=[
+                dict(msl_name='handles', kind='tex_htab', reg=8, off=24),
+                dict(msl_name='handlesSmplr', kind='samp_htab', reg=8, off=24, sreg=255, soff=1392),
+                dict(msl_name='result', kind='sbuf', reg=0)])
+            name = '00000000feed6002'
+            vk.write_stage(name, raw.read_bytes(), reflection, work, 'spirv-val', 'spirv-opt')
+            text = (work / (name + '.vk.txt')).read_text()
+            self.assertIn('cis 8192 tex_htab 8 24 samp_htab 8 ', text)
+            self.assertIn('c2_or=1392', text)
+            self.assertIn('runtime=1 pool_slot=0', text)
+            self.assertIn('ssbo 1 htab_map 0', text)
+
     def test_pointer_use_detection_does_not_treat_literals_as_ids(self):
         self.assertEqual(spv_pool.pointer_operands(instruction(81, 1, 2, 3, 97)), ())
         self.assertEqual(spv_pool.pointer_operands(instruction(65, 1, 2, 97, 4)), (97,))
