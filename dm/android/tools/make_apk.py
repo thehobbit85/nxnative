@@ -87,6 +87,8 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
   <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true"/>
   <application android:label="{label}" android:icon="@mipmap/icon" android:hasCode="true" android:extractNativeLibs="true" android:isGame="true"
                android:appCategory="game" android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+    <provider android:name="com.nxnative.AssetDeployProvider" android:authorities="{pkg}.deploy"
+              android:exported="true" android:permission="android.permission.DUMP"/>
     <activity android:name="com.nxnative.MenuActivity" android:exported="true" android:screenOrientation="sensorLandscape"
               android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation|uiMode|screenLayout|smallestScreenSize">
       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
@@ -414,6 +416,15 @@ def installed_apk(adb, serial, pkg):
     return paths[0]
 
 
+def deploy_call(adb, serial, pkg, apk, method):
+    command = shlex.join(['content', 'call', '--uri', 'content://' + pkg + '.deploy', '--method', method, '--arg', apk])
+    # Android's content command can print a provider error and exit zero.
+    result = subprocess.check_output([str(adb), '-s', serial, 'shell', command], stderr=subprocess.STDOUT, text=True, env=ENV)
+    identity = re.search(r'^Result: Bundle\[\{identity=([0-9a-f]{64})\}\]$', result, re.M)
+    if not identity: raise ValueError(f'game asset {method} failed; install the matching current APK: {result.strip()}')
+    return identity[1]
+
+
 def deploy(a):
     sdk = a.sdk or os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME')
     adb = os.path.join(sdk, 'platform-tools', 'adb') if sdk else 'adb'
@@ -424,8 +435,8 @@ def deploy(a):
     # verifier/journal instead of maintaining a second transaction in shell.
     files = [] if a.from_device else package_files(a)
     apk = installed_apk(adb, a.serial, package(a.id, a.test))
-    invoke = 'umask 000; CLASSPATH=' + shlex.quote(apk) + ' app_process /system/bin com.nxnative.AssetDeploy '
-    run(adb, '-s', a.serial, 'shell', invoke + '--check ' + shlex.quote(apk))
+    pkg = package(a.id, a.test)
+    identity = deploy_call(adb, a.serial, pkg, apk, 'check')
     run(adb, '-s', a.serial, 'shell', 'am force-stop ' + package(a.id, a.test))
     run(adb, '-s', a.serial, 'shell', f'umask 000; rm -rf {stage} && mkdir -p ' + ' '.join(stage + '/' + d for d in roots))
     if a.from_device:
@@ -451,7 +462,13 @@ def deploy(a):
     # its next launch can finish rollback/cleanup after an interrupted deployment.
     # Other applications remain excluded by Android scoped storage.
     run(adb, '-s', a.serial, 'shell', f'chmod -R a+rwX {stage}')
-    run(adb, '-s', a.serial, 'shell', invoke + shlex.join([ext, apk]))
+    # Older packers published as the shell. Let the app recover its legacy
+    # metadata, including an interrupted transaction. Leave its other files alone.
+    metadata = ' '.join(shlex.quote(ext + '/' + name) for name in ('.nx-install.lock', '.unpacked', '.nx-install', '.nx-previous'))
+    run(adb, '-s', a.serial, 'shell', f'set -e; for p in {metadata}; do if test -e "$p"; then '
+        'find "$p" -user "$(id -u)" ! -type l -exec chmod a+rwX {} +; fi; done')
+    if deploy_call(adb, a.serial, pkg, apk, 'install') != identity:
+        raise ValueError('installed APK game manifest changed during deployment')
     print(f'game files in {ext}')
 
 def main(argv=None):
