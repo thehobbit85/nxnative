@@ -1,13 +1,15 @@
 #version 450
 layout(local_size_x=1) in;
 layout(set=0,binding=0) uniform samplerBuffer sources[2];
-layout(set=0,binding=1,std430) buffer Results { vec4 values[]; } result;
+layout(set=0,binding=1,std430) buffer Results { vec4 values[4]; int size; } result;
 layout(set=0,binding=2,std140) uniform Push { uvec4 rows[16]; } constants;
 void main() {
     int i=int(gl_GlobalInvocationID.x);
 #ifdef DYNAMIC_SLOT
     result.values[i]=texelFetch(sources[constants.rows[15].x],i);
+    if (i==0) result.size=textureSize(sources[constants.rows[15].x]);
 #else
     result.values[i]=constants.rows[15].x==0 ? texelFetch(sources[0],i) : texelFetch(sources[1],i);
+    if (i==0) result.size=constants.rows[15].x==0 ? textureSize(sources[0]) : textureSize(sources[1]);
 #endif
 }

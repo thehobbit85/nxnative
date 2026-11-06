@@ -1,0 +1,32 @@
+; One wide sparse fetch must combine the residency of all its physical words.
+OpCapability Shader
+OpCapability SampledBuffer
+OpCapability SparseResidency
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %sources DescriptorSet 0
+OpDecorate %sources Binding 0
+%void = OpTypeVoid
+%function = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%vec = OpTypeVector %float 4
+%sparse = OpTypeStruct %uint %vec
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%two = OpConstant %uint 2
+%image = OpTypeImage %float Buffer 0 0 0 1 Unknown
+%array = OpTypeArray %image %two
+%pArray = OpTypePointer UniformConstant %array
+%pImage = OpTypePointer UniformConstant %image
+%sources = OpVariable %pArray UniformConstant
+%main = OpFunction %void None %function
+%entry = OpLabel
+%ptr = OpAccessChain %pImage %sources %one
+%src = OpLoad %image %ptr
+%result = OpImageSparseFetch %sparse %src %zero
+%code = OpCompositeExtract %uint %result 0
+%texel = OpCompositeExtract %vec %result 1
+OpReturn
+OpFunctionEnd

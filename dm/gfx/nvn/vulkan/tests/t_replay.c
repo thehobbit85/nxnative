@@ -2867,37 +2867,44 @@ static void scaled_texels(void) {
     // The two views share every byte. One converts unsigned integers, and
     // the other sign-extends the same bits before converting to float.
     uint32_t packed[]={0xf7ac0180,0x01637fff,0x80000001,0x12345678,
-                       0x7ffe8100,0xffffffff,0x18305403,0xffff8000};
-    const struct { unsigned channels,bits; } cases[]={{1,8},{1,16},{2,8},{2,16},{3,8},{3,16},{4,8},{4,16},{4,10}};
-    for (size_t test=0;test<sizeof cases/sizeof *cases;test++) {
-        unsigned n=cases[test].channels,bits=cases[test].bits;
+                       0x7ffe8100,0xffffffff,0x18305403,0xffff8000,
+                       0x80000000,0x7fffffff,0xff800001,0x00000001,
+                       0x01000001,0x7f800001,0xfffffffe,0x0000ffff};
+    const struct { unsigned channels,bits; } cases[]={{1,8},{1,16},{2,8},{2,16},{3,8},{3,16},{4,8},{4,16},{4,10},{1,32},{2,32},{3,32},{4,32}};
+    const size_t count=sizeof cases/sizeof *cases;
+    for (size_t test=0;test<count*2;test++) {
+        // Mix narrow and wide members, including a 32-bit RGB stride.
+        unsigned shape[]={test%count,(test+(test>=count ? 5 : 0))%count};
         for (int sign=0;sign<2;sign++) {
-            unsigned format=(bits==10 ? NVN_FORMAT_RGB10A2_UI2F : NVN_FORMAT_R8_UI2F+6*(n-1)+(bits==16?2:0))+sign;
+            unsigned n=cases[shape[sign]].channels,bits=cases[shape[sign]].bits;
+            unsigned format=(bits==10 ? NVN_FORMAT_RGB10A2_UI2F : NVN_FORMAT_R8_UI2F+6*(n-1)+(bits==32?4:bits==16?2:0))+sign;
             tex_t view={.serial=0x11000+format,.mem=(uint8_t *)packed,
                 .d={.width=4,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_BUFFER,.format=format}};
             nvn_tex_layout(&view.d,&view.L); mtl_reg_tex(990+sign,&view,NULL);
         }
-        float result[2][4][4]; memset(result,0xff,sizeof result);
+        struct { float values[4][4]; int32_t size; } result[2]; memset(result,0xff,sizeof result);
         mtl_queue_activate(990); mtl_sub_begin(); list_t list={0};
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&scaled_texels_program,.stages=0x20);
         RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=2,.h={990,991});
         for (unsigned sign=0;sign<2;sign++) {
             uint32_t params[]={sign,0,0,0}; push_constants(&list,1,240,params,sizeof params);
-            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result[sign],.size=sizeof result[sign]);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&result[sign],.size=sizeof result[sign]);
             RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
         }
         put(&list,OP_END,NULL,0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
         for (int sign=0;sign<2;sign++) for (unsigned i=0;i<4;i++) for (unsigned c=0;c<4;c++) {
-            int want=c==3;
+            unsigned n=cases[shape[sign]].channels,bits=cases[shape[sign]].bits;
+            if (result[sign].size!=4) die("scaled texel %ux%u, sign%d size %d expected 4",n,bits,sign,result[sign].size);
+            int64_t want=c==3;
             if (c<n) {
                 unsigned width=bits==10 && c==3 ? 2 : bits;
                 uint32_t raw=0;
                 if (bits==10) raw=(packed[i]>>(10*c)) & ((1u<<width)-1);
                 else memcpy(&raw,(uint8_t *)packed+(i*n+c)*(bits/8),bits/8);
-                want=(int)raw;
-                if (sign && (raw & (1u<<(width-1)))) want-=(int)(1u<<width);
+                want=raw;
+                if (sign && (raw & (1u<<(width-1)))) want-=INT64_C(1)<<width;
             }
-            if (result[sign][i][c]!=(float)want) die("scaled texel %ux%u, sign%d [%u].%u: %g expected %d",n,bits,sign,i,c,result[sign][i][c],want);
+            if (result[sign].values[i][c]!=(float)want) die("scaled texel %ux%u, sign%d [%u].%u: %g expected %g",n,bits,sign,i,c,result[sign].values[i][c],(double)(float)want);
         }
         mtl_reg_tex(990,NULL,NULL); mtl_reg_tex(991,NULL,NULL); mtl_queue_forget(990);
     }

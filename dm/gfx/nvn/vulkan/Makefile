@@ -260,7 +260,7 @@ $(B)/shaders/0000000000000040.spv: tests/buffer.comp tests/buffer.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/buffer.vk.txt $(@:.spv=.vk.txt)
-$(B)/t_replay: $(SRC) tests/resource_shapes.inc ../../../android/tests/resource_shapes_cases.h tests/driver_c2.inc tests/split_handle.inc tests/uniform_storage.inc spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h spv_texel_bias.h shader_contract.h warp_width.h geometry_contract.h meshstage_contract.h uniform_address.h present_rect.h split_handle.h driver_c2.h driver_c0.h resource_contract.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
+$(B)/t_replay: $(SRC) tests/resource_shapes.inc ../../../android/tests/resource_shapes_cases.h tests/driver_c2.inc tests/split_handle.inc tests/uniform_storage.inc spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h spv_texel_bias.h spv_texel_wide.inc shader_contract.h warp_width.h geometry_contract.h meshstage_contract.h uniform_address.h present_rect.h split_handle.h driver_c2.h driver_c0.h resource_contract.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile
@@ -322,7 +322,7 @@ recorded-transfer-test: $(B)/t_recorded_transfer fixture
 	DM_VK_DIR="$(abspath $(B)/shaders)" $(B)/t_recorded_transfer
 recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
-$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c tests/public_bindings.inc tests/public_buffers.inc tests/public_feedback.inc ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h spv_texel_bias.h driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
+$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c tests/public_bindings.inc tests/public_buffers.inc tests/public_feedback.inc ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h spv_texel_bias.h spv_texel_wide.inc driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) -DDM_NVN_VULKAN -DDM_VK_PUBLIC_BINDINGS $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
 
@@ -410,20 +410,27 @@ buffer-bias-check: $(B)/t_buffer_bias $(B)/shaders/0000000000000043.spv
 	$(B)/t_buffer_bias $(B)/shaders/0000000000000043.spv $(B)/buffer-biased.spv
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/buffer-biased.spv
 
-$(B)/t_texel_bias: tests/t_texel_bias.c spv_texel_bias.h
+$(B)/t_texel_bias: tests/t_texel_bias.c spv_texel_bias.h spv_texel_wide.inc
 	mkdir -p $(B)
 	$(BUILD_CC) -O1 -g -Wall -Werror $(BUILD_CFLAGS) $< -o $@
 $(B)/texel-dynamic.spv: tests/texel_alias.comp
 	mkdir -p $(B)
 	$(GLSLC) --target-env=vulkan1.1 -DDYNAMIC_SLOT $< -o $@
+$(B)/texel-sparse.spv: tests/sparse_texel.spvasm
+	mkdir -p $(B)
+	$(GLSLC) --target-env=vulkan1.1 -c $< -o $@
 .PHONY: texel-bias-check
-texel-bias-check: $(B)/shaders/000000000000ad75.spv $(B)/t_texel_bias $(B)/shaders/000000000000ad70.spv $(B)/texel-dynamic.spv
+texel-bias-check: $(B)/shaders/000000000000ad75.spv $(B)/t_texel_bias $(B)/shaders/000000000000ad70.spv $(B)/texel-dynamic.spv $(B)/texel-sparse.spv
 	$(B)/t_texel_bias $(B)/shaders/000000000000ad70.spv $(B)/texel-biased.spv
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/texel-biased.spv
 	$(B)/t_texel_bias $(B)/texel-dynamic.spv $(B)/texel-dynamic-biased.spv
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/texel-dynamic-biased.spv
 	$(B)/t_texel_bias $(B)/shaders/000000000000ad75.spv $(B)/texel-scaled.spv scaled
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/texel-scaled.spv
+	$(B)/t_texel_bias $(B)/shaders/000000000000ad75.spv $(B)/texel-wide.spv wide
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/texel-wide.spv
+	$(B)/t_texel_bias $(B)/texel-sparse.spv $(B)/texel-wide-sparse.spv wide
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/texel-wide-sparse.spv
 
 $(B)/t_integer_outputs: tests/t_integer_outputs.c spv_integer_outputs.h spv_fragment_outputs.h spv_alpha.h
 	mkdir -p $(B)
