@@ -2,6 +2,13 @@
 
 The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Vulkan linear texture row padding
+
+- **Symptom:** a CPU-written linear texture samples padding from the second row onward, or a render pass overwrites the bytes between guest rows. Publishing a readback into a protected guest pool can also fault on the completion thread.
+- **Cause:** upload assumed tightly packed rows. Writeback published padding along with pixel data and copied it to guest memory without preparing dirty-tracked pages.
+- **Fix:** read linear rows at their allocated stride, stage the GPU copy tightly, publish only pixel bytes and prepare guest destinations before completion writes.
+- **Found on:** the public recorder fixture uploads distinct rows into 7×3 linear textures with explicit and implicit pitches, then clears each as a render target and checks every pixel and padding byte.
+
 ## Textures and formats
 
 ### Vulkan typed buffer descriptors

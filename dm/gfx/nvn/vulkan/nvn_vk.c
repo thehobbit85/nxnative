@@ -301,15 +301,22 @@ static void ctx_complete(ctx_t *c) {
     else if (c->npost) ticks[0] = ticks[1] = nvn_timestamp_from_ns(guest_time_ns());
     for (int i = 0; i < c->npost; i++) {
         post_t *p = &c->post[i];
-        if (p->kind == 1) { volatile uint32_t *v = p->dst; if (p->mode == 1) *v += p->v; else *v = p->v; }
+        if (p->kind == 1) {
+            dm_guest_write_prepare(p->dst, sizeof(uint32_t));
+            volatile uint32_t *v = p->dst; if (p->mode == 1) *v += p->v; else *v = p->v;
+        }
         else if (p->kind == 2) {
             uint64_t t = ticks[p->type != NVN_COUNTER_TYPE_TIMESTAMP_TOP];
             int timestamp = p->type == NVN_COUNTER_TYPE_TIMESTAMP || p->type == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
             uint64_t rec[2] = {timestamp && !DM_GAME_RENDER_COND ? t : 0, t};
             if (p->visibility) rec[0] = p->visibility->samples;
+            dm_guest_write_prepare((void *)p->addr, sizeof rec);
             memcpy((void *)p->addr, rec, sizeof rec);
         }
-        else if (p->kind == 3) memcpy(p->dst, p->src, p->n);
+        else if (p->kind == 3) {
+            dm_guest_write_prepare(p->dst, p->n);
+            memcpy(p->dst, p->src, p->n);
+        }
         else if (p->kind == POST_VISIBILITY_ADD) p->visibility->samples += *p->samples;
         else if (p->kind == POST_VISIBILITY_RESET) p->visibility->samples = 0;
         visibility_release(p->visibility);
@@ -834,6 +841,8 @@ static int storage_compatible(const VkImageCreateInfo *ii) {
            ii->extent.depth <= limits.maxExtent.depth && ii->mipLevels <= limits.maxMipLevels &&
            ii->arrayLayers <= limits.maxArrayLayers && (limits.sampleCounts & ii->samples);
 }
+#include "public_texels.inc"
+
 // Caller holds g_rmu through initial upload: pool finalization uses the same
 // lock before guest storage can disappear. A registry lookup must stay locked
 // from its live-ID check through this resolution.
@@ -881,7 +890,7 @@ static vtex *tex_get_locked(const tex_t *t, int for_rt) {
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_dev, v->img, &mr); VkDeviceSize off;
     v->blk = img_mem(mr, &v->m, &off); v->moff = off; v->msize = mr.size; VKCHECK(vkBindImageMemory(g_dev, v->img, v->m, off));
     if ((t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && t->mem && t->d.target == NVN_TEXTURE_TARGET_2D && v->levels == 1 && v->layers == 1 && !f.dec && !f.depth && sc == VK_SAMPLE_COUNT_1_BIT) {
-        int bw = 1, bh = 1, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); uint32_t row = t->d.stride ? (uint32_t)t->d.stride : v->w * (uint32_t)bpb;
+        int bw = 1, bh = 1, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); uint32_t row = t->L.layer_size / v->h;
         if (bpb && bw == 1 && bh == 1 && row % bpb == 0 && (uint64_t)row * v->h <= t->L.size) { v->linrow = row; v->linbpb = (uint32_t)bpb; }
     }
     to_general(C->up, v->img, v->aspect); C->up_used = 1;
@@ -916,7 +925,11 @@ static void tex_upload(vtex *v, const tex_t *t) {
             VkDeviceSize o = ring_alloc(out, 16);
             if (o == VK_WHOLE_SIZE) return;
             uint8_t *dst = C->ringp + o, *tmp = v->f.dec ? malloc(lsz) : dst;
-            int rc = (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) ? (memcpy(tmp, t->mem + nvn_tex_level_offset(&t->d, lv), lsz), 0) : nvn_deswizzle(&t->d, lv, ly, t->mem, tmp, pitch);
+            int rc;
+            if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {
+                texel_extent ext = {.bytes=pitch, .rows=by, .nz=d, .layer=ly};
+                rc = !storage_texels(t, lv, tmp, pitch, pitch * by, ext);
+            } else rc = nvn_deswizzle(&t->d, lv, ly, t->mem, tmp, pitch);
             if (rc) { RED_ONCE(5, "texture format %#x target %d: deswizzle failed", t->d.format, t->d.target); if (v->f.dec) free(tmp); continue; }
             if (v->f.dec) { for (uint32_t z = 0; z < d; z++) bc_decode(v->f.dec, tmp + pitch * by * z, pitch, w, h, dst + (size_t)w * h * dec_bpp(v->f.dec) * z); free(tmp); }
             VkBufferImageCopy c = {o, 0, 0, {v->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, lv, ly, 1}, {0, 0, 0}, {w, h, d}};
@@ -1664,11 +1677,13 @@ static int pass_begin(void);
 // textures in place on the pool's buffer; here the pass's result is copied into the ring and back into the storage when the submission completes (post kind 3)
 static uint64_t g_lin_wb;
 static void lin_writeback(vtex *v) {
-    size_t n = (size_t)v->linrow * v->h;
+    size_t width = (size_t)v->w * v->linbpb, n = width * v->h;
     VkDeviceSize o = ring_alloc(n, 16); if (o == VK_WHOLE_SIZE) return;
-    VkBufferImageCopy bc = {o, v->linrow / v->linbpb, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {v->w, v->h, 1}};
+    VkBufferImageCopy bc = {o, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {v->w, v->h, 1}};
     vkCmdCopyImageToBuffer(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, C->ring, 1, &bc);
-    buffer_written((uintptr_t)v->mem, n, C->ring, o, C->ringp + o);
+    if (v->linrow == width) buffer_written((uintptr_t)v->mem, n, C->ring, o, C->ringp + o);
+    else for (uint32_t y = 0; y < v->h; ++y)
+        buffer_written((uintptr_t)v->mem + (size_t)y * v->linrow, width, C->ring, o + y * width, C->ringp + o + y * width);
     if (!g_lin_wb++) LOG("vk: linear render target %ux%u format %d goes back to its storage after each pass (serial %llu)", v->w, v->h, (int)v->f.f, (unsigned long long)v->serial);
 }
 static int g_pass_shader_writes;
@@ -3821,7 +3836,6 @@ void mtl_set_origin_lower_left(int on) { g_origin_ll = on; }
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_frame(uint64_t f) { (void)f; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
-#include "public_texels.inc"
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
     texel_extent ext;
     if (!texel_region(t, level, layer0, r, row, img, &ext)) {

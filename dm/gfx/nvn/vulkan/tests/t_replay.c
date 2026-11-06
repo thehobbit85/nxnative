@@ -80,6 +80,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     memset(key, 0, 8); key[7] = (uint8_t)((p == &numeric_program ? 0x21 : 1) + stage); return 1;
 }
 void dm_fault_hook_register(int (*fn)(void *, int, void *)) { abort(); }
+void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }  // raw fixture storage uses writable host memory
 void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { abort(); }
 
 static void clear_and_readback(NVNformat format) {
