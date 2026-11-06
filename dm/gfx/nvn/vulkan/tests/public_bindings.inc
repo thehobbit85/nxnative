@@ -1,6 +1,6 @@
 // Included by the public NVN recorder fixture when linked against Vulkan.
-// The package contains the test shaders under the actual keys of these two
-// synthetic guest programs (zeroed control section and one code byte per stage).
+// The package contains the test shaders under the actual keys of these
+// synthetic guest stages (zeroed control section and one code byte per stage).
 static void check_texture_bindings(NVNdevice *device, NVNqueue *queue) {
     enum { pool_size = 0x40000, source_offset = 0x30000, result_offset = 0x31000 };
     static _Alignas(16384) uint8_t memory[pool_size];
@@ -14,14 +14,13 @@ static void check_texture_bindings(NVNdevice *device, NVNqueue *queue) {
     NVNbufferAddress addr = API(nvnMemoryPoolGetBufferAddress)(&pool);
 
     uint8_t control[0x880] = { [0x704] = 1 };
-    NVNshaderData stages[2];
+    NVNprogram programs[2];
+    for (int i = 0; i < 3; ++i) memory[source_offset + 64 + i] = i;
     for (int i = 0; i < 2; ++i) {
-        memory[source_offset + 64 + i] = i;
-        stages[i] = (NVNshaderData){addr + source_offset + 64 + i, control};
+        NVNshaderData stages[] = {{addr + source_offset + 64, control}, {addr + source_offset + 65 + i, control}};
+        assert(API(nvnProgramInitialize)(&programs[i], device));
+        assert(API(nvnProgramSetShaders)(&programs[i], 2, stages));
     }
-    NVNprogram program;
-    assert(API(nvnProgramInitialize)(&program, device));
-    assert(API(nvnProgramSetShaders)(&program, 2, stages));
 
     NVNtexture textures[5];
     NVNtextureBuilder tb;
@@ -71,25 +70,40 @@ static void check_texture_bindings(NVNdevice *device, NVNqueue *queue) {
     API(nvnQueueFinish)(queue);
 
     const NVNtexture *target = &textures[4];
-    for (int p = 0; p < 2; ++p) {
-        API(nvnCommandBufferBeginRecording)(&cb);
-        API(nvnCommandBufferSetRenderTargets)(&cb, 1, &target, NULL, NULL, NULL);
-        API(nvnCommandBufferBindProgram)(&cb, &program, NVN_SHADER_STAGE_VERTEX_BIT | NVN_SHADER_STAGE_FRAGMENT_BIT);
-        API(nvnCommandBufferSetViewport)(&cb, 0, 0, 4, 1);
-        API(nvnCommandBufferSetScissor)(&cb, 0, 0, 4, 1);
-        API(nvnCommandBufferSetTexturePool)(&cb, &tp[p]);
-        API(nvnCommandBufferSetSamplerPool)(&cb, &sp[p]);
-        size_t at = API(nvnCommandBufferGetCommandMemoryUsed)(&cb);
-        API(nvnCommandBufferBindTexture)(&cb, NVN_SHADER_STAGE_FRAGMENT, 3, 0);
-        assert(API(nvnCommandBufferGetCommandMemoryUsed)(&cb) - at == (p ? 32 : 24));
-        API(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3);
-        API(nvnCommandBufferCopyTextureToBuffer)(&cb, target, NULL, &row, addr + result_offset, 0);
-        API(nvnCommandBufferReportValue)(&cb, 1234, addr + result_offset + 16);
-        NVNcommandHandle commands = API(nvnCommandBufferEndRecording)(&cb);
+    for (int separate = 0; separate < 2; ++separate) for (int p = 0; p < 2; ++p) {
+        size_t at = 0;
+        NVNcommandHandle commands = 0;
         for (int pass = 0; pass < 4; ++pass) {
             int image = pass & 1, sampler = pass >> 1;
-            uint32_t word = API(nvnDeviceGetTextureHandle)(device, 256 + image, 256 + sampler);
-            memcpy(memory + at + 16, &word, sizeof word);
+            // Single-handle recordings are patched and resubmitted; separate
+            // texture/sampler binds each snapshot the supplied descriptor.
+            if (separate || !pass) {
+                API(nvnCommandBufferBeginRecording)(&cb);
+                API(nvnCommandBufferSetRenderTargets)(&cb, 1, &target, NULL, NULL, NULL);
+                API(nvnCommandBufferBindProgram)(&cb, &programs[separate], NVN_SHADER_STAGE_VERTEX_BIT | NVN_SHADER_STAGE_FRAGMENT_BIT);
+                API(nvnCommandBufferSetViewport)(&cb, 0, 0, 4, 1);
+                API(nvnCommandBufferSetScissor)(&cb, 0, 0, 4, 1);
+                API(nvnCommandBufferSetTexturePool)(&cb, &tp[p]);
+                API(nvnCommandBufferSetSamplerPool)(&cb, &sp[p]);
+                if (separate) {
+                    NVNseparateTextureHandle tex = API(nvnDeviceGetSeparateTextureHandle)(device, 256 + image);
+                    NVNseparateSamplerHandle samp = API(nvnDeviceGetSeparateSamplerHandle)(device, 256 + sampler);
+                    API(nvnCommandBufferBindSeparateTexture)(&cb, NVN_SHADER_STAGE_FRAGMENT, 3, tex);
+                    API(nvnCommandBufferBindSeparateSampler)(&cb, NVN_SHADER_STAGE_FRAGMENT, 7, samp);
+                } else {
+                    at = API(nvnCommandBufferGetCommandMemoryUsed)(&cb);
+                    API(nvnCommandBufferBindTexture)(&cb, NVN_SHADER_STAGE_FRAGMENT, 3, 0);
+                    assert(API(nvnCommandBufferGetCommandMemoryUsed)(&cb) - at == (p ? 32 : 24));
+                }
+                API(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3);
+                API(nvnCommandBufferCopyTextureToBuffer)(&cb, target, NULL, &row, addr + result_offset, 0);
+                API(nvnCommandBufferReportValue)(&cb, 1234, addr + result_offset + 16);
+                commands = API(nvnCommandBufferEndRecording)(&cb);
+            }
+            if (!separate) {
+                uint32_t word = API(nvnDeviceGetTextureHandle)(device, 256 + image, 256 + sampler);
+                memcpy(memory + at + 16, &word, sizeof word);
+            }
             memset(memory + result_offset, 0xcc, 20);
             API(nvnQueueSubmitCommands)(queue, 1, &commands);
             API(nvnQueueFinish)(queue);
@@ -112,7 +126,7 @@ static void check_texture_bindings(NVNdevice *device, NVNqueue *queue) {
         API(nvnSamplerPoolFinalize)(&sp[p]);
     }
     for (int t = 0; t < 5; ++t) API(nvnTextureFinalize)(&textures[t]);
-    API(nvnProgramFinalize)(&program);
+    for (int i = 0; i < 2; ++i) API(nvnProgramFinalize)(&programs[i]);
     API(nvnMemoryPoolFinalize)(&pool);
-    puts("Public NVN texture binds: compact and saved pool bases, live handle patch, nearest/repeat and linear/clamp");
+    puts("Public NVN texture binds: compact and saved pool bases, live handle patch, combined and separate nearest/repeat and linear/clamp");
 }
