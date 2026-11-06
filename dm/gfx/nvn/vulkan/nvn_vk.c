@@ -1114,7 +1114,7 @@ typedef struct shader shader_t;
 struct shader {
     shader_t *buffer_variants, *next_buffer_variant;
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
-    vin_module *vertex_variants; int depth_zero;
+    vin_module *vertex_variants; int depth_zero, draw_push;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
     VkShaderModule mod; VkDescriptorSetLayout dsl;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
@@ -1263,12 +1263,12 @@ static uint32_t *spv_gl_depth(const uint32_t *w, size_t nw, size_t *out_n) {
     }
     o[3] = bound; *out_n = n; return o;
 }
-static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
+static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
     size_t ns = *bytes;
-    if (!g_draw_parameters) {
-        size_t nn; int ok; uint32_t *w2=spv_draw_parameters(spv,ns/4,&nn,&ok);
+    {
+        size_t nn; int ok; uint32_t *w2=spv_draw_parameters(spv,ns/4,g_draw_parameters,&nn,&ok);
         if (!ok) { LOG("[RED] vk: shader %s draw-parameter lowering failed",s->key);free(spv);return NULL; }
-        if (w2) { free(spv);spv=w2;ns=nn*4; }
+        if (w2) { free(spv);spv=w2;ns=nn*4;s->draw_push=1; }
     }
     { size_t nn; uint32_t *w2 = spv_output_defaults(spv, ns / 4, &nn); if (w2) { free(spv); spv = w2; ns = nn * 4; } }
     { size_t nn; uint32_t *w2 = spv_invariant(spv, ns / 4, &nn); if (w2) { free(spv); spv = w2; ns = nn * 4; } }
@@ -1295,10 +1295,11 @@ static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s
 static uint32_t *stage_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
     if (s->stage==0) spv=vertex_spv(spv,bytes,s);
     else if (!g_draw_parameters) {
-        size_t nn;int ok;uint32_t *w2=spv_draw_parameters(spv,*bytes/4,&nn,&ok);
+        size_t nn;int ok;uint32_t *w2=spv_draw_parameters(spv,*bytes/4,0,&nn,&ok);
         if (!ok) { LOG("[RED] vk: shader %s draw-parameter lowering failed",s->key);free(spv);return NULL; }
         if (w2) { free(spv);spv=w2;*bytes=nn*4; }
     }
+    if (!spv) return NULL;
     spv=shader_bias_spv(spv,bytes,s);
     if (!spv) return NULL;
     uint32_t set=s->stage==1?1:0;
@@ -1452,9 +1453,9 @@ static VkPipelineLayout layout_get(shader_t *vs, shader_t *fs) {
     for (int i = 0; i < g_npl; i++) if (g_pl[i].vs == vs && g_pl[i].fs == fs) return g_pl[i].pl;
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_empty_dsl)); }
     VkDescriptorSetLayout sl[2] = {vs ? vs->dsl : g_empty_dsl, fs ? fs->dsl : g_empty_dsl};
-    VkPushConstantRange draw = {VK_SHADER_STAGE_VERTEX_BIT, 0, 12};
+    VkPushConstantRange draw = {VK_SHADER_STAGE_VERTEX_BIT, 0, 16};
     VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, fs ? 2 : 1, sl,
-        g_draw_parameters ? 0 : 1, g_draw_parameters ? NULL : &draw};
+        vs->draw_push ? 1 : 0, vs->draw_push ? &draw : NULL};
     VkPipelineLayout pl; VKCHECK(vkCreatePipelineLayout(g_dev, &pi, NULL, &pl));
     g_pl = realloc(g_pl, (g_npl + 1) * sizeof *g_pl); g_pl[g_npl++] = (prog_vk){vs, fs, pl};
     return pl;
@@ -2437,12 +2438,10 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     }
     if (vhi < vlo) { g_stat_draws++; return; }
     if (vlo < 0) vlo = 0;
-    if (!g_draw_parameters) {
-        // Match Vulkan's built-ins after vertex-stream rebasing, including signed
-        // indexed offsets. Each direct draw has DrawIndex zero. InstanceIndex
-        // still comes from Vulkan and includes the command's firstInstance.
-        int32_t values[3] = {(int32_t)((dw ? dw->first : di->base_vertex) - vlo),
-                             dw ? dw->base_instance : di->base_instance, 0};
+    if (vs->draw_push) {
+        // The guest sees its original indices even though Vulkan fetches from
+        // a compact buffer starting at vlo. InstanceIndex remains native.
+        int32_t values[] = {dw ? dw->first : di->base_vertex, (int32_t)g_draw_base_instance, 0, (int32_t)vlo};
         vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof values, values);
     }
     uint32_t used = 0, ext[16] = {0};

@@ -1510,8 +1510,10 @@ static void draw_parameters(void) {
     for (int mode=0;mode<6;++mode) {
         list_t list={0}; uint8_t pixels[8*8*4]={0};
         const int32_t bases[]={7,17,0,0x101,0x40110010,0};
-        int32_t expected[4]={bases[mode],mode==1?-3:0,0,0};
-        uint16_t indices[3]={mode==1?3:0,mode==1?4:1,mode==1?5:2};
+        int32_t base_vertex=mode==1 ? 2 : mode==2 ? -2 : 0;
+        int32_t expected[4]={bases[mode],mode ? base_vertex : 5,mode<=1 ? 5 : 0,0};
+        uint16_t first_index=mode==1 ? 3 : mode==2 ? 2 : 0;
+        uint16_t indices[3]={first_index,first_index+1,first_index+2};
         RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&output,.r={.width=8,.height=8,.depth=1},.mask=15,.c.f={0,0,1,1});
         RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&draw_parameters_program,.stages=3);
@@ -1522,7 +1524,7 @@ static void draw_parameters(void) {
             put(&list, OP_UPDATE_UB, &update, sizeof update); // forces an ordered snapshot for index-buffer binding
         }
         if (mode) RECORD(OP_DRAW_IDX,p_draw_idx,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.itype=1,.count=3,
-            .base_vertex=mode==1?2:0,.base_instance=expected[0],.instances=2,.ibuf=(uintptr_t)indices);
+            .base_vertex=base_vertex,.base_instance=expected[0],.instances=2,.ibuf=(uintptr_t)indices);
         else RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.first=5,.count=3,.base_instance=expected[0],.instances=2);
         RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
         put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));

@@ -34,7 +34,7 @@ static int load(VkDevice device,const char *directory,VkShaderModule *module,bin
     }
     if(seen!=3) { free(code);return 1; }
     if(fallback) {
-        size_t count=0;int transformed=0;uint32_t *lowered=spv_draw_parameters(code,(size_t)bytes/4,&count,&transformed);
+        size_t count=0;int transformed=0;uint32_t *lowered=spv_draw_parameters(code,(size_t)bytes/4,0,&count,&transformed);
         free(code);if(!transformed||!lowered)return 1;code=lowered;bytes=(long)(count*4);
     }
     VkShaderModuleCreateInfo ci={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=(size_t)bytes,.pCode=code};
@@ -82,7 +82,7 @@ int main(int argc,char **argv) {
     VkWriteDescriptorSet writes[2];
     for(unsigned i=0;i<binding_count;i++)writes[i]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=set,.dstBinding=lb[i].binding,.descriptorCount=1,.descriptorType=lb[i].descriptorType,.pBufferInfo=&bi[i]};
     vkUpdateDescriptorSets(device,binding_count,writes,0,NULL);
-    VkPushConstantRange push={VK_SHADER_STAGE_VERTEX_BIT,0,12};
+    VkPushConstantRange push={VK_SHADER_STAGE_VERTEX_BIT,0,16};
     VkPipelineLayoutCreateInfo plci={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,.setLayoutCount=1,.pSetLayouts=&set_layout,.pushConstantRangeCount=fallback?1:0,.pPushConstantRanges=fallback?&push:NULL};VkPipelineLayout layout;CHECK(vkCreatePipelineLayout(device,&plci,NULL,&layout));
     VkSubpassDescription subpass={.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS};
     VkRenderPassCreateInfo rpci={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,.subpassCount=1,.pSubpasses=&subpass};VkRenderPass pass;CHECK(vkCreateRenderPass(device,&rpci,NULL,&pass));
@@ -111,7 +111,7 @@ int main(int argc,char **argv) {
         memset(mapped[1],0xcc,sizes[1]);CHECK(vkResetCommandBuffer(command,0));CHECK(vkBeginCommandBuffer(command,&begin));
         VkRenderPassBeginInfo rpbi={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,.renderPass=pass,.framebuffer=framebuffer,.renderArea={{0,0},{1,1}}};
         vkCmdBeginRenderPass(command,&rpbi,VK_SUBPASS_CONTENTS_INLINE);vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,1,&set,0,NULL);
-        if(fallback) { uint32_t words[]={(uint32_t)(di_indexed(test)?di_vertex_base(test):di_first(test)),di_base(test),0};vkCmdPushConstants(command,layout,VK_SHADER_STAGE_VERTEX_BIT,0,12,words); }
+        if(fallback) { uint32_t words[]={(uint32_t)(di_indexed(test)?di_vertex_base(test):di_first(test)),di_base(test),0,0};vkCmdPushConstants(command,layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof words,words); }
         if(di_indexed(test)) { vkCmdBindIndexBuffer(command,indexBuffer,0,VK_INDEX_TYPE_UINT16);vkCmdDrawIndexed(command,1,di_instances(test),di_index_offset(test),di_vertex_base(test),di_base(test)); }
         else vkCmdDraw(command,1,di_instances(test),di_first(test),di_base(test));
         vkCmdEndRenderPass(command);
