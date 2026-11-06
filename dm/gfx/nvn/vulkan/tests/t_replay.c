@@ -547,6 +547,51 @@ static void strided_layers(void) {
     }
     assert(!memcmp(bytes, expected, sizeof bytes));
 }
+// Neither row padding nor the gap after a slice belongs to the transfer.
+// Protect the gaps and change one source word on the GPU before uploading it.
+static void guarded_texture_transfers(void) {
+    size_t page = sysconf(_SC_PAGESIZE), row = 2*page, image = 4*page-4;
+    uint8_t *mapping = mmap(NULL,8*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(mapping!=MAP_FAILED);
+    for (size_t i=1; i<8; i+=2) assert(mprotect(mapping+i*page,page,PROT_NONE)==0);
+    uint8_t *src = mapping+page-12;
+    for (int volume=0; volume<=1; ++volume) {
+        tex_t t={.serial=0x8fba00+volume,.d={.width=8,.height=8,.depth=8,.levels=2,
+                 .target=volume?NVN_TEXTURE_TARGET_3D:NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_R32UI}};
+        nvn_tex_layout(&t.d,&t.L);
+        uint32_t initial[4][4][4]={0}, expected[4][4][4]={0}, actual[4][4][4]={0};
+        for (unsigned z=0; z<2; ++z) for (unsigned y=0; y<2; ++y) for (unsigned x=0; x<3; ++x) {
+            uint32_t value = 1+100*z+10*y+x;
+            memcpy(src+z*image+y*row+4*x,&value,4);
+            expected[z+2][y+1][x+1] = value;
+        }
+        uint32_t gpu[4] = {0x87654321,0,0,0};
+        expected[3][1][2] = gpu[0];
+        view_t mip={.set_levels=1,.base_level=1,.nlevels=1}, upload=mip;
+        if (!volume) { upload.set_layers=1; upload.min_layer=1; upload.nlayers=3; }
+        list_t list={0};
+        RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&t,.view=mip,.has_view=1,.src=(uintptr_t)initial,.r={.width=4,.height=4,.depth=4});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
+        push_constants(&list,1,240,gpu,sizeof gpu);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(src+image+4),.size=4);
+        RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+        RECORD(OP_COPY_STRIDE,p_copy_stride,.stride=row);
+        RECORD(OP_COPY_STRIDE,p_copy_stride,.image=1,.stride=image);
+        RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&t,.view=upload,.has_view=1,.src=(uintptr_t)src,
+               .r={.xoffset=1,.yoffset=1,.zoffset=volume?2:1,.width=3,.height=2,.depth=2});
+        RECORD(OP_COPY_STRIDE,p_copy_stride,.stride=0);
+        RECORD(OP_COPY_STRIDE,p_copy_stride,.image=1,.stride=0);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&t,.view=mip,.has_view=1,.src=(uintptr_t)actual,.r={.width=4,.height=4,.depth=4});
+        put(&list,OP_END,NULL,0);
+        mtl_queue_activate(0x8fba00+volume);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        assert(!memcmp(expected,actual,sizeof expected));
+        mtl_tex_release(&t); mtl_queue_forget(0x8fba00+volume);
+    }
+    assert(munmap(mapping,8*page)==0);
+    puts("Vulkan guarded pitched array and volume transfers preserved GPU and CPU source rows");
+}
+
 // The shader reports all four fetched register words. Green means a faithful fetch,
 // red a wrong value and blue that the draw was rejected before pipeline creation.
 static void vertex_fetch(void) {
@@ -2501,6 +2546,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_PACKED_STREAMS")) { packed_streams(); return 0; }
     if (getenv("DM_VK_TEST_RESTART")) { primitive_restart(); return 0; }
     if (getenv("DM_VK_TEST_INDIRECT_DRAWS")) { indirect_draws(); return 0; }
+    if (getenv("DM_VK_TEST_BUFFER_IMAGE")) { guarded_texture_transfers(); return 0; }
     if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
@@ -2565,6 +2611,7 @@ int main(void) {
     vertex_fetch();
     registered_images();
     strided_layers();
+    guarded_texture_transfers();
     queue_lifetime();
     origin_facing();
     queue_viewport_origin();

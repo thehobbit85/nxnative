@@ -1916,6 +1916,16 @@ static VkPipeline pso_get(const pso_key *k, VkPipelineLayout pl) {
 typedef struct { uint64_t addr, size, gen; VkDeviceSize off; } dcopy;
 #define NDC 4096
 static dcopy g_dc[NDC]; static int g_ndc;
+// Overlay the intersection of one ordered guest write onto a staging range.
+static int snapshot_overlay(const gw_t *w, uint64_t addr, uint64_t size, VkDeviceSize offset) {
+    if (!overlaps(addr, size, w->addr, w->size)) return 0;
+    uint64_t lo = addr > w->addr ? addr : w->addr;
+    uint64_t count = size - (lo - addr), available = w->size - (lo - w->addr);
+    if (count > available) count = available;
+    VkBufferCopy region = {w->off + (lo - w->addr), offset + (lo - addr), count};
+    vkCmdCopyBuffer(C->cb, w->buf, C->ring, 1, &region);
+    return 1;
+}
 static VkDeviceSize copy_in_at(uint64_t addr, uint64_t size, VkDeviceSize align, VkDeviceSize prefix) {   // a prefix can align a typed view inside an overlapping storage range
     gw_wait_prior(addr, size);
     dcopy *e = &g_dc[(addr >> 4 ^ addr >> 13) % NDC];
@@ -1935,14 +1945,8 @@ static VkDeviceSize copy_in_at(uint64_t addr, uint64_t size, VkDeviceSize align,
         // Copy in write order. Each later range overwrites only its intersection;
         // untouched bytes retain the CPU snapshot made above.
         for (size_t i = 0; i < g_ngw; i++) {
-            const gw_t *w = &g_gw[i];
-            if (!overlaps(addr, size, w->addr, w->size)) continue;
-            uint64_t lo = addr > w->addr ? addr : w->addr;
-            uint64_t n = size - (lo - addr), wn = w->size - (lo - w->addr);
-            if (n > wn) n = wn;
-            VkBufferCopy region = {w->off + lo - w->addr, o + lo - addr, n};
-            vkCmdCopyBuffer(C->cb, w->buf, C->ring, 1, &region);
-            barrier_all(C->cb); // later intersections may write these bytes again
+            if (snapshot_overlay(&g_gw[i], addr, size, o))
+                barrier_all(C->cb); // later intersections may write these bytes again
         }
         pthread_mutex_unlock(&g_gwmu);
     }
@@ -2960,27 +2964,22 @@ static int lvl_fits(const vtex *v, uint32_t lv, uint32_t layer, uint32_t nlayers
     return v->target == NVN_TEXTURE_TARGET_3D || (uint64_t)layer + nlayers <= v->layers;
 }
 static VkFormatFeatureFlags fmt_feat(VkFormat f) { VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, f, &fp); return fp.optimalTilingFeatures; }
-static void copy_b2t(const p_copy_b2t *c) {
-    if (vk_skip() & SK_B2T) return;
-    if (g_plog) LOG("plog:  b2t serial %llu fmt %#x %dx%d at %d,%d,%d", (unsigned long long)c->tex->serial, c->tex->d.format, c->r.width, c->r.height, c->r.xoffset, c->r.yoffset, c->r.zoffset);
-    vtex *v = tex_get(c->tex, 0); if (!v) return;
-    if (v->f.dec) { RED_ONCE(50, "buffer-to-texture copy into a BC texture: not decoded yet"); return; }
-    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh); if (!bpb) return;
-    const NVNcopyRegion *r = &c->r; uint32_t w = (uint32_t)r->width, h = (uint32_t)r->height, d = (uint32_t)(r->depth > 0 ? r->depth : 1);
-    size_t row = S.copy_stride ? (size_t)S.copy_stride : (size_t)((w + bw - 1) / bw) * bpb, img = S.copy_img_stride ? (size_t)S.copy_img_stride : row * ((h + bh - 1) / bh);
-    pass_end();
-    VkDeviceSize o = copy_in(c->src, img * d, 16); if (o == VK_WHOLE_SIZE) return;
-    uint32_t lv = c->has_view && c->view.set_levels ? c->view.base_level : 0, ly = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
-    int is3d = v->target == NVN_TEXTURE_TARGET_3D;
-    if (!lvl_fits(v, lv, is3d ? 0 : ly + (uint32_t)r->zoffset, is3d ? 1 : d, r->xoffset, r->yoffset, is3d ? r->zoffset : 0, w, h, is3d ? d : 1)) {
-        static int n; if (n++ < 8) LOG("[RED] vk: buffer-to-texture copy %dx%dx%d at %d,%d,%d level %u outside the %ux%ux%u texture (%u levels, %u layers): skipped", (int)w, (int)h, (int)d, r->xoffset, r->yoffset, r->zoffset, lv, v->w, v->h, v->d, v->levels, v->layers);
-        return;
-    }
-    VkBufferImageCopy bc = {o, (uint32_t)(row / bpb * bw), (uint32_t)(img / row * bh), {v->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, lv, is3d ? 0 : ly + (uint32_t)r->zoffset, is3d ? 1 : d},
-                            {r->xoffset, r->yoffset, is3d ? r->zoffset : 0}, {w, h, is3d ? d : 1}};
-    vkCmdCopyBufferToImage(C->cb, C->ring, v->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bc);
-    barrier_all(C->cb);
+// A 3D copy advances texels in Z. An array copy advances layers relative
+// to the view, while its Vulkan image offset and extent remain two-dimensional.
+static int texture_copy_region(const vtex *v, const view_t *view, const NVNcopyRegion *r,
+                               VkImageSubresourceLayers *sub, VkOffset3D *off, VkExtent3D *extent) {
+    int volume = v->target == NVN_TEXTURE_TARGET_3D;
+    uint32_t count = r->depth ? (uint32_t)r->depth : 1;
+    uint32_t mip = view && view->set_levels ? view->base_level : 0;
+    int layers = !volume && view && view->set_layers;
+    if (r->width <= 0 || r->height <= 0 || r->depth < 0 || r->zoffset < 0) return 0;
+    if (layers && view->nlayers && (uint64_t)r->zoffset + count > view->nlayers) return 0;
+    *sub = (VkImageSubresourceLayers){v->aspect,mip,volume ? 0 : (layers ? view->min_layer : 0)+(uint32_t)r->zoffset,volume ? 1 : count};
+    *off = (VkOffset3D){r->xoffset,r->yoffset,volume ? r->zoffset : 0};
+    *extent = (VkExtent3D){(uint32_t)r->width,(uint32_t)r->height,volume ? count : 1};
+    return lvl_fits(v,mip,sub->baseArrayLayer,sub->layerCount,off->x,off->y,off->z,extent->width,extent->height,extent->depth);
 }
+#include "buffer_image_transfer.inc"
 // LAS Recomp's transfer-only depth scaling: depth -> buffer -> integer colour
 // image -> nearest blit -> buffer -> depth. Preserve stencil through the same
 // path with R8_UINT. Integer images keep the depth bits exactly, including D24.
@@ -3078,21 +3077,6 @@ static void resolve_depth(const p_copy_t2t *c, vtex *src, vtex *dst, uint32_t sl
     vkCmdDraw(C->cb,3,1,0,0);
     rp_end(C->cb);
     barrier_all(C->cb);
-}
-// A 3D copy advances texels in Z. An array copy advances layers relative
-// to the view, while its Vulkan image offset and extent remain two-dimensional.
-static int texture_copy_region(const vtex *v, const view_t *view, const NVNcopyRegion *r,
-                               VkImageSubresourceLayers *sub, VkOffset3D *off, VkExtent3D *extent) {
-    int volume = v->target == NVN_TEXTURE_TARGET_3D;
-    uint32_t count = r->depth ? (uint32_t)r->depth : 1;
-    uint32_t mip = view && view->set_levels ? view->base_level : 0;
-    int layers = !volume && view && view->set_layers;
-    if (r->width <= 0 || r->height <= 0 || r->depth < 0 || r->zoffset < 0) return 0;
-    if (layers && view->nlayers && (uint64_t)r->zoffset + count > view->nlayers) return 0;
-    *sub = (VkImageSubresourceLayers){v->aspect,mip,volume ? 0 : (layers ? view->min_layer : 0)+(uint32_t)r->zoffset,volume ? 1 : count};
-    *off = (VkOffset3D){r->xoffset,r->yoffset,volume ? r->zoffset : 0};
-    *extent = (VkExtent3D){(uint32_t)r->width,(uint32_t)r->height,volume ? count : 1};
-    return lvl_fits(v,mip,sub->baseArrayLayer,sub->layerCount,off->x,off->y,off->z,extent->width,extent->height,extent->depth);
 }
 static VkOffset3D copy_end(VkOffset3D start, VkExtent3D size) {
     return (VkOffset3D){start.x+(int32_t)size.width,start.y+(int32_t)size.height,start.z+(int32_t)size.depth};
@@ -3196,43 +3180,6 @@ static void copy_t2t(const p_copy_t2t *c) {
             }
     } else { RED_ONCE(52,"no supported texture blit between formats %d and %d",s->f.f,d->f.f); return; }
     barrier_all(C->cb);
-}
-static void copy_t2b(const p_copy_b2t *c) {
-    if (vk_skip() & SK_T2B) return;
-    pass_end();   // materialize pending attachment clears before reading
-    vtex *v = tex_get(c->tex, 0); if (!v) return;
-    int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
-    if (!bpb || v->f.dec || v->f.stencil) { RED_ONCE(51, "texture-to-buffer format %#x is unsupported", c->tex->d.format); return; }
-    const NVNcopyRegion *r = &c->r;
-    if (r->width <= 0 || r->height <= 0 || r->zoffset < 0 || r->depth < 0) return;
-    uint32_t lv = c->has_view && c->view.set_levels ? c->view.base_level : 0;
-    uint32_t base = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
-    uint32_t nz = r->depth ? (uint32_t)r->depth : 1, layer = base + (uint32_t)r->zoffset;
-    int is3d = v->target == NVN_TEXTURE_TARGET_3D;
-    if (layer < base || !lvl_fits(v, lv, is3d ? 0 : layer, is3d ? 1 : nz, r->xoffset, r->yoffset,
-                                 is3d ? r->zoffset : 0, r->width, r->height, is3d ? nz : 1)) {
-        RED_ONCE(51, "texture-to-buffer region outside texture"); return;
-    }
-    size_t width = ((size_t)r->width + bw - 1) / bw * bpb, rows = ((size_t)r->height + bh - 1) / bh;
-    size_t slice = width * rows, row = S.copy_stride ? (size_t)S.copy_stride : width;
-    if (row < width || row > SIZE_MAX / rows) { RED_ONCE(51, "invalid readback row stride"); return; }
-    size_t image = S.copy_img_stride ? (size_t)S.copy_img_stride : row * rows;
-    if (image < (rows - 1) * row + width || image > SIZE_MAX / nz || c->src > UINTPTR_MAX - image * nz) {
-        RED_ONCE(51, "invalid readback image stride or destination"); return;
-    }
-    VkDeviceSize off = ring_alloc(slice * nz, 16); if (off == VK_WHOLE_SIZE) return;
-    VkBufferImageCopy bc = {off, 0, 0, {v->aspect, lv, is3d ? 0 : layer, is3d ? 1 : nz},
-                            {r->xoffset, r->yoffset, is3d ? r->zoffset : 0}, {(uint32_t)r->width, (uint32_t)r->height, is3d ? nz : 1}};
-    vkCmdCopyImageToBuffer(C->cb, v->img, VK_IMAGE_LAYOUT_GENERAL, C->ring, 1, &bc);
-    barrier_all(C->cb);
-    // Only copied bytes may overwrite the guest buffer. Row/image padding belongs to the caller.
-    uint8_t *dst = (uint8_t *)(uintptr_t)c->src, *src = C->ringp + off;
-    if (width == row && image == slice) buffer_written((uintptr_t)dst, slice * nz, C->ring, off, src);
-    else for (uint32_t z = 0; z < nz; ++z) {
-        if (width == row) buffer_written((uintptr_t)(dst + z * image), slice, C->ring, off + z * slice, src + z * slice);
-        else for (size_t y = 0; y < rows; ++y)
-            buffer_written((uintptr_t)(dst + z * image + y * row), width, C->ring, off + z * slice + y * width, src + z * slice + y * width);
-    }
 }
 static void clear_tex(const p_clear_tex *c) {
     if (!c->tex || (vk_skip() & SK_CLEAR)) return;
