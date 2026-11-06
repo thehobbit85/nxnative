@@ -1182,7 +1182,7 @@ struct shader {
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
-    VkShaderModule mod, alpha_mod; int tried_alpha, has_float_alpha; VkDescriptorSetLayout dsl;
+    VkShaderModule mod, alpha_mod; int tried_alpha; fragment_outputs outputs; VkDescriptorSetLayout dsl;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
     sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask; int pack_locations;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
     uint8_t *c1; uint32_t c1_len; uint32_t tg[3];
@@ -1587,7 +1587,7 @@ static shader_t *shader_get(const uint8_t md[8]) {
         }
         s->pack_locations=1;
     }
-    if (s->stage==1) s->has_float_alpha=!!spv_color_zero_alpha(spv,ns/4).color;
+    if (s->stage==1) s->outputs=spv_fragment_outputs(spv,ns/4);
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
     if (!spv) return s;
@@ -2503,14 +2503,14 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
 static _Atomic uint64_t g_wait_ns, g_rec_ns, g_pwait_ns;   // time the submit thread waited for the GPU, spent recording, and the present waited for its slot
 static uint64_t g_stat_draws, g_stat_skip, g_skip_why[8];   // why: 0 no program, 1 shader missing / rejected, 2 no render target, 3 indirect, 4 primitive, 5 pipeline, 6 descriptors
 #define SKIP(w) do { g_stat_skip++; g_skip_why[w]++; return; } while (0)
-static int draw_begin(void) {
+static int draw_begin(uint32_t write_mask) {
     if (!pass_begin()) return 0;
     if (S.rasterizer_discard) return 1;
     if (S.visibility) {
         const uint64_t *samples = visibility_begin(&C->visibility, C->cb, C->up, g_precise_visibility);
         if (samples) post_add((post_t){.kind=POST_VISIBILITY_ADD,.visibility=visibility_retain(S.visibility),.samples=samples});
     }
-    for (int a = 0; a < P.n; a++) if (S.chmask.mask >> (4 * a) & 0xf) P.cwr[a] = P.cdrawn[a] = 1;
+    for (int a = 0; a < P.n; a++) if (write_mask >> (4 * a) & 0xf) P.cwr[a] = P.cdrawn[a] = 1;
     return 1;
 }
 typedef struct {
@@ -2568,6 +2568,12 @@ static int logic_format(VkFormat f) {
 static void color_operations(pso_key *k) {
     int eligible=0, other=0;
     for (int i=0; i<k->nc; ++i) {
+        unsigned bit=1u<<i;
+        if (!k->fs || !(k->fs->outputs.targets & bit)) {
+            k->chmask.mask &= ~(15u<<(4*i));
+            k->color.blend_en &= ~bit;
+            continue;
+        }
         if (clear_color_type(k->cf[i])!=CLEAR_FLOAT) k->color.blend_en &= ~(1u<<i);
         if (!k->cf[i] || !(k->chmask.mask>>(4*i)&15)) continue;
         if (logic_format(k->cf[i])) eligible=1; else other=1;
@@ -2619,7 +2625,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     }
     k.nc = P.n; memcpy(k.cf, P.cf, sizeof k.cf); memcpy(k.blend, S.blend, P.n * sizeof *k.blend);
     k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.samples;
-    k.alpha_to_coverage=S.ms.a2c && fs && fs->has_float_alpha && clear_color_type(P.cf[0])==CLEAR_FLOAT;
+    k.alpha_to_coverage=S.ms.a2c && fs && fs->outputs.alpha_var && clear_color_type(P.cf[0])==CLEAR_FLOAT;
     // Like the Metal side entry, all compare functions share one pipeline.
     // Integer color 0 bypasses the test; a depth-only pass may still discard.
     k.color.alpha_func = fs && S.color.alpha_func && S.color.alpha_func!=NVN_ALPHA_FUNC_ALWAYS &&
@@ -2732,7 +2738,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
         if (offset==VK_WHOLE_SIZE) return;
         vkCmdBindIndexBuffer(cb,C->ring,offset,isz==1 ? VK_INDEX_TYPE_UINT8_EXT : isz==2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     }
-    if (!draw_begin()) SKIP(2);
+    if (!draw_begin(k.chmask.mask)) SKIP(2);
     emit_instances(cb,indexed,count,first,g_draw_base_instance,inst,split,nsplit);
     for (int i = 0; i < g_nwb; i++) {
         gw_t *w = &g_wb[i];

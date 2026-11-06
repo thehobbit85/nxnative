@@ -819,7 +819,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** undefined values blended into attachments the fragment shader leaves alone.
 - **Cause:** Maxwell leaves targets outside the shader's output map untouched; on Metal such an attachment gets undefined values blended in.
-- **Fix:** pipelines get a zero write mask and no blending for colour outputs the shader does not write (reflection `colors`, `color_known` in `nvn_refl.m`).
+- **Fix:** pipelines get a zero write mask and no blending for colour outputs the shader does not write (reflection `colors`, `color_known` in `nvn_refl.m`). Vulkan reflects the declared SPIR-V output locations and applies the same mask before selecting logic operations or marking an attachment for writeback. A float attachment between two normalized outputs can therefore keep its contents while the other two perform XOR.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md): volume draws after the G-buffer (`50d813761ca3f1f9` and others) write only outputs 0 and 2, with blending and all channels enabled on targets 1 and 3.
 - **Check:** all five games' regressions were unchanged by it.
 
