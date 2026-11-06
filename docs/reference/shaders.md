@@ -896,6 +896,8 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Fix:** `dmsh_build.py` (`precise`), `vk_shaders.py` and `gl_shaders.py` write the `precise::` functions instead (every game).
 - **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md) (GitHub issue 72). The NVN chain had about 124,000 `fast::max`, 98,000 `fast::clamp` and 41,000 `fast::min` in [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), none guarded by its `isnan` selects.
 
+On ARM64 Android, a guest `FADD.SAT` with input `0xff803456` returned 1 on Lavapipe. Reading back the intermediate values showed that addition preserved the signaling NaN. Native `NMax(x, 0)` quieted it and the following `NMin` selected 1. The Android exporter now selects the numeric operand for each input before min or max. Saturation with numeric constant bounds needs only one NaN check. The generated guest comparison in `dm/android/tests/precise_minmax_fixture.py` covers positive and negative quiet and signaling NaNs, infinities, and finite operands in both orders on Metal and Vulkan. Pairs of distinct subnormals and signed zeros can compare equal when a device flushes subnormals, so the bit-exact comparison excludes those ties.
+
 ### Integer fragment outputs declared by hand
 
 - **Symptom:** a pipeline red line for a float output meeting an integer attachment (the red line prints the row to add); a BC encoder's pipeline fails.
