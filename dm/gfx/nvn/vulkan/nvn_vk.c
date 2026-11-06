@@ -3823,11 +3823,17 @@ void mtl_set_frame(uint64_t f) { (void)f; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
 #include "public_texels.inc"
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
-    if (!mtl_tex_gpu_owned(t->serial)) {
-        if (!storage_texels(t, level, layer0, r, dst, row, img)) RED_ONCE(80, "CPU texture storage read outside its region or unsupported layout");
-        return;
+    texel_extent ext;
+    if (!texel_region(t, level, layer0, r, row, img, &ext)) {
+        RED_ONCE(80, "invalid region for CPU texture read"); return;
     }
-    RED_ONCE(80, "CPU read of a GPU-owned texture is unavailable");
+    pthread_mutex_lock(&g_rmu);
+    vtex *v = tex_find(t->serial);
+    int gpu = v && v->gpu;
+    int ok = gpu && gpu_texels(v, level, r, NULL, dst, row, img, ext);
+    pthread_mutex_unlock(&g_rmu);
+    if (!gpu) ok = storage_texels(t, level, dst, row, img, ext);
+    if (!ok) RED_ONCE(80, "unsupported CPU texture read (format %#x, samples %u)", t->d.format, t->d.samples);
 }
 
 // Guest extents for checked address lookup and open-ended storage bindings.

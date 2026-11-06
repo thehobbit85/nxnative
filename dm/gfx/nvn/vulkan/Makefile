@@ -225,7 +225,7 @@ recorded-transfer-conformance: recorded-transfer-test
 	$(MAKE) -C ../../tests GAME=$(GAME) check_t_recorded_transfer
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorded_transfer.c tests/public_bindings.inc ../hle_nvn.c ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_refl.h spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h driver_c0.h resource_contract.h $(RECORDER_SRC) ../nvn_asm.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h $(GAME_H) | profile
 	mkdir -p $(B)
-	$(CC) $(CPPFLAGS) -DDM_VK_PUBLIC_BINDINGS $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
+	$(CC) $(CPPFLAGS) -DDM_NVN_VULKAN -DDM_VK_PUBLIC_BINDINGS $(RECORDER_CPPFLAGS) $(CFLAGS) -UNDEBUG $< $(RECORDER_SRC) $(RECORDER_EXTRA) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
 
 # The Android SHA implementation is the loader's as well. The driver and ANativeWindow
 # are linked from the NDK. Use the device's Vulkan loader when executing the fixture.

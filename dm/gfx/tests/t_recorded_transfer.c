@@ -145,6 +145,20 @@ static void check_event_lists(NVNdevice *device, NVNqueue *queue, NVNmemoryPool 
     puts("Public NVN event lists: 7 + 4 at the fence, refill and nested return preserved both guards");
 }
 
+typedef struct {
+    const NVNtexture *texture;
+    const NVNtextureView *view;
+    NVNcopyRegion region;
+    uint8_t *dst;
+    size_t row, image;
+} texture_reader;
+
+static void *read_texture_on_worker(void *arg) {
+    texture_reader *read = arg;
+    API(nvnTextureReadTexelsStrided)(read->texture, read->view, &read->region, read->dst, read->row, read->image);
+    return NULL;
+}
+
 // A CPU-only texture can be read on a guest worker before any submission or
 // registration. Use different source and destination pitches, including a mip
 // and layer offset, and check each byte the caller expects to keep.
@@ -286,6 +300,14 @@ int main(void) {
     assert(API(nvnSyncWait)(&sync, 0) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
     uint64_t before = API(nvnDeviceGetCurrentTimestampInNanoseconds)(&device);
     API(nvnQueueSubmitCommands)(&queue, 1, &handle);
+    uint8_t direct[sizeof expected];
+    memset(direct, 0xcc, sizeof direct);
+    texture_reader read = {&tex, &view, sub, direct + guard, row_pitch, image_pitch};
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, read_texture_on_worker, &read));
+    assert(!pthread_join(worker, NULL));
+    for (size_t i = 0; i < sizeof direct; ++i) if (direct[i] != expected[i])
+        die("CPU read of GPU texture byte %zu: %u expected %u", i, direct[i], expected[i]);
     NVNsyncWaitResult waited = API(nvnSyncWait)(&sync, 5000000000ull);
     assert(waited == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED || waited == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
     uint64_t after = API(nvnDeviceGetCurrentTimestampInNanoseconds)(&device);
@@ -301,6 +323,28 @@ int main(void) {
     }
 #ifdef DM_VK_PUBLIC_BINDINGS
     if (getenv("DM_VK_DIR")) check_texture_bindings(&device, &queue);
+#endif
+    // Patch only one texel per layer of a live GPU-written target. Read
+    // through the public CPU and GPU paths; the neighboring red/blue texels
+    // and all destination padding must still contain their earlier bytes.
+#ifdef DM_VK_PUBLIC_BINDINGS
+    NVNcopyRegion edit = {3, 2, 0, 1, 1, 2};
+    uint8_t brush[20] = {0, 255, 0, 255, [16] = 255, 255, 0, 255};
+    API(nvnTextureWriteTexelsStrided)(&tex, &view, &edit, brush, 8, 16);
+    for (int z = 0; z < 2; ++z) memcpy(expected + guard + z * image_pitch + row_pitch + 4, brush + z * 16, 4);
+    memset(direct, 0xcc, sizeof direct);
+    API(nvnTextureReadTexelsStrided)(&tex, &view, &sub, direct + guard, row_pitch, image_pitch);
+    assert(!memcmp(direct, expected, sizeof direct));
+    API(nvnCommandBufferBeginRecording)(&cb);
+    API(nvnCommandBufferSetCopyRowStride)(&cb, row_pitch);
+    API(nvnCommandBufferSetCopyImageStride)(&cb, image_pitch);
+    API(nvnCommandBufferCopyTextureToBuffer)(&cb, &tex, &view, &sub, addr + dst_offset + guard, 0);
+    handle = API(nvnCommandBufferEndRecording)(&cb);
+    memset(storage + dst_offset, 0xcc, sizeof expected);
+    API(nvnQueueSubmitCommands)(&queue, 1, &handle);
+    API(nvnQueueFinish)(&queue);
+    assert(!memcmp(storage + dst_offset, expected, sizeof expected));
+    puts("Two partial CPU writes updated the live GPU texture and preserved neighboring texels and padding");
 #endif
     NVNtexturePool descriptors;
     assert(API(nvnTexturePoolInitialize)(&descriptors, &pool, 0xc000, 257));
