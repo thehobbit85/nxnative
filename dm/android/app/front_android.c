@@ -64,15 +64,6 @@ int front_display_pixels(int *w, int *h) {
     return ok;
 }
 
-// ---------- Controllers: one state per input device; buttons are ORed, each stick comes from the device that moves it furthest ----------
-#define NDEV 8
-static struct { int32_t id, used; uint64_t btn; float ax[10]; } g_dev[NDEV];   // id: Android's device ID (adb's injected events come from -1)
-enum { AX_LX, AX_LY, AX_RX, AX_RY, AX_HX, AX_HY, AX_LT, AX_RT, AX_BRAKE, AX_GAS };
-static int dev_slot(int32_t id) {
-    for (int i = 0; i < NDEV; i++) if (g_dev[i].used && g_dev[i].id == id) return i;
-    for (int i = 0; i < NDEV; i++) if (!g_dev[i].used) { g_dev[i].id = id; g_dev[i].used = 1; return i; }
-    return 0;
-}
 static uint64_t key_bit(int32_t k) {
     switch (k) {
         case AKEYCODE_BUTTON_B: return DM_BTN_A;  case AKEYCODE_BUTTON_A: return DM_BTN_B;   // by position: right = A, bottom = B
@@ -85,49 +76,20 @@ static uint64_t key_bit(int32_t k) {
     }
     return 0;
 }
-static uint64_t g_combo_since;
 static _Atomic int g_menu_request;
-static int g_touch_slot = -1;   // the device slot of the on-screen controls
-static void back_to_menu(void);
-// A press is held at least 50 ms (three frames; latch_thread lets it go, and times the − + hold): the game reads the controller many times a frame (about 40 for Hollow Knight) and acts on one
-// of those reads, so a shorter tap could fall between them
-static uint64_t g_latch, g_prev; static uint64_t g_press_at[16];
 static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER;
-static void pads_push_(void);
+#include "controllers_android.h"
+
+static void back_to_menu(void);
 static void *latch_thread(void *a) {
     (void)a;
-    for (;;) { usleep(4000); pthread_mutex_lock(&g_pmu); if (g_latch || g_combo_since) pads_push_(); pthread_mutex_unlock(&g_pmu);
-        if (atomic_load(&g_menu_request)) back_to_menu(); }   // also times − and + held with no new events
+    for (;;) {
+        usleep(4000); pthread_mutex_lock(&g_pmu);
+        if (g_tick_pads) pads_push_();
+        pthread_mutex_unlock(&g_pmu);
+        if (atomic_load(&g_menu_request)) back_to_menu();
+    }
     return NULL;
-}
-static void pads_push_(void) {
-    uint64_t btn = 0; float best[4] = {0}; float bm[2] = {0};
-    for (int i = 0; i < NDEV; i++) {
-        if (!g_dev[i].used) continue;
-        const float *a = g_dev[i].ax; uint64_t b = g_dev[i].btn;
-        if (a[AX_HX] < -0.5f) b |= DM_BTN_LEFT; if (a[AX_HX] > 0.5f) b |= DM_BTN_RIGHT; if (a[AX_HY] < -0.5f) b |= DM_BTN_UP; if (a[AX_HY] > 0.5f) b |= DM_BTN_DOWN;
-        if (a[AX_LT] > 0.5f || a[AX_BRAKE] > 0.5f) b |= DM_BTN_ZL; if (a[AX_RT] > 0.5f || a[AX_GAS] > 0.5f) b |= DM_BTN_ZR;
-        btn |= b;
-        float m0 = hypotf(a[AX_LX], a[AX_LY]), m1 = hypotf(a[AX_RX], a[AX_RY]);
-        if (m0 > bm[0]) { bm[0] = m0; best[0] = a[AX_LX]; best[1] = a[AX_LY]; }
-        if (m1 > bm[1]) { bm[1] = m1; best[2] = a[AX_RX]; best[3] = a[AX_RY]; }
-    }
-    for (int k = 0; k < 4; k++) if (fabsf(best[k]) < 0.12f) best[k] = 0;   // dead zone
-    uint64_t t = now_ns();
-    for (int b = 0; b < 16; b++) {
-        uint64_t m = 1ull << b;
-        if ((btn & m) && !(g_prev & m)) g_press_at[b] = t;
-        if (!(btn & m) && (g_prev & m) && t - g_press_at[b] < 50000000ull) g_latch |= m;   // released too soon: held on
-        if ((g_latch & m) && (btn & m || t - g_press_at[b] >= 50000000ull)) g_latch &= ~m;
-    }
-    g_prev = btn; btn |= g_latch;
-    #define AXV(v) (int32_t)(fmaxf(-1.f, fminf(1.f, (v))) * DM_STICK_MAX)
-    dm_pad_set(btn, AXV(best[0]), AXV(-best[1]), AXV(best[2]), AXV(-best[3]));   // Android's y grows downwards, the Switch's upwards
-    #undef AXV
-    int combo = (btn & (DM_BTN_PLUS | DM_BTN_MINUS)) == (DM_BTN_PLUS | DM_BTN_MINUS);
-    if (!combo) g_combo_since = 0;
-    else if (!g_combo_since) g_combo_since = now_ns();
-    else if (now_ns() - g_combo_since > 2000000000ull) atomic_store(&g_menu_request, 1);
 }
 // ---------- On-screen controls ----------
 // Laid out from the window's height h: the D-pad bottom left, A B X Y bottom right (by position, as on the Switch), L / ZL and R / ZR in the top corners, − and + top centre
@@ -179,28 +141,29 @@ static void touch_event(AInputEvent *e) {
         }
         for (int i = 0; i < 10; i++) if (fabsf(x - g_vb[i].cx) < 1.3f * g_vr && fabsf(y - g_vb[i].cy) < 1.3f * g_vr) btn |= g_vb[i].bit;
     }
-    if (g_touch_slot < 0) g_touch_slot = dev_slot(-1000000);
-    g_dev[g_touch_slot].btn = btn & ~(uint64_t)(DM_BTN_LEFT | DM_BTN_RIGHT | DM_BTN_UP | DM_BTN_DOWN) ;
-    g_dev[g_touch_slot].btn |= btn & (DM_BTN_LEFT | DM_BTN_RIGHT | DM_BTN_UP | DM_BTN_DOWN);
-    g_dev[g_touch_slot].ax[AX_LX] = sx; g_dev[g_touch_slot].ax[AX_LY] = sy;
+    g_touch.btn = btn;
+    g_touch.ax[AX_LX] = sx; g_touch.ax[AX_LY] = sy;
     atomic_store(&g_ovl_on, btn); atomic_store(&g_ovl_show, 1);
     pads_push_();
 }
 static int on_input_locked(AInputEvent *e) {
     int32_t type = AInputEvent_getType(e), src = AInputEvent_getSource(e);
     static int seen; if (!seen++) LOG("front end: first input event (type %d, source %#x)", type, src);
-    int s = dev_slot(AInputEvent_getDeviceId(e));
+    if (!g_focused || !g_resumed) return 0;
     if (type == AINPUT_EVENT_TYPE_MOTION && (src & AINPUT_SOURCE_TOUCHSCREEN) == AINPUT_SOURCE_TOUCHSCREEN) { touch_event(e); return 1; }
-    if (src & (AINPUT_SOURCE_GAMEPAD | AINPUT_SOURCE_JOYSTICK | AINPUT_SOURCE_DPAD)) atomic_store(&g_ovl_show, 0);   // a controller in use: the on-screen controls go
+    int controller = (src & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD || (src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK;
+    android_pad *pad = event_pad(AInputEvent_getDeviceId(e), controller);
+    if (!pad) return 0;
+    if (controller || (src & AINPUT_SOURCE_DPAD) == AINPUT_SOURCE_DPAD) atomic_store(&g_ovl_show, 0);   // a controller in use: the on-screen controls go
     if (type == AINPUT_EVENT_TYPE_KEY) {
         uint64_t b = key_bit(AKeyEvent_getKeyCode(e)); if (!b) return AKeyEvent_getKeyCode(e) == AKEYCODE_BACK;
-        if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN) g_dev[s].btn |= b; else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) g_dev[s].btn &= ~b;
+        if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN) pad->btn |= b; else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) pad->btn &= ~b;
         pads_push_(); return 1;
     }
     if (type == AINPUT_EVENT_TYPE_MOTION && (src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK) {
         static const int32_t axes[10] = {AMOTION_EVENT_AXIS_X, AMOTION_EVENT_AXIS_Y, AMOTION_EVENT_AXIS_Z, AMOTION_EVENT_AXIS_RZ, AMOTION_EVENT_AXIS_HAT_X, AMOTION_EVENT_AXIS_HAT_Y,
                                          AMOTION_EVENT_AXIS_LTRIGGER, AMOTION_EVENT_AXIS_RTRIGGER, AMOTION_EVENT_AXIS_BRAKE, AMOTION_EVENT_AXIS_GAS};
-        for (int k = 0; k < 10; k++) g_dev[s].ax[k] = AMotionEvent_getAxisValue(e, axes[k], 0);
+        for (int k = 0; k < 10; k++) pad->ax[k] = AMotionEvent_getAxisValue(e, axes[k], 0);
         pads_push_(); return 1;
     }
     return 0;
@@ -313,15 +276,21 @@ static void on_window_destroyed(ANativeActivity *a, ANativeWindow *w) { (void)a;
 static void on_window_resized(ANativeActivity *a, ANativeWindow *w) { (void)a; (void)w; atomic_fetch_add(&g_win_gen, 1); }
 static void on_input_created(ANativeActivity *a, AInputQueue *q) { (void)a; g_iq = q; AInputQueue_attachLooper(q, ALooper_forThread(), 1, input_cb, NULL); }
 static void on_input_destroyed(ANativeActivity *a, AInputQueue *q) { (void)a; AInputQueue_detachLooper(q); g_iq = NULL; }
-static void on_resume(ANativeActivity *a) { (void)a; dm_gfx_suspend(0); dm_focus_set(1); dm_audio_suspend(0); LOG("front end: resumed"); }
+static void on_resume(ANativeActivity *a) { (void)a; pthread_mutex_lock(&g_pmu); g_resumed = 1; pthread_mutex_unlock(&g_pmu); dm_gfx_suspend(0); dm_focus_set(1); dm_audio_suspend(0); LOG("front end: resumed"); }
 static void on_pause(ANativeActivity *a) {
     (void)a; dm_audio_suspend(1); dm_focus_set(3); dm_gfx_suspend(1);
     pthread_mutex_lock(&g_pmu);
-    memset(g_dev, 0, sizeof g_dev); g_touch_slot = -1; g_latch = g_prev = g_combo_since = 0;
-    atomic_store(&g_ovl_on, 0); dm_pad_set(0, 0, 0, 0, 0);
+    g_resumed = 0; cancel_pads(); atomic_store(&g_ovl_on, 0);
     pthread_mutex_unlock(&g_pmu); LOG("front end: paused");
 }
-static void on_focus(ANativeActivity *a, int f) { if (f) immersive(a); dm_focus_set(f ? 1 : 2); }
+static void on_focus(ANativeActivity *a, int f) {
+    pthread_mutex_lock(&g_pmu);
+    g_focused = f;
+    if (!f) { cancel_pads(); atomic_store(&g_ovl_on, 0); }
+    pthread_mutex_unlock(&g_pmu);
+    if (f) immersive(a);
+    dm_focus_set(f ? 1 : 2);
+}
 static void on_destroy(ANativeActivity *a) { (void)a; dm_host_shutdown("activity destroyed"); }
 
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *a, void *saved, size_t saved_n) {

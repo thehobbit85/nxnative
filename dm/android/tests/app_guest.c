@@ -20,6 +20,27 @@ static void message(const char *s, size_t n) {
     __asm__ volatile("svc #0x27" : "+r"(x0), "+r"(x1) : : "memory");
 }
 #define NOTE(s) message(s, sizeof(s) - 1)
+#ifdef APP_CONTROLLERS
+extern int hid_full(pad_state *, int, const uint32_t *);
+extern void hid_ids(const uint32_t *, size_t);
+static void report_pad(unsigned player, const pad_state *pad) {
+    // Connected, sixteen buttons, and which stick axes are positive/negative.
+    static uint32_t last[2] = {UINT32_MAX, UINT32_MAX};
+    uint32_t bits = (uint32_t)(pad->buttons & 0xffff) | ((pad->attributes & 1) << 16);
+    int32_t axes[] = {pad->lx, pad->ly, pad->rx, pad->ry};
+    for (unsigned i = 0; i < 4; i++) {
+        if (axes[i] > 16000) bits |= 1u << (17 + i * 2);
+        if (axes[i] < -16000) bits |= 1u << (18 + i * 2);
+    }
+    if (bits != last[player]) {
+        char line[] = "GUEST_PAD_0=00000000\n";
+        line[10] += player;
+        for (unsigned i = 0; i < 8; i++) line[19-i] = "0123456789abcdef"[(bits >> (i*4)) & 15];
+        message(line, sizeof line - 1);
+        last[player] = bits;
+    }
+}
+#endif
 static void sleep_frame(void) {
     register long x0 __asm__("x0") = 16666667;
     __asm__ volatile("svc #0x0b" : "+r"(x0) : : "memory");
@@ -186,6 +207,10 @@ void nnMain(void) {
     API(nvnWindowBuilderSetPresentInterval)(&wb, 1);
     require(API(nvnWindowInitialize)(&window, &wb));
     NVNcommandBuffer cb; require(API(nvnCommandBufferInitialize)(&cb, &device));
+#ifdef APP_CONTROLLERS
+    uint32_t ids[] = {32, 0, 1};
+    hid_ids(ids, 3);
+#endif
     uint64_t last_buttons = 0;
     for (unsigned frame = 0;; frame++) {
         pad_state state; uint32_t id = 32;
@@ -193,6 +218,12 @@ void nnMain(void) {
         if (state.buttons && state.buttons != last_buttons) NOTE("APP_FIXTURE_BUTTON_DOWN\n");
         if (!state.buttons && last_buttons) NOTE("APP_FIXTURE_BUTTON_UP\n");
         last_buttons = state.buttons;
+#ifdef APP_CONTROLLERS
+        report_pad(0, &state);
+        uint32_t second = 1;
+        hid_full(&state, 1, &second);
+        report_pad(1, &state);
+#endif
         int index = 0; API(nvnQueueAcquireTexture)(&queue, &window, &index);
         API(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, 65536);
         API(nvnCommandBufferBeginRecording)(&cb);

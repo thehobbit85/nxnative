@@ -56,7 +56,7 @@ STUBS = {
     'android/view/InputDevice.java': 'package android.view; public class InputDevice { public static final int SOURCE_JOYSTICK=16; }',
     'android/view/KeyEvent.java': '''package android.view; public class KeyEvent {
         public static final int KEYCODE_BACK=4,ACTION_DOWN=0;
-        public int getKeyCode(){return 0;} public int getAction(){return 0;} public int getRepeatCount(){return 0;} public int getDeviceId(){return 0;}
+        public int getSource(){return 0;} public int getKeyCode(){return 0;} public int getAction(){return 0;} public int getRepeatCount(){return 0;} public int getDeviceId(){return 0;}
     }''',
     'android/view/MotionEvent.java': '''package android.view; public class MotionEvent {
         public static final int AXIS_X=0,AXIS_Y=1,AXIS_Z=2,AXIS_RZ=3,AXIS_HAT_X=4,AXIS_HAT_Y=5,AXIS_LTRIGGER=6,AXIS_RTRIGGER=7,AXIS_BRAKE=8,AXIS_GAS=9;
@@ -65,6 +65,9 @@ STUBS = {
     # Browser behavior has a separate actual-WebView emulator fixture. These
     # handoff cases leave the browser null; the pause/open test checks forwarding
     # of lifecycle state to a newly created browser, not WebView behavior itself.
+    'com/nxnative/GameControllers.java': """package com.nxnative; class GameControllers {
+        GameControllers(GameActivity a){} void close(){} static boolean isController(int sources){return false;}
+    }""",
     'com/nxnative/OfflineWeb.java': '''package com.nxnative; final class OfflineWeb {
         static OfflineWeb last; long id; boolean paused,closed;
         OfflineWeb(GameActivity a,long i,String d,String p,String c,String f,boolean h,int x,int y,boolean m){id=i;last=this;}

@@ -54,18 +54,24 @@ JNIEXPORT jlongArray JNICALL Java_com_nxnative_GameActivity_nativeWebPad(JNIEnv 
     jlong data[5] = {(jlong)buttons, axes[0], axes[1], axes[2], axes[3]};
     jlongArray out = (*env)->NewLongArray(env, 5); if (out) (*env)->SetLongArrayRegion(env, out, 0, 5, data); return out;
 }
-JNIEXPORT jboolean JNICALL Java_com_nxnative_GameActivity_nativeWebKey(JNIEnv *env, jclass cls, jint device, jint key, jint action) {
+JNIEXPORT jboolean JNICALL Java_com_nxnative_GameActivity_nativeWebKey(JNIEnv *env, jclass cls, jint device, jint key, jint action, jboolean controller) {
     (void)env; (void)cls; uint64_t bit = key_bit(key); if (!bit) return JNI_FALSE;
-    pthread_mutex_lock(&g_pmu); int s = dev_slot(device);
-    if (action == AKEY_EVENT_ACTION_DOWN) g_dev[s].btn |= bit;
-    else if (action == AKEY_EVENT_ACTION_UP) g_dev[s].btn &= ~bit;
-    pads_push_(); pthread_mutex_unlock(&g_pmu); return JNI_TRUE;
+    pthread_mutex_lock(&g_pmu);
+    android_pad *pad = event_pad(device, controller);
+    if (pad && g_resumed && g_focused) {
+        if (action == AKEY_EVENT_ACTION_DOWN) pad->btn |= bit;
+        else if (action == AKEY_EVENT_ACTION_UP) pad->btn &= ~bit;
+        pads_push_();
+    }
+    pthread_mutex_unlock(&g_pmu); return JNI_TRUE;
 }
 JNIEXPORT void JNICALL Java_com_nxnative_GameActivity_nativeWebAxes(JNIEnv *env, jclass cls, jint device, jfloatArray values) {
     (void)cls; if (!values || (*env)->GetArrayLength(env, values) != 10) return;
     float axes[10]; (*env)->GetFloatArrayRegion(env, values, 0, 10, axes);
-    pthread_mutex_lock(&g_pmu); int s = dev_slot(device);
-    memcpy(g_dev[s].ax, axes, sizeof axes); pads_push_(); pthread_mutex_unlock(&g_pmu);
+    pthread_mutex_lock(&g_pmu);
+    android_pad *pad = event_pad(device, 1);
+    if (pad && g_resumed && g_focused) { memcpy(pad->ax, axes, sizeof axes); pads_push_(); }
+    pthread_mutex_unlock(&g_pmu);
 }
 static void web_register(JNIEnv *env, jobject activity) {
     // NativeActivity dlopens the host itself; it does not associate that dlopen
@@ -73,7 +79,9 @@ static void web_register(JNIEnv *env, jobject activity) {
     const JNINativeMethod methods[] = {
         {"nativeWebEvent", "(JII[B)V", (void *)Java_com_nxnative_GameActivity_nativeWebEvent},
         {"nativeWebPad", "()[J", (void *)Java_com_nxnative_GameActivity_nativeWebPad},
-        {"nativeWebKey", "(III)Z", (void *)Java_com_nxnative_GameActivity_nativeWebKey},
+        {"nativePadAttach", "(ILjava/lang/String;)Z", (void *)pad_attach},
+        {"nativePadDetach", "(I)V", (void *)pad_detach},
+        {"nativeWebKey", "(IIIZ)Z", (void *)Java_com_nxnative_GameActivity_nativeWebKey},
         {"nativeWebAxes", "(I[F)V", (void *)Java_com_nxnative_GameActivity_nativeWebAxes},
     };
     jclass cls = (*env)->GetObjectClass(env, activity);
