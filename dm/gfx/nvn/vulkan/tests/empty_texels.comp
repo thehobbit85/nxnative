@@ -1,0 +1,19 @@
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=0,r32ui) uniform uimageBuffer counters[2];
+layout(set=0,binding=1,rgba32i) readonly uniform iimageBuffer signedSource;
+layout(set=0,binding=2,rgba8) writeonly uniform imageBuffer colorSink;
+layout(set=0,binding=3) uniform samplerBuffer sampled;
+layout(set=0,binding=4,std430) buffer Result { uint words[]; } result;
+void main() {
+    result.words[0]=imageAtomicAdd(counters[0],0,19);
+    result.words[1]=imageAtomicAdd(counters[1],0,29);
+    result.words[2]=uint(imageSize(counters[0]));
+    result.words[3]=uint(imageSize(counters[1]));
+    result.words[4]=uint(imageSize(signedSource));
+    result.words[5]=uint(imageLoad(signedSource,0).w);
+    imageStore(colorSink,0,vec4(1.0));
+    result.words[6]=uint(imageSize(colorSink));
+    result.words[7]=uint(textureSize(sampled));
+    result.words[8]=packUnorm4x8(texelFetch(sampled,2047));
+}

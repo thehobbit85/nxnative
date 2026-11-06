@@ -27,6 +27,7 @@ static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
 static prog_t alias_program = {.nstage = 1};
+static prog_t empty_texels_program = {.nstage = 1};
 static prog_t typed_format_program = {.nstage = 1};
 static prog_t texel_alias_program = {.nstage = 1};
 static prog_t texel_program = {.nstage = 1};
@@ -89,6 +90,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (int i = 0; i < 3; i++) if (p == &split_program[i]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x4d+i : 0x35; return 1; }
     if (p == &uniform_storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x4b + stage; return 1; }
     if (p == &texel_graphics_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x49 : 0x4a; return 1; }
+    if (p == &empty_texels_program) { assert(stage==0); memset(key,0,8); key[6]=0xad; key[7]=0x73; return 1; }
     if (p == &typed_format_program) { assert(stage==0); memset(key,0,8); key[6]=0xad; key[7]=0x72; return 1; }
     if (p == &texel_alias_program) { assert(stage == 0); memset(key, 0, 8); key[6] = 0xad; key[7] = getenv("DM_VK_TEST_TEXEL_DYNAMIC") ? 0x71 : 0x70; return 1; }
     if (p == &texel_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x48; return 1; }
@@ -2832,7 +2834,35 @@ static void typed_srgb(void) {
     mtl_reg_tex(986,NULL,NULL); mtl_tex_release(&t);
     puts("Sampled sRGB texel views share GPU-produced bytes and aliased storage across submissions");
 }
+static void empty_texels(void) {
+    uint32_t words[]={0xfeed,100,0xbeef}, result[2][9];
+    tex_t live={.serial=0xad73,.mem=(uint8_t *)(words+1),.d={.width=1,.height=1,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_BUFFER,.format=NVN_FORMAT_R32UI}};
+    nvn_tex_layout(&live.d,&live.L); mtl_reg_tex(989,&live,NULL);
+    mtl_queue_activate(989);
+    for (unsigned split=0;split<2;split++) {
+        memset(result,0xff,sizeof result); mtl_sub_begin();
+        for (unsigned i=0;i<2;i++) {
+            list_t list={0}; RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&empty_texels_program,.stages=0x20);
+            RECORD(OP_BIND_IMG,p_bind_handles,.stage=5,.first=0,.n=4,.h={0,989,0,0});
+            RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=0,.h=0);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result[i],.size=sizeof result[i]);
+            RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+            put(&list,OP_END,NULL,0); mtl_exec(list.bytes);
+            if (!i && split) { mtl_sub_commit(); mtl_sub_begin(); }
+        }
+        assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (unsigned i=0;i<2;i++) {
+            uint32_t want[]={0,100+29*(split*2+i),16,1,1,0,1,4096,0};
+            assert(!memcmp(result[i],want,sizeof want));
+        }
+    }
+    assert(words[0]==0xfeed && words[1]==216 && words[2]==0xbeef);
+    mtl_reg_tex(989,NULL,NULL); mtl_tex_release(&live); mtl_queue_forget(989);
+    puts("Empty float, signed and atomic typed descriptors preserve neighboring work and zero reads");
+}
 static void typed_buffers(void) {
+    empty_texels();
     typed_srgb();
     typed_writable_aliases();
     enum { N = 4 };
