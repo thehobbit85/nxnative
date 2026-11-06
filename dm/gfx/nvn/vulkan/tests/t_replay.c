@@ -30,6 +30,7 @@ static prog_t alias_program = {.nstage = 1};
 static prog_t texel_program = {.nstage = 1};
 static prog_t texel_graphics_program = {.nstage = 2};
 static prog_t separate_program[4]={{.nstage=2},{.nstage=2},{.nstage=2},{.nstage=2}};
+static prog_t discard_image_program = {.nstage=2};
 static prog_t storage_program = {.nstage = 2};
 static prog_t uniform_storage_program = {.nstage = 2};
 static prog_t split_program[3] = {{.nstage = 2}, {.nstage = 2}, {.nstage = 2}};
@@ -89,6 +90,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &texel_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x48; return 1; }
     for(int i=0;i<4;i++) if(p==&separate_program[i]) { assert(stage<2);memset(key,0,8);key[7]=stage?0x44+i:1;return 1; }
     if (p == &alias_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x43; return 1; }
+    if (p == &discard_image_program) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x42 : 0x6c; return 1; }
     if (p == &storage_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x41 + stage; return 1; }
     if (p == &buffer_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x40; return 1; }
     if (p == &draw_parameters_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x39 + stage; return 1; }
@@ -2322,23 +2324,32 @@ static void layered_feedback(void) {
 
 static void graphics_storage(void) {
     tex_t target={.serial=0xb100,.d={.width=8,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
-    nvn_tex_layout(&target.d,&target.L);
+    tex_t data={.serial=0xb19a,.d={.width=5,.height=2,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,
+        .format=NVN_FORMAT_R32UI,.flags=NVN_TEXTURE_FLAGS_IMAGE}};
+    nvn_tex_layout(&target.d,&target.L); nvn_tex_layout(&data.d,&data.L);
+    mtl_reg_tex(988,&data,NULL);
     for(int split=0;split<2;split++) {
         mtl_queue_activate(0xb100+split);
         mtl_set_origin_lower_left(split); mtl_set_queue_origin_lower_left(split);
         uint32_t vertices[5]={0xcafebabe,10,10,10,0xcafebabe}, fragments[66], vertex_result[3]={0}, fragment_result[64]={0};
         for(int i=0;i<66;i++) fragments[i]=i==0||i==65?0xcafebabe:20;
         uint8_t pixels[8*8*4]={0}, discarded[8*8*4]={0};list_t list={0};
+        uint32_t seed[10], image_steps[3][10];
+        for (int i=0;i<10;i++) seed[i]=0xf1000000u+3*i;
+        RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&data,.src=(uintptr_t)seed,.r={.width=5,.height=2,.depth=1});
+        RECORD(OP_BIND_IMG,p_bind_handles,.stage=0,.first=2,.n=1,.h={988});
         RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
         RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={0,0,1,1});
-        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&storage_program,.stages=3);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&discard_image_program,.stages=3);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)(vertices+1),.size=12);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=1,.index=0,.addr=(uintptr_t)(fragments+1),.size=256);
         RECORD(OP_RAST_DISCARD,p_rast_discard,.on=1);
         RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
         RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)discarded,.r={.width=8,.height=8,.depth=1});
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&data,.src=(uintptr_t)image_steps[0],.r={.width=5,.height=2,.depth=1});
         RECORD(OP_SET_RT,p_set_rt,.n=0);
         RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&data,.src=(uintptr_t)image_steps[1],.r={.width=5,.height=2,.depth=1});
         RECORD(OP_RAST_DISCARD,p_rast_discard,.on=0);
         RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
         // Both clipped-away draws must still execute every vertex invocation.
@@ -2355,6 +2366,7 @@ static void graphics_storage(void) {
             put(&list,OP_BARRIER,NULL,0);
         }
         RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&data,.src=(uintptr_t)image_steps[2],.r={.width=5,.height=2,.depth=1});
         if(split) { put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);mtl_sub_commit();list.length=0; }
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&buffer_program,.stages=0x20);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)(vertices+1),.size=12);
@@ -2370,11 +2382,17 @@ static void graphics_storage(void) {
         for(int i=0;i<64;i++) assert(!memcmp(discarded+4*i,(uint8_t[]){0,0,255,255},4));
         for(int i=0;i<64;i++) assert(fragments[i+1]==23 && fragment_result[i]==1023 && !memcmp(pixels+4*i,(uint8_t[]){0,255,0,255},4));
         assert(vertices[0]==0xcafebabe&&vertices[4]==0xcafebabe&&fragments[0]==0xcafebabe&&fragments[65]==0xcafebabe);
+        const uint32_t invocations[]={1,2,7};
+        for (int step=0;step<3;step++) for (int i=0;i<10;i++) {
+            uint32_t want=seed[i]+(i>=1 && i<=3 ? invocations[step] : 0);
+            if (image_steps[step][i]!=want) die("discard storage image: step %d pixel %d got %#x expected %#x",
+                                                step,i,image_steps[step][i],want);
+        }
         mtl_queue_forget(0xb100+split);
     }
     mtl_set_origin_lower_left(0);
-    mtl_tex_release(&target);
-    puts("Vertex and fragment storage writes survive successive draws, compute consumers and fences");
+    mtl_reg_tex(988,NULL,NULL); mtl_tex_release(&data); mtl_tex_release(&target);
+    puts("Vertex image atomics and storage writes survive raster discard, attachmentless draws, compute consumers and fences");
 }
 static void simultaneous_aliases(void) {
     for(int mode=0;mode<9;mode++) {
@@ -2776,6 +2794,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
     if (getenv("DM_VK_TEST_COUNTERS")) { visibility_reports(); segment_timestamps(); return 0; }
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
+    if (getenv("DM_VK_TEST_DISCARD")) { graphics_storage(); return 0; }
     if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
     if (getenv("DM_VK_TEST_CUSTOM_BORDER")) { custom_borders(); return 0; }
