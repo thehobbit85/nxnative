@@ -383,6 +383,7 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 
 #ifdef DM_VK_PUBLIC_BINDINGS
 #include "../nvn/vulkan/tests/public_bindings.inc"
+#include "../nvn/vulkan/tests/public_buffers.inc"
 #endif
 
 int main(void) {
@@ -493,7 +494,10 @@ int main(void) {
             die("recorded transfer at byte %zu: got %#x, expected %#x", i, storage[dst_offset + i], expected[i]);
     }
 #ifdef DM_VK_PUBLIC_BINDINGS
-    if (getenv("DM_VK_DIR")) check_texture_bindings(&device, &queue);
+    if (getenv("DM_VK_DIR")) {
+        check_texture_bindings(&device, &queue);
+        check_buffer_bindings(&device, &queue);
+    }
 #endif
     // Patch only one texel per layer of a live GPU-written target. Read
     // through the public CPU and GPU paths; the neighboring red/blue texels

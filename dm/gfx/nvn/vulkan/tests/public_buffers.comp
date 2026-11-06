@@ -1,0 +1,10 @@
+#version 450
+layout(local_size_x=1) in;
+layout(binding=0, std140) uniform Constants { uvec4 value; } c;
+layout(binding=1, std430) buffer Storage { uint words[]; } data;
+layout(binding=2, std430) buffer FragmentConstants { uint word; } fragment;
+void main() {
+    data.words[3] = atomicAdd(data.words[0], c.value.x);
+    atomicAdd(data.words[1], c.value.y);
+    fragment.word = c.value.x + 2u;
+}
