@@ -1468,7 +1468,7 @@ For a targeted export on the build Mac, run `DM_GAME=<id> python3 dm/android/too
 - **Cause:** IMAD.HI is the high word of `a * b + {c + 1:c}`, the same 64-bit addition as IMAD.WIDE, with the carry out on the predicate at 81..84. The decoder took the high word of `a * b` and added `c` alone, losing the upper word of the pair and the low word's carry. The compiler's 64-bit multiply chains the two: `R9:R8 = R6 * R13 + {R9:R8}`, then `R8 = high(R7 * R11 + {R9:R8})`. Separately, all three IMAD forms have .X (bit 74, the carry predicate at 87..90), which the decoder dropped; as with IADD3.X, a negated addend is then its bitwise not.
 - **Fix:** `AImadHi` and `AImadCarryIn` in `InstEmitAmpereAlu.cs`.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): the Lighting compute shaders' division, run line by line from its translated MSL on 208 known inputs, with dividends up to 2^44: 26 wrong with only the pair fixed, none with both. Other Switch 2 games share the decoder and have not been rebuilt with this.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`. The Android `warp_shuffle.mk` with `FIXTURE=dm/android/tests/ampere_integer_fixture.py` runs the translated instructions on both GPUs. It checks 128 tuples in signed and unsigned modes against full-width arithmetic, including two IADD3 carry predicates, carry-in, pair addition, high words and carry-out.
 
 ### NVN2 compute reads its workgroup counts at c0 + 4
 
