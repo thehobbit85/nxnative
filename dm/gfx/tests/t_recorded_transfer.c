@@ -145,6 +145,57 @@ static void check_event_lists(NVNdevice *device, NVNqueue *queue, NVNmemoryPool 
     puts("Public NVN event lists: 7 + 4 at the fence, refill and nested return preserved both guards");
 }
 
+// A CPU-only texture can be read on a guest worker before any submission or
+// registration. Use different source and destination pitches, including a mip
+// and layer offset, and check each byte the caller expects to keep.
+static void check_cpu_texture_storage(NVNdevice *device) {
+    static _Alignas(16384) uint8_t memory[0x10000];
+    NVNmemoryPool pool;
+    NVNmemoryPoolBuilder pb;
+    API(nvnMemoryPoolBuilderSetDefaults)(&pb);
+    API(nvnMemoryPoolBuilderSetDevice)(&pb, device);
+    API(nvnMemoryPoolBuilderSetStorage)(&pb, memory, sizeof memory);
+    API(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+    assert(API(nvnMemoryPoolInitialize)(&pool, &pb));
+    for (int mode = 0; mode < 4; ++mode) {
+        int volume = mode == 1, compressed = mode == 2, linear = mode == 3;
+        NVNtextureBuilder tb;
+        API(nvnTextureBuilderSetDefaults)(&tb);
+        API(nvnTextureBuilderSetDevice)(&tb, device);
+        API(nvnTextureBuilderSetFormat)(&tb, compressed ? NVN_FORMAT_RGTC1_UNORM : NVN_FORMAT_RGBA8);
+        API(nvnTextureBuilderSetTarget)(&tb, linear ? NVN_TEXTURE_TARGET_2D : volume ? NVN_TEXTURE_TARGET_3D : NVN_TEXTURE_TARGET_2D_ARRAY);
+        API(nvnTextureBuilderSetSize3D)(&tb, 32, 24, linear ? 1 : 8);
+        API(nvnTextureBuilderSetLevels)(&tb, linear ? 1 : 2);
+        if (linear) {
+            API(nvnTextureBuilderSetFlags)(&tb, NVN_TEXTURE_FLAGS_LINEAR);
+            API(nvnTextureBuilderSetStride)(&tb, 192);
+        }
+        API(nvnTextureBuilderSetStorage)(&tb, &pool, 0);
+        assert(API(nvnTextureBuilderGetStorageSize)(&tb) <= sizeof memory);
+        NVNtexture texture;
+        assert(API(nvnTextureInitialize)(&texture, &tb));
+        NVNtextureView view;
+        API(nvnTextureViewSetDefaults)(&view);
+        API(nvnTextureViewSetLevels)(&view, linear ? 0 : 1, 1);
+        if (!linear && !volume) API(nvnTextureViewSetLayers)(&view, 2, 4);
+        NVNcopyRegion region = {compressed ? 4 : 3, compressed ? 4 : 2, linear ? 0 : 1,
+                                compressed ? 8 : 5, compressed ? 8 : 3, linear ? 1 : 2};
+        size_t width = compressed ? 16 : 20, rows = compressed ? 2 : 3;
+        uint8_t src[256], dst[256], expected[256];
+        memset(src, 0xaf, sizeof src); memset(expected, 0xcb, sizeof expected); memset(dst, 0xcb, sizeof dst);
+        for (int z = 0; z < region.depth; ++z) for (size_t y = 0; y < rows; ++y)
+            for (size_t x = 0; x < width; ++x)
+                src[7 + 107 * z + 31 * y + x] = expected[9 + 113 * z + 34 * y + x] = (uint8_t)(3 + x + 41 * y + 101 * z);
+        API(nvnTextureWriteTexelsStrided)(&texture, &view, &region, src + 7, 31, 107);
+        API(nvnTextureReadTexelsStrided)(&texture, &view, &region, dst + 9, 34, 113);
+        for (size_t i = 0; i < sizeof dst; ++i) if (dst[i] != expected[i])
+            die("CPU texture storage %d byte %zu: %u expected %u", mode, i, dst[i], expected[i]);
+        API(nvnTextureFinalize)(&texture);
+    }
+    API(nvnMemoryPoolFinalize)(&pool);
+    puts("Public CPU texture storage: pitched arrays, volumes, compressed blocks and linear rows, including all guards");
+}
+
 #ifdef DM_VK_PUBLIC_BINDINGS
 #include "../nvn/vulkan/tests/public_bindings.inc"
 #endif
@@ -158,6 +209,7 @@ int main(void) {
     NVNdeviceBuilder db;
     API(nvnDeviceBuilderSetDefaults)(&db);
     assert(API(nvnDeviceInitialize)(&device, &db));
+    check_cpu_texture_storage(&device);
     NVNqueue queue;
     NVNqueueBuilder qb;
     API(nvnQueueBuilderSetDevice)(&qb, &device);
