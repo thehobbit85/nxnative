@@ -355,7 +355,6 @@ class Packaging(unittest.TestCase):
                     if args[3] == 'shell':
                         command = args[4].replace(device, str(ext))
                         if command.startswith('am force-stop '): return
-                        if 'com.nxnative.AssetDeploy' in command: return # Java verifier/publication has its own native fixtures.
                         subprocess.run(['sh', '-c', 'umask 007; ' + command], check=True)
                     else:
                         self.assertEqual(args[3], 'push')
@@ -365,6 +364,7 @@ class Packaging(unittest.TestCase):
                                     from_device=str(source) if remote else None, build='', patched=None, romfs=None, aoc=None)
                 files = [(str(p.relative_to(source)), str(p)) for p in source.rglob('asset')]
                 with patch.object(pack, 'run', side_effect=run), patch.object(pack, 'game_files', return_value=files), \
+                     patch.object(pack, 'deploy_call', return_value='a'*64), \
                      patch.object(pack, 'installed_apk', return_value='/data/app/fixture/base.apk'):
                     pack.deploy(a)
                 for path in ext.rglob('*'):
@@ -390,14 +390,17 @@ class Packaging(unittest.TestCase):
     def test_apk_update_during_deploy_aborts_before_publication(self):
         a = SimpleNamespace(sdk=None, id='0100633007D48000', test=True, serial='emulator-fixture',
                             from_device=None, build='', patched=None, romfs=None, aoc=None)
-        with patch.object(pack, 'game_files', return_value=[]), patch.object(pack, 'run') as run, \
+        with patch.object(pack, 'game_files', return_value=[]), patch.object(pack, 'run'), \
+             patch.object(pack, 'deploy_call', return_value='a'*64) as call, \
              patch.object(pack, 'installed_apk', side_effect=['/data/app/old path/base.apk', '/data/app/new/base.apk']):
             with self.assertRaisesRegex(ValueError, 'APK changed'):
                 pack.deploy(a)
-        commands = [c.args[-1] for c in run.call_args_list]
-        self.assertEqual(sum('com.nxnative.AssetDeploy' in c for c in commands), 1)
-        self.assertIn('--check', commands[0])
-        self.assertIn("CLASSPATH='/data/app/old path/base.apk'", commands[0])
+        self.assertEqual([c.args[-2:] for c in call.call_args_list], [('/data/app/old path/base.apk','check')])
+
+    def test_adb_content_error_must_not_count_as_publication(self):
+        with patch.object(subprocess, 'check_output', return_value='Error while accessing provider'):
+            with self.assertRaisesRegex(ValueError, 'install failed'):
+                pack.deploy_call('adb','serial','com.nxnative.fixture','/data/app/base.apk','install')
 
     def test_selected_version_uses_android_modules_and_romfs_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,6 +427,7 @@ class Packaging(unittest.TestCase):
             for test in (False, True):
                 for remote in (False, True):
                     with self.subTest(test=test, remote=remote), patch.object(pack, 'run') as run, \
+                         patch.object(pack, 'deploy_call', return_value='a'*64) as call, \
                          patch.object(pack, 'installed_apk', return_value='/data/app/fixture/base.apk'):
                         args = ['0100633007D48000', tmp, '--deploy', '--serial', 'emulator-5554']
                         if test:
@@ -431,6 +435,7 @@ class Packaging(unittest.TestCase):
                         if remote:
                             args.extend(['--from-device', '/sdcard/source'])
                         pack.main(args)
+                        self.assertEqual([c.args[2] for c in call.call_args_list], [pack.package(args[0],test)]*2)
                         commands = '\n'.join(str(c.args) for c in run.call_args_list)
                         target = '/sdcard/Android/data/' + pack.package(args[0], test) + '/files'
                         self.assertIn(target, commands)
