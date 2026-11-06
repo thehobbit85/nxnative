@@ -1246,6 +1246,41 @@ static void depth_copy_filter(void) {
     mtl_tex_release(&src); mtl_tex_release(&dst); mtl_queue_forget(0x8162);
 }
 
+static void depth_plane_copy(void) {
+    tex_t src={.serial=0x8164,.d={.width=4,.height=2,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_DEPTH32F}};
+    tex_t packed=src; packed.serial++; packed.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
+    tex_t dst=src; dst.serial+=2;
+    tex_t color=src; color.serial+=3; color.d.format=NVN_FORMAT_R32F;
+    nvn_tex_layout(&src.d,&src.L); nvn_tex_layout(&dst.d,&dst.L);
+    nvn_tex_layout(&packed.d,&packed.L); nvn_tex_layout(&color.d,&color.L);
+    float source[2][4]={{.0625f,.125f,.1875f,.25f},{.3125f,.375f,.4375f,.5f}}, result[2][4], stencil[2][4];
+    NVNcopyRegion all={.width=4,.height=2,.depth=1};
+    p_clear_tex clear={.tex=&packed,.r=all,.mask=15}; clear.c.f[0]=.875f; clear.c.u[1]=0x37;
+    list_t list={0}; put(&list,OP_CLEAR_TEX,&clear,sizeof clear);
+    RECORD(OP_COPY_B2T,p_copy_b2t,.src=(uintptr_t)source,.tex=&src,.r=all);
+    RECORD(OP_COPY_T2T,p_copy_t2t,.src=&src,.dst=&packed,.sr={.xoffset=1,.yoffset=1,.width=2,.height=1,.depth=1},
+           .dr={.xoffset=1,.width=2,.height=1,.depth=1});
+    RECORD(OP_COPY_T2T,p_copy_t2t,.src=&packed,.dst=&dst,.sr=all,.dr=all);
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&dst,.src=(uintptr_t)result,.r=all);
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&color},.depth=&packed);
+    RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={0});
+    p_bind_state state={.kind=5};
+    ds_st ds={.st=1,.sf_f=NVN_COMPARE_FUNC_EQUAL,.sf_b=NVN_COMPARE_FUNC_EQUAL};
+    memcpy(state.bytes,&ds,sizeof ds); put(&list,OP_BIND_STATE,&state,sizeof state);
+    RECORD(OP_STENCIL,p_stencil,.face=3,.which=2,.ref=0x37);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&depth_range_program,.stages=3);
+    RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&color,.src=(uintptr_t)stencil,.r=all);
+    put(&list,OP_END,NULL,0); mtl_queue_activate(0x8164);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for (int y=0;y<2;y++) for (int x=0;x<4;x++) {
+        float want=y==0 && (x==1 || x==2) ? source[1][x] : .875f;
+        if (result[y][x]!=want || stencil[y][x]==0)
+            die("D32 depth plane at %d,%d got %g, expected %g, stencil probe %g",x,y,result[y][x],want,stencil[y][x]);
+    }
+    mtl_tex_release(&src); mtl_tex_release(&packed); mtl_tex_release(&dst); mtl_tex_release(&color); mtl_queue_forget(0x8164);
+}
+
 static void depth_copies(void) {
     const NVNformat formats[] = {NVN_FORMAT_DEPTH32F, NVN_FORMAT_DEPTH16, NVN_FORMAT_DEPTH24_STENCIL8, NVN_FORMAT_DEPTH32F_STENCIL8};
     for (unsigned k=0;k<sizeof formats/sizeof *formats;k++) for (int scale=0;scale<2;scale++) {
@@ -1900,7 +1935,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
-    if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); return 0; }
+    if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
@@ -1937,7 +1972,7 @@ int main(void) {
     buffer_range_lifetime();
     ordered_buffers();
     draw_parameters();
-    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_copies();
+    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);
