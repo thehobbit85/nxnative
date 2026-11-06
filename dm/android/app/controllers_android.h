@@ -77,10 +77,10 @@ static void cancel_pads(void) {
     for (int p = 0; p < DM_PLAYERS; p++) dm_pad_cancel_player(p);
 }
 
-static jboolean pad_attach(JNIEnv *env, jclass cls, jint id, jstring descriptor) {
+static jint pad_attach(JNIEnv *env, jclass cls, jint id, jstring descriptor) {
     (void)cls;
     const char *name = (*env)->GetStringUTFChars(env, descriptor, NULL);
-    if (!name) return JNI_FALSE;
+    if (!name) return -1;
     pthread_mutex_lock(&g_pmu);
     int p = pad_slot_take(&g_slots, device_owner(id), name);
     if (p >= 0) {
@@ -89,7 +89,7 @@ static jboolean pad_attach(JNIEnv *env, jclass cls, jint id, jstring descriptor)
     }
     pthread_mutex_unlock(&g_pmu);
     (*env)->ReleaseStringUTFChars(env, descriptor, name);
-    return p >= 0;
+    return p;
 }
 static void pad_detach(JNIEnv *env, jclass cls, jint id) {
     (void)env; (void)cls;
