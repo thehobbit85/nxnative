@@ -1182,7 +1182,7 @@ struct shader {
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
-    VkShaderModule mod, alpha_mod; int tried_alpha; VkDescriptorSetLayout dsl;
+    VkShaderModule mod, alpha_mod; int tried_alpha, has_float_alpha; VkDescriptorSetLayout dsl;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
     sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask; int pack_locations;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
     uint8_t *c1; uint32_t c1_len; uint32_t tg[3];
@@ -1587,6 +1587,7 @@ static shader_t *shader_get(const uint8_t md[8]) {
         }
         s->pack_locations=1;
     }
+    if (s->stage==1) s->has_float_alpha=!!spv_color_zero_alpha(spv,ns/4).color;
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
     if (!spv) return s;
@@ -1830,7 +1831,7 @@ static void set_rt(const p_set_rt *r) {
 typedef struct {
     shader_t *vs, *fs; int prim;
     va_st attr[32]; int nattr; vs_st stream[16]; int nstream, split_instances;
-    blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples, logic;
+    blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples, logic, alpha_to_coverage;
     VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll, rasterizer_discard, depth_clamp;
 } pso_key;
 typedef struct { pso_key k; uint64_t h; VkPipeline p; } pso_ent;
@@ -1930,6 +1931,7 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     rs.depthBiasEnable = (k->poly.offset_en & NVN_POLYGON_OFFSET_ENABLE_FILL) != 0;
     rs.lineWidth = 1;
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, (VkSampleCountFlagBits)(k->samples > 1 ? k->samples : 1)};
+    ms.alphaToCoverageEnable=k->alpha_to_coverage;
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     if (k->df) {
         ds.depthTestEnable = k->ds.dt; ds.depthWriteEnable = k->ds.dw; ds.depthCompareOp = k->ds.dt ? cop(k->ds.df) : VK_COMPARE_OP_ALWAYS;
@@ -2617,6 +2619,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     }
     k.nc = P.n; memcpy(k.cf, P.cf, sizeof k.cf); memcpy(k.blend, S.blend, P.n * sizeof *k.blend);
     k.color = S.color; k.chmask = S.chmask; k.poly = S.poly; k.samples = P.samples;
+    k.alpha_to_coverage=S.ms.a2c && fs && fs->has_float_alpha && clear_color_type(P.cf[0])==CLEAR_FLOAT;
     // Like the Metal side entry, all compare functions share one pipeline.
     // Integer color 0 bypasses the test; a depth-only pass may still discard.
     k.color.alpha_func = fs && S.color.alpha_func && S.color.alpha_func!=NVN_ALPHA_FUNC_ALWAYS &&

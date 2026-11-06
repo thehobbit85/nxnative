@@ -12,7 +12,7 @@ REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_alpha.h
-$(B)/t_replay: ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h tests/alpha.inc tests/logic.inc
+$(B)/t_replay: ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/logic.inc
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
 include clear_shaders.mk

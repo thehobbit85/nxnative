@@ -3,6 +3,8 @@
 // with a source, into RG32Uint, RGBA8Uint, RGBA8Unorm and RGBA16Unorm targets (the result cut to the target's bits); every operation shares one pipeline; a target with no bits to combine keeps COPY (lop_key).
 // make GAME=<id> check_t_logic (the fixture comes from test_dmsh_logic.py --fixture <dir>; ./t_logic <dir>)
 #include "../nvn/nvn_mtl.m"
+#include "recorded_list.h"
+#include "alpha_coverage_corpus.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -75,6 +77,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     static prog_t program; NvShader *ps; NvProg *pr = prog(g_msl_dir, &program, &ps);
     run(pr, &program, ps, NVN_FORMAT_RG32UI, 32); run(pr, &program, ps, NVN_FORMAT_RGBA8UI, 8);
     run(pr, &program, ps, NVN_FORMAT_RGBA8, 8); run(pr, &program, ps, NVN_FORMAT_RGBA16, 16);
+    alpha_coverage(&program,1); alpha_coverage(&program,4);
     pso_key k; memset(&k, 0, sizeof k); k.cfmt[0] = MTLPixelFormatRG32Uint; k.chmask = 0xf; S.color.logic_op = NVN_LOGIC_OP_OR;
     CHECK(lop_key(&k, ps, 0) == 1); CHECK(lop_key(&k, ps, 1) == 0);   // not in a merged pass
     k.cfmt[0] = MTLPixelFormatRGBA8Unorm; CHECK(lop_key(&k, ps, 0) == 1);

@@ -9,6 +9,45 @@
 enum { DM_VK_ALPHA_PUSH_OFFSET = 16, DM_VK_ALPHA_PUSH_BYTES = 8 };
 typedef struct { uint32_t type, element; uint8_t location_zero, excluded, width; } alpha_output_id;
 
+typedef struct { uint32_t color, vec, scalar; } fragment_alpha;
+
+// Both native alpha-to-coverage and the alpha-test variant need a floating
+// alpha at location zero. A depth-only shader may still export this color.
+static fragment_alpha spv_color_zero_alpha(const uint32_t *w, size_t nw) {
+    enum { TypeFloat=22, TypeVector=23, TypePointer=32, Function=54, Variable=59, Decorate=71, Output=3 };
+    fragment_alpha found={0};
+    if (nw<5 || w[0]!=0x07230203 || !w[3] || w[3]>0x3fffff) return found;
+    uint32_t bound=w[3];
+    alpha_output_id *ids=calloc(bound,sizeof *ids);
+    if (!ids) return found;
+    for (size_t i=5;i<nw;) {
+        const uint32_t *p=w+i;
+        unsigned op=p[0]&0xffff, n=p[0]>>16;
+        if (!n || n>nw-i) { free(ids); return found; }
+        if (op==Function) break;
+        if (op==TypeFloat && n==3 && p[1]<bound) {
+            if (p[2]==16 || p[2]==32) ids[p[1]].width=(uint8_t)p[2];
+        }
+        if (op==TypeVector && n==4 && p[1]<bound && p[2]<bound && p[3]==4) ids[p[1]].element=p[2];
+        if (op==TypePointer && n==4 && p[1]<bound && p[3]<bound && p[2]==Output) ids[p[1]].type=p[3];
+        if (op==Decorate && n==4 && p[1]<bound) {
+            if (p[2]==30 && !p[3]) ids[p[1]].location_zero=1;
+            if ((p[2]==31 || p[2]==32) && p[3]) ids[p[1]].excluded=1; // Component or dual-source Index
+        }
+        if (op==Variable && n>=4) {
+            if (p[3]==Output && p[2]<bound && p[1]<bound) ids[p[2]].type=ids[p[1]].type;
+        }
+        i+=n;
+    }
+    for (uint32_t id=1;id<bound;++id) {
+        if (!ids[id].location_zero || ids[id].excluded || !ids[id].type) continue;
+        uint32_t vec=ids[id].type, scalar=ids[vec].element;
+        if (scalar && ids[scalar].width) { found=(fragment_alpha){id,vec,scalar}; break; }
+    }
+    free(ids);
+    return found;
+}
+
 static uint32_t *spv_alpha(const uint32_t *w, size_t nw, size_t *out_words, const char **reason) {
     enum { EntryPoint=15, TypeVoid=19, TypeBool=20, TypeInt=21, TypeFloat=22, TypeVector=23,
         TypeStruct=30, TypePointer=32, Constant=43, Function=54, FunctionEnd=56,
@@ -21,19 +60,17 @@ static uint32_t *spv_alpha(const uint32_t *w, size_t nw, size_t *out_words, cons
     uint32_t bound=w[3], entry=0, void_type=0, bool_type=0, uint_type=0, float_type=0, fn_type=0;
     size_t types=0, functions=0, returns=0;
     int in_entry=0;
-    alpha_output_id *ids=calloc(bound,sizeof *ids);
-    if (!ids) { *reason="out of memory"; return NULL; }
     for (size_t i=5; i<nw;) {
         const uint32_t *p=w+i;
         unsigned op=p[0]&0xffff, n=p[0]>>16;
-        if (!n || n>nw-i) goto fail;
+        if (!n || n>nw-i) return NULL;
         if (op==EntryPoint) {
-            if (n<4 || p[1]!=4 || entry) goto fail;
+            if (n<4 || p[1]!=4 || entry) return NULL;
             entry=p[2];
         }
         if (op>=TypeVoid && op<=39 && !types) types=i;
         if (op==Function) {
-            if (n!=5) goto fail;
+            if (n!=5) return NULL;
             if (!functions) functions=i;
             in_entry=p[2]==entry;
             if (in_entry) fn_type=p[4];
@@ -43,31 +80,16 @@ static uint32_t *spv_alpha(const uint32_t *w, size_t nw, size_t *out_words, cons
         if (op==TypeVoid && n==2) void_type=p[1];
         if (op==TypeBool && n==2) bool_type=p[1];
         if (op==TypeInt && n==4 && p[2]==32 && !p[3]) uint_type=p[1];
-        if (op==TypeFloat && n==3 && p[1]<bound) {
-            if (p[2]==32) float_type=p[1];
-            if (p[2]==16 || p[2]==32) ids[p[1]].width=(uint8_t)p[2];
-        }
-        if (op==TypeVector && n==4 && p[1]<bound && p[2]<bound && p[3]==4) ids[p[1]].element=p[2];
-        if (op==TypePointer && n==4 && p[1]<bound && p[3]<bound && p[2]==Output) ids[p[1]].type=p[3];
-        if (op==Decorate && n==4 && p[1]<bound) {
-            if (p[2]==30 && !p[3]) ids[p[1]].location_zero=1;
-            if ((p[2]==31 || p[2]==32) && p[3]) ids[p[1]].excluded=1; // Component or dual-source Index
-        }
-        if (op==Variable && n>=4) {
-            if (p[3]==PushConstant) { *reason="fragment already declares host push constants"; goto fail; }
-            if (p[3]==Output && p[2]<bound && p[1]<bound) ids[p[2]].type=ids[p[1]].type;
+        if (op==TypeFloat && n==3 && p[2]==32) float_type=p[1];
+        if (op==Variable && n>=4 && p[3]==PushConstant) {
+            *reason="fragment already declares host push constants"; return NULL;
         }
         i+=n;
     }
-    if (!types || types>=functions || !entry || !fn_type || !void_type) goto fail;
-    uint32_t color=0, vec=0, scalar=0;
-    for (uint32_t id=1; id<bound; ++id) {
-        if (!ids[id].location_zero || ids[id].excluded || !ids[id].type) continue;
-        vec=ids[id].type; scalar=ids[vec].element;
-        if (scalar && ids[scalar].width) { color=id; break; }
-    }
-    if (!color) { *reason="color 0 has no float alpha"; goto fail; }
-    free(ids);
+    if (!types || types>=functions || !entry || !fn_type || !void_type) return NULL;
+    fragment_alpha output=spv_color_zero_alpha(w,nw);
+    if (!output.color) { *reason="color 0 has no float alpha"; return NULL; }
+    uint32_t color=output.color, vec=output.vec, scalar=output.scalar;
     uint32_t *out=malloc((nw+256+4*returns)*sizeof *out);
     if (!out) { *reason="out of memory"; return NULL; }
     size_t at=types;
@@ -119,6 +141,4 @@ static uint32_t *spv_alpha(const uint32_t *w, size_t nw, size_t *out_words, cons
     ALPHA_EMIT(Label,keep); out[at++]=1u<<16|Return; out[at++]=1u<<16|FunctionEnd;
 #undef ALPHA_EMIT
     out[3]=bound; *out_words=at; *reason=NULL; return out;
-fail:
-    free(ids); return NULL;
 }

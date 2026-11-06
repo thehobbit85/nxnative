@@ -123,6 +123,7 @@ static void clear_and_readback(NVNformat format) {
 
 #include "../../../tests/recorded_list.h"
 #include "../../../tests/polygon_offset_corpus.h"
+#include "../../../tests/alpha_coverage_corpus.h"
 
 // The payload width is in bytes. The recorder allows partial updates to either stage group's block.
 static void push_constants(list_t *list, int compute, uint16_t offset, const void *data, size_t size) {
@@ -2663,6 +2664,7 @@ static void native_warp_width(unsigned available) {
 
 int main(void) {
     if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); return 0; }
+    if (getenv("DM_VK_TEST_ALPHA_COVERAGE")) { alpha_coverage(&logic_program[0],1); alpha_coverage(&logic_program[0],4); return 0; }
     if (getenv("DM_VK_TEST_ALPHA")) { alpha_references(); return 0; }
     if (getenv("DM_VK_TEST_DIVISORS")) { instance_divisors(); return 0; }
     if (getenv("DM_VK_TEST_BLEND_CONSTANTS")) { blend_constants(); return 0; }
@@ -2746,6 +2748,7 @@ int main(void) {
     polygon_offset(&offset_program);
     alpha_references();
     logic_operations();
+    alpha_coverage(&logic_program[0],1); alpha_coverage(&logic_program[0],4);
     scissored_attachment_clears();
     conditional_rendering();
     integer_attachment_clears();
