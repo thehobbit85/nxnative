@@ -31,6 +31,7 @@ static prog_t buffer_program = {.nstage = 1};
 static prog_t depth_copy_program = {.nstage = 2};
 static prog_t depth_range_program = {.nstage = 2};
 static prog_t one_sample_program = {.nstage = 2};
+static prog_t blend_mrt_program = {.nstage = 2};
 static prog_t output_program = {.nstage = 2};
 static prog_t origin_program = {.nstage = 2};
 static prog_t draw_parameters_program = {.nstage = 2};
@@ -43,6 +44,7 @@ int nvn_dpool_base(const void *pool, int texture) {
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
+    if (p == &blend_mrt_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x55 : 0x52; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
     if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
@@ -1255,6 +1257,45 @@ static void stencil_faces(void) {
     puts("Vulkan front and back stencil comparisons, write masks and references preserve all four canaries");
 }
 
+static void blend_constants(void) {
+    tex_t target[2]={{.serial=0x8172,.d={.width=3,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}}};
+    target[1]=target[0]; target[1].serial++;
+    nvn_tex_layout(&target[0].d,&target[0].L); nvn_tex_layout(&target[1].d,&target[1].L);
+    const float seed[2][4]={{0,.25f,.75f,.5f},{1,.75f,.25f,1}}, fragment[2][4]={{.75f,.5f,.25f,1},{.25f,.5f,.75f,0}};
+    const p_blend_color constants[]={{{.125f,.25f,.5f,.75f}},{{1,.75f,.5f,.25f}}};
+    uint8_t image[2][3][4];
+    list_t list={0}; RECORD(OP_SET_RT,p_set_rt,.n=2,.color={&target[0],&target[1]});
+    for (int i=0;i<2;i++) {
+        p_clear_color clear={.index=i,.mask=15}; memcpy(clear.rgba,seed[i],sizeof clear.rgba);
+        put(&list,OP_CLEAR_COLOR,&clear,sizeof clear);
+        blend_st blend={.target=i,.src_rgb=i ? NVN_BLEND_FUNC_ONE_MINUS_CONSTANT_ALPHA : NVN_BLEND_FUNC_CONSTANT_COLOR,
+                        .dst_rgb=i ? NVN_BLEND_FUNC_CONSTANT_ALPHA : NVN_BLEND_FUNC_ONE_MINUS_CONSTANT_COLOR,
+                        .src_a=i ? NVN_BLEND_FUNC_ZERO : NVN_BLEND_FUNC_CONSTANT_ALPHA,
+                        .dst_a=i ? NVN_BLEND_FUNC_ONE : NVN_BLEND_FUNC_ONE_MINUS_CONSTANT_ALPHA,
+                        .eq_rgb=NVN_BLEND_EQUATION_ADD,.eq_a=NVN_BLEND_EQUATION_ADD};
+        p_bind_state state={.kind=0}; memcpy(state.bytes,&blend,sizeof blend); put(&list,OP_BIND_STATE,&state,sizeof state);
+    }
+    color_st enable={.blend_en=3}; p_bind_state state={.kind=1}; memcpy(state.bytes,&enable,sizeof enable); put(&list,OP_BIND_STATE,&state,sizeof state);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&blend_mrt_program,.stages=3);
+    for (int i=0;i<2;i++) {
+        put(&list,OP_BLEND_COLOR,&constants[i],sizeof constants[i]);
+        RECORD(OP_SCISSOR,p_scissor,.x=2*i,.w=1,.h=1);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    }
+    for (int i=0;i<2;i++)
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target[i],.r={.width=3,.height=1,.depth=1},.src=(uintptr_t)image[i]);
+    put(&list,OP_END,NULL,0); mtl_queue_activate(0x8172);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for (int i=0;i<2;i++) for (int x=0;x<3;x++) for (int ch=0;ch<4;ch++) {
+        const float *c=constants[x/2].rgba;
+        float factor=x==1 ? 0 : i==0 ? c[ch] : ch==3 ? 0 : 1-c[3];
+        int want=(int)(255*(factor*fragment[i][ch]+(1-factor)*seed[i][ch])+.5f);
+        if (abs(image[i][x][ch]-want)>1) die("blend constant target %d pixel %d channel %d: %u, expected %d",i,x,ch,image[i][x][ch],want);
+    }
+    mtl_tex_release(&target[0]); mtl_tex_release(&target[1]); mtl_queue_forget(0x8172);
+    puts("Vulkan blend constants update across draws and respect two independent target equations");
+}
+
 static void downsample_view(void) {
     tex_t src = {.serial=0x8160,.d={.width=8,.height=8,.depth=2,.levels=2,.target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA8}};
     tex_t dst = src; dst.serial++; dst.d.width=dst.d.height=4; dst.d.format=NVN_FORMAT_RG8;
@@ -1989,6 +2030,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
+    if (getenv("DM_VK_TEST_BLEND_CONSTANTS")) { blend_constants(); return 0; }
     if (getenv("DM_VK_TEST_STENCIL_FACES")) { stencil_faces(); return 0; }
     if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
@@ -2027,7 +2069,7 @@ int main(void) {
     buffer_range_lifetime();
     ordered_buffers();
     draw_parameters();
-    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies(); stencil_faces();
+    texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); depth_copies(); stencil_faces(); blend_constants();
     clear_and_readback(NVN_FORMAT_RGBA8);
     clear_and_readback(NVN_FORMAT_RGBA8_SRGB);
     uploaded_texture(NVN_FORMAT_RGBA8);
