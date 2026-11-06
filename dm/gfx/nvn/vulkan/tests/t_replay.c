@@ -38,6 +38,7 @@ static prog_t feedback_program = {.nstage = 2};
 static prog_t depth_clamp_program = {.nstage = 2};
 static prog_t offset_program = {.nstage=2};
 static prog_t alpha_program[3] = {{.nstage=2},{.nstage=2},{.nstage=2}};
+static prog_t mixed_color_program={.nstage=2};
 static prog_t logic_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t depth_range_program = {.nstage = 2};
 static prog_t one_sample_program = {.nstage = 2};
@@ -58,6 +59,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p==&mixed_color_program) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x67 : 0x52; return 1; }
     for (int i=0;i<2;++i) if (p==&logic_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x64+i : 0x52; return 1; }
     for (int i=0;i<3;++i) if (p==&alpha_program[i]) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x61+i : 0x52; return 1; }
     if (p == &one_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x54 : 0x52; return 1; }
@@ -2664,7 +2666,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
-    if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); sparse_mrt_outputs(); return 0; }
+    if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); sparse_mrt_outputs(); mixed_integer_outputs(); return 0; }
     if (getenv("DM_VK_TEST_ALPHA_COVERAGE")) { alpha_coverage(&logic_program[0],1); alpha_coverage(&logic_program[0],4); return 0; }
     if (getenv("DM_VK_TEST_ALPHA")) { alpha_references(); return 0; }
     if (getenv("DM_VK_TEST_DIVISORS")) { instance_divisors(); return 0; }
@@ -2750,6 +2752,7 @@ int main(void) {
     alpha_references();
     logic_operations();
     sparse_mrt_outputs();
+    mixed_integer_outputs();
     alpha_coverage(&logic_program[0],1); alpha_coverage(&logic_program[0],4);
     scissored_attachment_clears();
     conditional_rendering();
