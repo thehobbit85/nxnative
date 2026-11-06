@@ -4233,7 +4233,8 @@ static void rt_dump(uint64_t n) {
     LOG("vk: frame %llu: %d render targets written to %s", (unsigned long long)n, nd, dir);
 }
 static double g_fps_shown;
-static _Atomic uint64_t g_presents;
+static pthread_mutex_t g_present_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_presents, g_present_done, g_dropped_ticket[64];
 
 static _Atomic uint64_t g_layer_shape, g_screen_shape;
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, vk_present_shape(w, h)); }
@@ -4241,7 +4242,7 @@ void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, 
 
 // ---------- Android window ----------
 #ifdef __ANDROID__
-__attribute__((weak)) void *front_native_window(int *gen) { *gen = 0; return NULL; }   // app/front_android.c; none in the adb front end
+__attribute__((weak)) void *front_native_window(int *gen);   // app/front_android.c; absent in the headless front end
 __attribute__((weak)) void front_window_lock(int on) { (void)on; }
 static struct { VkSurfaceKHR surf; VkSwapchainKHR sc; VkImage img[8]; VkImageView view[8]; uint32_t n; VkFormat fmt; VkExtent2D ext; int gen; } W;
 #define NPRES 3
@@ -4337,20 +4338,20 @@ static void img_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkI
                               VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, img, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 }
-static void win_present(const tex_t *t, const int crop[4]) {
-    int gen; ANativeWindow *aw = front_native_window(&gen);
+static int win_present(const tex_t *t, const int crop[4]) {
+    int gen;
     front_window_lock(1);
-    aw = front_native_window(&gen);
-    if (!aw || gen != W.gen) { win_drop(); W.gen = gen; if (aw) win_make(aw); }
-    if (!aw || !W.sc) { front_window_lock(0); return; }
+    ANativeWindow *aw = front_native_window(&gen);
+    if (!aw || gen != W.gen) { win_drop(); W.gen = gen; if (aw && !win_make(aw)) W.gen = -1; }
+    if (!aw || !W.sc) { front_window_lock(0); return 0; }
     pthread_mutex_lock(&g_rmu); vtex *v = tex_find(t->serial); pthread_mutex_unlock(&g_rmu);
-    if (!v) { front_window_lock(0); return; }
+    if (!v) { front_window_lock(0); return 0; }
     typeof(g_pres[0]) *P_ = &g_pres[g_pi]; g_pi = (g_pi + 1) % NPRES;
     { uint64_t w0 = now_ns(); vkWaitForFences(g_dev, 1, &P_->fence, VK_TRUE, UINT64_MAX); atomic_fetch_add(&g_pwait_ns, now_ns() - w0); }
     if (P_->fb) { vkDestroyFramebuffer(g_dev, P_->fb, NULL); P_->fb = VK_NULL_HANDLE; }
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(g_dev, W.sc, 1000000000ull, P_->acq, VK_NULL_HANDLE, &idx);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) { W.gen = -1; front_window_lock(0); return; }
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { front_window_lock(0); return; }
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR || r == VK_SUBOPTIMAL_KHR) W.gen = -1;
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { front_window_lock(0); return 0; }
     vkResetFences(g_dev, 1, &P_->fence);
     VkCommandBuffer cb = P_->cb; vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL}; vkBeginCommandBuffer(cb, &bi);
@@ -4381,14 +4382,16 @@ static void win_present(const tex_t *t, const int crop[4]) {
     VkPresentInfoKHR pi = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, NULL, 1, &P_->done, 1, &W.sc, &idx, NULL};
     pthread_mutex_lock(&g_qmu);
     if (g_tl) { wv[1] = g_tlv; sv[1] = ++g_tlv; }
-    vkQueueSubmit(g_q, 1, &si, P_->fence); r = vkQueuePresentKHR(g_q, &pi); pthread_mutex_unlock(&g_qmu);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) W.gen = -1;
+    VKCHECK(vkQueueSubmit(g_q, 1, &si, P_->fence)); r = vkQueuePresentKHR(g_q, &pi); pthread_mutex_unlock(&g_qmu);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR || r == VK_SUBOPTIMAL_KHR) W.gen = -1;
     front_window_lock(0);
+    return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
 }
 #endif
 
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     (void)period_s;
+    pthread_mutex_lock(&g_present_mu);
     uint64_t n = atomic_fetch_add(&g_presents, 1) + 1;
     {   // pacing for DM_FPS=30 (every frame two vsyncs) and the frame-rate counter's reading
         static uint64_t last, t0, n0; uint64_t now = now_ns();
@@ -4396,9 +4399,12 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
         last = now; if (!t0) { t0 = now; n0 = n; } else if (now - t0 >= 1000000000ull) { g_fps_shown = (double)(n - n0) * 1e9 / (double)(now - t0); t0 = now; n0 = n; }
     }
     if (t && g_has_surface && !g_tl) mtl_finish();   // no timeline semaphore: the frame's work is done before its present reads the window texture
+    int handed_on = 1;   // The headless front end completes the handoff here.
 #ifdef __ANDROID__
-    if (t && g_has_surface) win_present(t, crop);
+    if (front_native_window) handed_on = t && g_has_surface && win_present(t, crop);
 #endif
+    atomic_store(&g_dropped_ticket[n % 64], handed_on ? 0 : n);
+    atomic_store(&g_present_done, n);
     if (n == 1 || n % 600 == 0) LOG("vk: %llu frames presented, %llu draws, %llu dropped (no program %llu, shader %llu, no target %llu, indirect %llu, primitive %llu, pipeline %llu, descriptors %llu), %d pipelines, %d shaders",
                                     (unsigned long long)n, (unsigned long long)g_stat_draws, (unsigned long long)g_stat_skip, (unsigned long long)g_skip_why[0], (unsigned long long)g_skip_why[1], (unsigned long long)g_skip_why[2],
                                     (unsigned long long)g_skip_why[3], (unsigned long long)g_skip_why[4], (unsigned long long)g_skip_why[5], (unsigned long long)g_skip_why[6], g_npso, g_nsh);
@@ -4427,10 +4433,18 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
       g_plog = (on ? (int64_t)n + 1 >= pl && pl >= 0 : (int64_t)n + 1 == pl) || g_passdump_left > 0;
       if (g_plog && (on || g_passdump_left)) LOG("plog: frame %llu", (unsigned long long)n + 1);
       if (g_passdump_left > 0) g_passdump_left--; }
+    pthread_mutex_unlock(&g_present_mu);
     return n;
 }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }
-double mtl_presented_time(uint64_t n) { (void)n; return 0; }
+void mtl_present_progress(uint64_t *queued, uint64_t *done) {
+    *done = atomic_load(&g_present_done);
+    *queued = atomic_load(&g_presents);
+}
+double mtl_presented_time(uint64_t n) {
+    // VI supplies the first-observed completion tick when WSI has no display timestamp.
+    return n && atomic_load(&g_dropped_ticket[n % 64]) == n ? -1 : 0;
+}
 int mtl_has_window(void) { return 0; }
 int mtl_display_hz(void) { return 0; }
 int mtl_fps_target(void) { static int f = -1; if (f < 0) { const char *e = getenv("DM_FPS"); f = e && atoi(e) == 30 ? 30 : 60; } return f; }

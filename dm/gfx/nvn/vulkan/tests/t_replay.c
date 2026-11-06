@@ -3064,7 +3064,23 @@ static void native_warp_width(unsigned available) {
     puts("Conditional native shuffles and atomic side effects match the device subgroup width");
 }
 
+#ifdef DM_VK_TEST_ANDROID_SURFACE
+#include "present_surface.inc"
+#endif
 int main(void) {
+#ifdef DM_VK_TEST_ANDROID_SURFACE
+    surface_history(); return 0;
+#endif
+    if (getenv("DM_VK_TEST_HEADLESS_PRESENT")) {
+        mtl_init();
+        for (uint64_t i=1;i<=10;i++) {
+            assert(mtl_present(NULL,0,NULL)==i);
+            uint64_t queued,done; mtl_present_progress(&queued,&done);
+            assert(queued==i && done==i && mtl_presented_time(i)==0);
+        }
+        puts("Headless presents hand VI completed tickets without a compositor timestamp");
+        return 0;
+    }
     if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
     if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }
     if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); sparse_mrt_outputs(); mixed_integer_outputs(); return 0; }
