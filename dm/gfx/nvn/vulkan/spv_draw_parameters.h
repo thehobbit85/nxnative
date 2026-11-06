@@ -35,6 +35,8 @@ static uint32_t *spv_draw_parameters(const uint32_t *w, size_t nw, int native, s
             uint32_t builtin=w[i+3];
             // Tag 4 keeps the native input and adds the staged vertex bias.
             if (builtin==42 || (native && builtin==4424)) member[w[i+1]]=4;
+            // Replay expands a guest multi-draw into individual Vulkan draws.
+            else if (builtin==4426) member[w[i+1]]=3;
             else if (!native && builtin>=4424 && builtin<=4426) member[w[i+1]]=(uint8_t)(builtin-4424+1);
             if (member[w[i+1]]) count++;
         }

@@ -1548,6 +1548,68 @@ static void draw_parameters(void) {
     mtl_tex_release(&output);
     puts("Draw IDs and graphics C0 base instance, point limit and single-sample center survive draw replay");
 }
+static void gpu_draw_words(list_t *list, uint32_t *out, const uint32_t values[4], unsigned count) {
+    push_constants(list,1,240,values,16);
+    p_bind_program program={.prog=&groups,.stages=0x20};
+    p_bind_buf buffer={.stage=5,.index=0,.addr=(uintptr_t)out,.size=4*count};
+    p_dispatch dispatch={.x=(int32_t)count,.y=1,.z=1};
+    put(list,OP_BIND_PROGRAM,&program,sizeof program); put(list,OP_BIND_SSBO,&buffer,sizeof buffer);
+    put(list,OP_DISPATCH,&dispatch,sizeof dispatch);
+}
+static void indirect_draws(void) {
+    tex_t output={.serial=0x3950,.d={.width=4,.height=4,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
+    nvn_tex_layout(&output.d,&output.L);
+    static uint32_t args[1026][8];
+    uint32_t count;
+    uint16_t indices[]={17,17,6,7,8};
+    mtl_pool_add(args,sizeof args); mtl_pool_add(&count,sizeof count); mtl_pool_add(indices,sizeof indices);
+    enum { SINGLE, INLINE, RANGE };
+    for (int indexed=0;indexed<2;indexed++) for (int form=SINGLE;form<=RANGE;form++) for (unsigned test=0;test<(form==RANGE ? 7u : 5u);test++) {
+        list_t list={0}; uint8_t pixels[64]={0};
+        int slot=form==SINGLE || test==6 ? 0 : test==5 ? 1024 : 1;
+        int expected[4]={17,indexed ? -2 : 4,4,slot};
+        uint32_t live=test==1 ? 0 : test==3 ? UINT32_MAX : test==5 ? 1025 : 2;
+        if (test==6) expected[3]=1; // same arguments, distinct guest draw ID on the second draw
+        uint32_t instances=test==2 ? 0 : 2;
+        memset(args,0,sizeof args); count=1234;
+        // The final record is poison: reading beyond the declared maximum would turn the target red.
+        uint32_t *poison=args[test==5 ? 1025 : 2];
+        poison[0]=3; poison[1]=2; poison[2]=indexed ? 2 : 4;
+        poison[3]=indexed ? (uint32_t)-2 : 19; poison[4]=19;
+        uint32_t gpu_args[]={3,instances,indexed ? 2 : 4,indexed ? (uint32_t)-2 : 17};
+        gpu_draw_words(&list,args[slot],gpu_args,4);
+        args[slot][4]=17; // indexed firstInstance comes from the adjacent CPU-initialized word
+        gpu_draw_words(&list,&count,(uint32_t[]){live,0,0,0},1);
+        if (test==4) { put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);mtl_sub_commit();list.length=0; }
+        RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&output,.r={.width=4,.height=4,.depth=1},.mask=15,.c.f={0,0,1,1});
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&output});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&draw_parameters_program,.stages=3);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=0,.index=0,.addr=(uintptr_t)expected,.size=sizeof expected);
+        if (form==RANGE) {
+            RECORD(OP_MULTI_DRAW,p_multi_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.itype=indexed?1:-1,.ibuf=(uintptr_t)indices,
+                .ind=(uintptr_t)args,.cnt=(uintptr_t)&count,.max=test==3 ? 2 : INT32_MAX,.stride=test==6 ? 0 : (int64_t)sizeof args[0]);
+        } else {
+            unsigned n=form==SINGLE ? 1 : 2;
+            for (unsigned i=0;i<n;i++) {
+                uint64_t counter=form==INLINE ? (uintptr_t)&count : 0;
+                if (indexed) RECORD(OP_DRAW_IDX,p_draw_idx,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.itype=1,.ibuf=(uintptr_t)indices,
+                    .ind=(uintptr_t)args[i],.mdi_cnt=counter,.mdi_i=(int32_t)i);
+                else RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.ind=(uintptr_t)args[i],.mdi_cnt=counter,.mdi_i=(int32_t)i);
+            }
+        }
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&output,.src=(uintptr_t)pixels,.r={.width=4,.height=4,.depth=1});
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        int green=instances && (form==SINGLE || live);
+        uint8_t want[]={0,green?255:0,green?0:255,255};
+        for (unsigned i=0;i<sizeof pixels;i+=4) if(memcmp(pixels+i,want,4)) {
+            fprintf(stderr,"indirect indexed%d form%d case%u: got %u,%u,%u,%u\n",indexed,form,test,pixels[i],pixels[i+1],pixels[i+2],pixels[i+3]);abort();
+        }
+    }
+    mtl_pool_del(indices);mtl_pool_del(&count);mtl_pool_del(args);mtl_tex_release(&output);
+    puts("GPU-written indirect and counted draws preserve vertex, instance and draw IDs");
+}
+
 static void ordered_buffers(void) {
     for (int split = 0; split <= 1; split++) {
         uint32_t words[16], copied[16], first[18], second[18];
@@ -2088,6 +2150,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DIVISORS")) { instance_divisors(); return 0; }
     if (getenv("DM_VK_TEST_BLEND_CONSTANTS")) { blend_constants(); return 0; }
     if (getenv("DM_VK_TEST_STENCIL_FACES")) { stencil_faces(); return 0; }
+    if (getenv("DM_VK_TEST_INDIRECT_DRAWS")) { indirect_draws(); return 0; }
     if (getenv("DM_VK_TEST_TEXTURE_COPY")) { texture_copy_regions(); downsample_view(); depth_copy_filter(); depth_plane_copy(); return 0; }
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
@@ -2110,6 +2173,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DESCRIPTOR_POOLS")) { descriptor_lifetime(); return 0; }
     descriptor_lifetime();
     if(getenv("DM_VK_TEST_SEPARATE")) { separate_descriptors();return 0; }
+    indirect_draws();
     separate_descriptors();
     if(getenv("DM_VK_TEST_RETIRE")) { retired_texture_pool();return 0; }
     retired_texture_pool();

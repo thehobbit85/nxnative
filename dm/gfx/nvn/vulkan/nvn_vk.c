@@ -2458,7 +2458,7 @@ static VkRect2D render_scissor(void) {
     return S.has_sc ? clipped_rect(S.sc, P.w, P.h) : (VkRect2D){{0, 0}, {P.w, P.h}};
 }
 
-static void draw(const p_draw *dw, const p_draw_idx *di) {
+static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_index) {
     g_nwb = 0;
     if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
     if (!S.bst[0]) SKIP(0);
@@ -2476,10 +2476,9 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (S.bst[2] || S.bst[3] || S.bst[4]) RED_ONCE(32, "geometry / tessellation stages are bound: not drawn with them yet");
     if (vk_skip() & SK_DRAW) SKIP(4);
     if (!vs || !vs->mod || (fs && !fs->mod)) SKIP(1);
-    if (di && !di->ind && di->count > 0) cpu_ready(di->ibuf, (uint64_t)di->count * (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4));
+    if (di && di->count) cpu_ready(di->ibuf, (uint64_t)(uint32_t)di->count * (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4));
     shader_cpu_ready(vs, 0); shader_cpu_ready(fs, 1);
     if (!pass_begin()) SKIP(2);
-    if ((dw && dw->ind) || (di && di->ind)) { RED_ONCE(30, "indirect draws are not implemented yet"); SKIP(3); }
     int prim = dw ? dw->prim : di->prim;
     if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP || prim == NVN_DRAW_PRIMITIVE_PATCHES) { RED_ONCE(31, "primitive %d not implemented yet", prim); SKIP(4); }
     if (!prepare_storage(&vs, &fs)) SKIP(6);
@@ -2530,10 +2529,10 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     const uint8_t *isrc = di ? (const uint8_t *)(uintptr_t)di->ibuf : NULL;
     #define IDX(i) (isz == 1 ? isrc[i] : isz == 2 ? ((const uint16_t *)isrc)[i] : ((const uint32_t *)isrc)[i])
     int64_t vlo = 0, vhi = -1;
-    if (dw) { vlo = dw->first; vhi = (int64_t)dw->first + dw->count - 1; }
-    else if (di->count > 0) {
+    if (dw) { vlo = (uint32_t)dw->first; vhi = vlo + (uint32_t)dw->count - 1; }
+    else if (di->count) {
         uint32_t lo = UINT32_MAX, hi = 0, restart = isz == 1 ? 0xff : isz == 2 ? 0xffff : 0xffffffffu;
-        for (int32_t i = 0; i < di->count; i++) { uint32_t v = IDX(i); if (v == restart) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
+        for (uint32_t i = 0; i < (uint32_t)di->count; i++) { uint32_t v = IDX(i); if (v == restart) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
         if (lo <= hi) { vlo = (int64_t)lo + di->base_vertex; vhi = (int64_t)hi + di->base_vertex; }
     }
     if (vhi < vlo) { g_stat_draws++; return; }
@@ -2541,7 +2540,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (vs->draw_push) {
         // The guest sees its original indices even though Vulkan fetches from
         // a compact buffer starting at vlo. InstanceIndex remains native.
-        int32_t values[] = {dw ? dw->first : di->base_vertex, (int32_t)g_draw_base_instance, 0, (int32_t)vlo};
+        int32_t values[] = {dw ? dw->first : di->base_vertex, (int32_t)g_draw_base_instance, (int32_t)draw_index, (int32_t)vlo};
         vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof values, values);
     }
     uint32_t used = 0, ext[16] = {0};
@@ -2586,7 +2585,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
             vkCmdBindIndexBuffer(cb, C->ring, o, VK_INDEX_TYPE_UINT32);
             count=out;
         } else {
-            VkDeviceSize o = copy_in(di->ibuf, (uint64_t)di->count * isz, 16); if (o == VK_WHOLE_SIZE) return;
+            VkDeviceSize o = copy_in(di->ibuf, (uint64_t)(uint32_t)di->count * isz, 16); if (o == VK_WHOLE_SIZE) return;
             vkCmdBindIndexBuffer(cb, C->ring, o, isz == 1 ? VK_INDEX_TYPE_UINT8_EXT : isz == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
         }
     }
@@ -2601,6 +2600,65 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     g_pass_shader_writes |= mark_image_writes(0);
     if (fs) g_pass_shader_writes |= mark_image_writes(1);
     g_stat_draws++;
+}
+// CPU range staging and primitive conversion need the actual vertex/index
+// bounds. Resolve only the bytes those operations consume, in submission order.
+static int read_draw_args(uint64_t address, void *out, size_t size) {
+    if (!address || address > UINT64_MAX-size || !mtl_addr(address,size,NULL,NULL)) {
+        RED_ONCE(30,"indirect draw arguments are outside a registered buffer"); return 0;
+    }
+    cpu_ready(address,size);
+    memcpy(out,(const void *)(uintptr_t)address,size);
+    return 1;
+}
+static void draw(const p_draw *dw, const p_draw_idx *di) {
+    if (dw && dw->prim == DM_PRIM_MESH_TASKS) { RED_ONCE(31,"mesh task draws require mesh stage replay"); return; }
+    uint64_t args = dw ? dw->ind : di->ind;
+    uint64_t counter = dw ? dw->mdi_cnt : di->mdi_cnt;
+    uint32_t index = (uint32_t)(dw ? dw->mdi_i : di->mdi_i);
+    if (counter) {
+        uint32_t live;
+        if (!read_draw_args(counter,&live,sizeof live) || index >= live) return;
+    }
+    if (!args) { draw_direct(dw,di,index); return; }
+    if (dw) {
+        VkDrawIndirectCommand a;
+        if (!read_draw_args(args,&a,sizeof a) || !a.vertexCount || !a.instanceCount) return;
+        p_draw direct={.prim=dw->prim,.first=(int32_t)a.firstVertex,.count=(int32_t)a.vertexCount,
+            .instances=(int32_t)a.instanceCount,.base_instance=(int32_t)a.firstInstance};
+        draw_direct(&direct,NULL,index);
+    } else {
+        VkDrawIndexedIndirectCommand a;
+        if (!read_draw_args(args,&a,sizeof a) || !a.indexCount || !a.instanceCount) return;
+        if (di->itype < 0 || di->itype > 2) return;
+        uint64_t offset = (uint64_t)a.firstIndex << di->itype;
+        uint64_t bytes = (uint64_t)a.indexCount << di->itype;
+        if (!di->ibuf || offset > UINT64_MAX-di->ibuf || !mtl_addr(di->ibuf+offset,bytes,NULL,NULL)) {
+            RED_ONCE(30,"indirect index range is outside a registered buffer"); return;
+        }
+        p_draw_idx direct={.prim=di->prim,.itype=di->itype,.ibuf=di->ibuf+offset,
+            .count=(int32_t)a.indexCount,.instances=(int32_t)a.instanceCount,
+            .base_vertex=a.vertexOffset,.base_instance=(int32_t)a.firstInstance};
+        draw_direct(NULL,&direct,index);
+    }
+}
+static void draw_multi(const p_multi_draw *m) {
+    uint32_t live;
+    if (m->max <= 0 || !m->ind || !read_draw_args(m->cnt,&live,sizeof live)) return;
+    if (live > (uint32_t)m->max) live=(uint32_t)m->max;
+    uint64_t args=m->ind;
+    for (uint32_t i=0; i<live; i++) {
+        if (m->itype < 0) {
+            p_draw item={.prim=m->prim,.ind=args,.mdi_i=(int32_t)i};
+            draw(&item,NULL);
+        } else {
+            p_draw_idx item={.prim=m->prim,.itype=m->itype,.ibuf=m->ibuf,.ind=args,.mdi_i=(int32_t)i};
+            draw(NULL,&item);
+        }
+        uint64_t next=args+(uint64_t)m->stride;
+        if ((m->stride >= 0 && next < args) || (m->stride < 0 && next > args)) break;
+        args=next;
+    }
 }
 // Resolve the 12 argument bytes at execution time. A shader may supply just X,
 // with Y and Z initialized by the CPU. A current submission's ring is live
@@ -3345,6 +3403,7 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_SET_SAMP_POOL: S.samp_base = nvn_dpool_base(((const p_set_pool *)a)->pool, 0); break;
             case OP_CLEAR_COLOR: if (!conditional_skip) clear_color((const p_clear_color *)a); break;
             case OP_CLEAR_DS: if (!conditional_skip) clear_ds((const p_clear_ds *)a); break;
+            case OP_MULTI_DRAW: if (!conditional_skip) draw_multi((const p_multi_draw *)a); break;
             case OP_DRAW: { p_draw t; if (!conditional_skip) draw(draw_rec(a, h.size, &t), NULL); break; }
             case OP_DRAW_IDX: { p_draw_idx t; if (!conditional_skip) draw(NULL, draw_idx_rec(a, h.size, &t)); break; }
             case OP_DISPATCH: dispatch((const p_dispatch *)a); break;

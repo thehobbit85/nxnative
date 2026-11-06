@@ -13,6 +13,6 @@ void main() {
     bool ok=c0.rows[0x640/16].y==base_instance && c0.rows[0x640/16].x==0 &&
             uintBitsToFloat(c0.rows[0x610/16].x)==2047 &&
             gl_BaseInstanceARB==expected.value.x && gl_BaseVertexARB==expected.value.y &&
-            gl_DrawIDARB==0 && instance>=0 && instance<2 && vertex>=0 && vertex<3;
+            gl_DrawIDARB==expected.value.w && instance>=0 && instance<2 && vertex>=0 && vertex<3;
     color=ok ? vec4(0,1,0,1) : vec4(1,0,0,1);
 }
