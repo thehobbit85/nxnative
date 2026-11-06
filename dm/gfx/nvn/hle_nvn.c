@@ -3143,31 +3143,29 @@ static int write_region_linear(const tex_t *t, unsigned level, unsigned layer, c
 static int write_region_mirror(const tex_t *t, unsigned level, unsigned layer, const NVNcopyRegion *r, const uint8_t *src, size_t row, int bw, int bh, int bpb) {
     return (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET) ? write_region_linear : write_region_bl)(t, level, layer, r, src, row, bw, bh, bpb);
 }
-static void publish_cpu_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r,
-                               const uint8_t *src, size_t row, size_t img) {
-#ifdef DM_NVN_VULKAN
-    if (dm_vk_write_owned_texels(t, level, layer0, r, src, row, img)) return;
-#endif
-    mtl_tex_cpu_written(t);
-}
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
+    if (r->width <= 0 || r->height <= 0 || nz < 1) return;
+    size_t wb = ((size_t)r->width + bw - 1) / bw * bpb, hb = ((size_t)r->height + bh - 1) / bh;
+    if (!row) row = wb;
+    if (row < wb || row > SIZE_MAX / hb) return;
+    if (!img) img = row * hb;
+    if (img < (hb - 1) * row + wb || img > SIZE_MAX / (unsigned)nz) return;
+#ifdef DM_NVN_VULKAN
+    dm_vk_write_owned_texels(t, level, layer0, r, src, row, img);
+#endif
     if (!is3d) {
-        size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
         dm_guest_write_prepare(t->mem, t->L.size);
         int ok = 1;
-        for (int z = 0; z < nz && ok; z++) ok = !write_region_mirror(t, level, layer0 + (unsigned)(r->zoffset + z), r, src + (size_t)z * img0, row0, bw, bh, bpb);
-        if (ok) { publish_cpu_texels(t, level, layer0, r, src, row0, img0); return; }
+        for (int z = 0; z < nz && ok; z++) ok = !write_region_mirror(t, level, layer0 + (unsigned)(r->zoffset + z), r, src + (size_t)z * img, row, bw, bh, bpb);
+        if (ok) { mtl_tex_cpu_written(t); return; }
     }
     uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
-    size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (size_t)(r->height + bh - 1) / bh;
-    if (!row) row = wb;
-    if (!img) img = row * hb;
     uint8_t *lin = malloc(lp * lr * lz); if (!lin) die("WriteTexels allocation failed");
     dm_guest_write_prepare(t->mem, t->L.size);
     // when the region is exactly the whole level (2D) every texel is overwritten, so the old content need not be decoded first (movies write whole frames; saves one deswizzle per 1080p frame)
@@ -3180,7 +3178,7 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         if (!is3d || z == nz - 1) nvn_swizzle(&t->d, level, layer, lin, lp, t->mem);
     }
     free(lin);
-    publish_cpu_texels(t, level, layer0, r, src, row, img);
+    mtl_tex_cpu_written(t);
 }
 NVN(nvnTextureWriteTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const void *src) { write_texels(CTX(t), (const view_t *)v, r, src, 0, 0); }
 // with the source's row and image strides in bytes (0 = tightly packed, as WriteTexels)

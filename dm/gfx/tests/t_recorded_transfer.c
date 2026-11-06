@@ -203,9 +203,46 @@ static void check_packed_texels(NVNdevice *device, NVNqueue *queue, NVNmemoryPoo
     puts("Public depth/stencil texels: NVN packed planes, subregions and padded rows verified");
 }
 
+// Hold publication of the first row after the GPU fence. A CPU writer can
+// otherwise pass consistently just because the completion thread ran first.
+static struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    const void *row;
+    int entered, release;
+} publish_gate = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, 0, 0};
+
+static void delay_first_row(void *addr, size_t size) {
+    if (size != 28) return;
+    pthread_mutex_lock(&publish_gate.mutex);
+    if (addr == publish_gate.row) {
+        publish_gate.entered = 1;
+        pthread_cond_broadcast(&publish_gate.cond);
+        while (!publish_gate.release) pthread_cond_wait(&publish_gate.cond, &publish_gate.mutex);
+    }
+    pthread_mutex_unlock(&publish_gate.mutex);
+}
+
+static void *release_first_row(void *unused) {
+    (void)unused;
+    struct timespec end;
+    clock_gettime(CLOCK_REALTIME, &end);
+    end.tv_nsec += 200000000;
+    if (end.tv_nsec >= 1000000000) { end.tv_nsec -= 1000000000; ++end.tv_sec; }
+    pthread_mutex_lock(&publish_gate.mutex);
+    while (!publish_gate.release) {
+        if (pthread_cond_timedwait(&publish_gate.cond, &publish_gate.mutex, &end) == ETIMEDOUT) break;
+    }
+    publish_gate.release = 1;
+    pthread_cond_broadcast(&publish_gate.cond);
+    pthread_mutex_unlock(&publish_gate.mutex);
+    return NULL;
+}
+
 static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryPool *pool, uint8_t *storage) {
     enum { texture_offset = 0x4000, read_offset = 0xa000, w = 7, h = 3 };
     NVNbufferAddress addr = API(nvnMemoryPoolGetBufferAddress)(pool);
+    dm_guest_write_prep_register(delay_first_row);
     for (int rt = 0; rt < 2; ++rt) {
         NVNtextureBuilder tb;
         API(nvnTextureBuilderSetDefaults)(&tb);
@@ -245,11 +282,32 @@ static void check_linear_transfer(NVNdevice *device, NVNqueue *queue, NVNmemoryP
         float green[] = {0, 1, 0, 1};
         API(nvnCommandBufferClearColor)(&cb, 0, green, 15);
         commands = API(nvnCommandBufferEndRecording)(&cb);
+        pthread_mutex_lock(&publish_gate.mutex);
+        publish_gate.entered = publish_gate.release = 0;
+        publish_gate.row = storage + texture_offset;
+        pthread_mutex_unlock(&publish_gate.mutex);
         API(nvnQueueSubmitCommands)(queue, 1, &commands);
+        pthread_mutex_lock(&publish_gate.mutex);
+        while (!publish_gate.entered) pthread_cond_wait(&publish_gate.cond, &publish_gate.mutex);
+        pthread_mutex_unlock(&publish_gate.mutex);
+        pthread_t release;
+        assert(!pthread_create(&release, NULL, release_first_row, NULL));
+        NVNcopyRegion one = {2, 1, 0, 1, 1, 1};
+        uint8_t purple[] = {128, 0, 192, 255};
+        API(nvnTextureWriteTexels)(&tex, NULL, &one, purple);
+        pthread_mutex_lock(&publish_gate.mutex);
+        publish_gate.release = 1;
+        pthread_cond_broadcast(&publish_gate.cond);
+        pthread_mutex_unlock(&publish_gate.mutex);
+        assert(!pthread_join(release, NULL));
         API(nvnQueueFinish)(queue);
+        pthread_mutex_lock(&publish_gate.mutex);
+        publish_gate.row = NULL;
+        pthread_mutex_unlock(&publish_gate.mutex);
         uint8_t pixel[] = {0, 255, 0, 255};
         for (int y = 0; y < h; ++y) for (size_t x = 0; x < stride; ++x) {
             uint8_t want = x < 4 * w ? pixel[x % 4] : 0x5e;
+            if (y == 1 && x / 4 == 2) want = purple[x % 4];
             if (storage[texture_offset + stride * y + x] != want) die("linear GPU writeback flag %d row %d byte %zu", rt, y, x);
         }
         API(nvnCommandBufferFinalize)(&cb);
