@@ -196,7 +196,7 @@ def lower(data, optimizer=None):
         return data
     sites = COLLECTIVES | {224} if barriers else COLLECTIVES
     if (exchanges or barriers) and not spv_warp_flow.converged(code, sites):
-        if optimizer and any(opcode(inst) == SHUFFLE for inst in code):
+        if optimizer and exchanges:
             lifted = spv_warp_predicated.lift(data, optimizer)
             if lifted is not None:
                 # Recheck convergence, scratch and all subgroup requirements
