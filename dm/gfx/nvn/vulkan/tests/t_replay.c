@@ -35,6 +35,7 @@ static prog_t depth_copy_program = {.nstage = 2};
 static prog_t image_draw = {.nstage = 2}, image_compute = {.nstage = 1};
 static prog_t feedback_program = {.nstage = 2};
 static prog_t depth_clamp_program = {.nstage = 2};
+static prog_t offset_program = {.nstage=2};
 static prog_t depth_range_program = {.nstage = 2};
 static prog_t one_sample_program = {.nstage = 2};
 static prog_t blend_mrt_program = {.nstage = 2};
@@ -59,6 +60,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &divisor_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x56+stage; return 1; }
     if (p == &image_draw || p == &image_compute) { assert(stage < p->nstage); memset(key, 0, 8); key[7] = p == &image_compute ? 0x5f : stage ? 0x5e : 0x35; return 1; }
     if (p == &feedback_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x5d : 0x35; return 1; }
+    if (p == &offset_program) { assert(stage < 2); memset(key,0,8); key[7] = stage ? 0x53 : 0x60; return 1; }
     if (p == &depth_clamp_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x53 : 0x5c; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
@@ -114,15 +116,8 @@ static void clear_and_readback(NVNformat format) {
     assert(!mtl_tex_gpu_owned(tex.serial));
 }
 
-typedef struct { _Alignas(8) uint8_t bytes[4096]; size_t length; } list_t;
-static void put(list_t *list, unsigned op, const void *payload, size_t bytes) {
-    op_hdr header = {op, (uint32_t)((sizeof header + bytes + 7) & ~(size_t)7)};
-    assert(list->length + header.size <= sizeof list->bytes);
-    memcpy(list->bytes + list->length, &header, sizeof header);
-    if (bytes) memcpy(list->bytes + list->length + sizeof header, payload, bytes);
-    list->length += header.size;
-}
-#define RECORD(op, type, ...) put(&list, op, &(type){__VA_ARGS__}, sizeof(type))
+#include "../../../tests/recorded_list.h"
+#include "../../../tests/polygon_offset_corpus.h"
 
 // The payload width is in bytes. The recorder allows partial updates to either stage group's block.
 static void push_constants(list_t *list, int compute, uint16_t offset, const void *data, size_t size) {
@@ -2674,6 +2669,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
     if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
+    if (getenv("DM_VK_TEST_POLYGON_OFFSET")) { polygon_offset(&offset_program); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_CLAMP")) { depth_clamp(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
@@ -2737,6 +2733,7 @@ int main(void) {
     queue_viewport_origin();
     nested_depth_ranges();
     depth_clamp();
+    polygon_offset(&offset_program);
     scissored_attachment_clears();
     conditional_rendering();
     integer_attachment_clears();
