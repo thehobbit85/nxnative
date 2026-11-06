@@ -1,0 +1,4 @@
+stage ps
+b 0 cis 8192 tex_htab 7 352 samp_htab 8 runtime=1 pool_slot=0 soff=128 c2_or=1392 view=2 num=0
+b 1 ubo 1 cbuf 9 -1 - -1
+b 2 ssbo 1 htab_map 0 -1 - -1 ro

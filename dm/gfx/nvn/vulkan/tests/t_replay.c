@@ -15,6 +15,7 @@ uint64_t guest_ns(void) { return now_ns(); }
 static int test_nvn2;
 int dm_sdk_ounce(void) { return test_nvn2; }
 static prog_t program = {.nstage = 2}, numeric_program = {.nstage = 2}, bindless_program = {.nstage = 2}, compute = {.nstage = 1}, groups = {.nstage = 1};
+static prog_t table_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t warp_program[2] = {{.nstage = 1}, {.nstage = 1}};
 static prog_t driver_program = {.nstage = 1};
 static prog_t resource_shapes_program = {.nstage = 1};
@@ -66,6 +67,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &output_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x33 + stage; return 1; }
     if (p == &driver_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x32; return 1; }
     if (p == &compute || p == &groups) { assert(stage == 0); memset(key, 0, 8); key[7] = p == &groups ? 4 : 3; return 1; }
+    if (p == &table_program[0] || p == &table_program[1]) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x58 + (p == &table_program[1]) : 1; return 1; }
     if (p == &bindless_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x31 : 1; return 1; }
     assert((p == &program || p == &numeric_program) && stage < 2);
     memset(key, 0, 8); key[7] = (uint8_t)((p == &numeric_program ? 0x21 : 1) + stage); return 1;
@@ -316,7 +318,7 @@ static void initial_texture_content(void) {
     puts("CPU-uncached, flushed and inaccessible texture initial content and GPU ownership passed");
 }
 
-static void uniform_texture_array(void) {
+static void uniform_texture_array(int table) {
     tex_t textures[3], output = {.serial = 0x5100, .d = {.width = 4, .height = 4,
         .depth = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&output.d, &output.L);
@@ -329,15 +331,16 @@ static void uniform_texture_array(void) {
     samp_par edge = {0}, border = {.ws = NVN_WRAP_MODE_CLAMP_TO_BORDER, .border = {1,1,1,1}};
     mtl_reg_samp(257, &edge); mtl_reg_samp(258, &border); mtl_reg_samp(513, &border);
     mtl_reg_tex(4101, &textures[1], NULL);
-    uint64_t handles[80] = {0}, samplers[64] = {0};
+    uint64_t handles[8192] = {0}, samplers[8192] = {0};
+    unsigned index = table ? 8057 : 7;
     mtl_pool_add(handles, sizeof handles); mtl_pool_add(samplers, sizeof samplers);
-    handles[44 + 7] = 5; samplers[16 + 7] = 1u << 20;
+    handles[44 + index] = 5; samplers[16 + index] = 1u << 20;
     float positions[] = {-1,-1, 3,-1, -1,3}, white[] = {1,1,1,1};
     const uint8_t expected[][4] = {{0,255,0,255}, {0,0,255,255}, {0,0,0,255},
                                    {255,255,255,255}, {0,0,0,255}, {0,0,0,255}, {0,0,255,255}, {255,255,255,255}};
     for (int gpu=0;gpu<4;gpu++) for (int pass = 0; pass < 8; ++pass) {
         list_t list = {0}; uint8_t pixels[64] = {0};
-        struct { uint32_t index; float coordinate; uint32_t pad[2]; } parameters = {pass == 2 ? 31u : 7u, pass == 3 || pass == 7 ? 1.5f : 0.5f, {0}};
+        struct { uint32_t index; float coordinate; uint32_t pad[2]; } parameters = {pass == 2 ? index+24 : index, pass == 3 || pass == 7 ? 1.5f : 0.5f, {0}};
         for (int i = 0; i < 3; ++i) {
             p_clear_tex clear = {.tex = &textures[i], .r = {.width = 1, .height = 1, .depth = 1}, .mask = 15};
             clear.c.f[i == 0 ? 1 : i == 1 ? 2 : 0] = 1; clear.c.f[3] = 1;
@@ -345,19 +348,28 @@ static void uniform_texture_array(void) {
         }
         RECORD(OP_SET_TEX_POOL, p_set_pool, .pool = pass == 6 ? &alternate_texture_pool : &texture_pool);
         RECORD(OP_SET_SAMP_POOL, p_set_pool, .pool = pass == 7 ? &alternate_sampler_pool : &sampler_pool);
-        struct { uint64_t address, size, value; } update = {(uintptr_t)&handles[44 + 7], 8, pass >= 6 ? 5u : pass >= 4 ? 7u : pass ? 6u : 5u};
+        struct { uint64_t address, size, value; } update = {(uintptr_t)&handles[44 + index], 8, pass >= 6 ? 5u : pass >= 4 ? 7u : pass ? 6u : 5u};
+        if (table) { // Multiple logical indices can name the same physical descriptor.
+            handles[44+5]=5; samplers[16+5]=1u<<20;
+            handles[44+27]=5; samplers[16+27]=1u<<20;
+        }
+        if (table == 2) {
+            uint64_t fixed = (pass == 3 ? 258ull : pass == 7 ? 513ull : 257ull) << 20;
+            RECORD(OP_BIND_SAMP,p_bind_handles,.stage=1,.first=1,.n=1,.h={fixed});
+        }
         if (!gpu) put(&list, OP_UPDATE_UB, &update, sizeof update);
-        samplers[16 + 7] = (uint64_t)(pass == 3 ? 2 : 1) << 20;
+        samplers[16 + index] = (uint64_t)(pass == 3 ? 2 : 1) << 20;
+        if (table == 2) samplers[16+index] = 3ull << 20; // deliberately wrong in-table sampler
         if(gpu) {
             uint32_t values[4]={(uint32_t)update.value,0,0,0};
-            handles[44+7]=0;
+            handles[44+index]=0;
             push_constants(&list,1,240,values,sizeof values);
             RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&groups,.stages=0x20);
             RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=update.address,.size=8);
             RECORD(OP_DISPATCH,p_dispatch,.x=2,.y=1,.z=1);
-            values[0]=(uint32_t)samplers[16+7];samplers[16+7]=0;
+            values[0]=(uint32_t)samplers[16+index];samplers[16+index]=0;
             push_constants(&list,1,240,values,sizeof values);
-            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&samplers[16+7],.size=8);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&samplers[16+index],.size=8);
             RECORD(OP_DISPATCH,p_dispatch,.x=2,.y=1,.z=1);
             if(gpu==2) { put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);mtl_sub_commit();list.length=0; }
             if(gpu==3) {
@@ -366,12 +378,12 @@ static void uniform_texture_array(void) {
                 struct { uint64_t address,size;uint32_t value,pad; } part={update.address,4,(uint32_t)update.value,0};
                 put(&list,OP_UPDATE_UB,&part,sizeof part);
                 part.address+=4;part.value=0;put(&list,OP_UPDATE_UB,&part,sizeof part);
-                RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)&samplers[16+7],.size=8,.value=values[0]);
+                RECORD(OP_CLEAR_BUF,p_clear_buf,.addr=(uintptr_t)&samplers[16+index],.size=8,.value=values[0]);
             }
         }
         push_constants(&list, 0, 240, white, sizeof white);
         RECORD(OP_SET_RT, p_set_rt, .n = 1, .color = {&output});
-        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = &bindless_program, .stages = 3);
+        RECORD(OP_BIND_PROGRAM, p_bind_program, .prog = table ? &table_program[table-1] : &bindless_program, .stages = 3);
         va_st va = {.fmt = NVN_FORMAT_RG32F}; p_bind_vattr attr = {.n = 1};
         memcpy(attr.st, &va, sizeof va); put(&list, OP_BIND_VATTR, &attr, sizeof attr);
         RECORD(OP_BIND_VSTREAM, p_bind_vstream, .n = 1, .st = {{.stride = 8}});
@@ -395,7 +407,8 @@ static void uniform_texture_array(void) {
     mtl_reg_tex(4101, NULL, NULL);
     for (int i = 0; i < 3; ++i) { mtl_reg_tex(2053 + i, NULL, NULL); mtl_tex_release(&textures[i]); }
     mtl_tex_release(&output);
-    puts("Uniform texture arrays, GPU-produced handles, known overwrites without waits, pool bases and independent samplers passed");
+    if (table) puts("Sparse NVN uniform handle tables passed");
+    else puts("Uniform texture arrays, GPU-produced handles, known overwrites without waits, pool bases and independent samplers passed");
 }
 
 static void vertex_output_defaults(void) {
@@ -2103,7 +2116,7 @@ int main(void) {
     const char *buffers=getenv("DM_VK_TEST_BUFFERS");
     if(buffers) { if(!strcmp(buffers,"pools")) pool_ranges();else if(!strcmp(buffers,"large")) buffer_range_lifetime();else simultaneous_aliases();return 0; }
     pool_ranges();
-    if(getenv("DM_VK_TEST_HANDLES")) { uniform_texture_array();return 0; }
+    if(getenv("DM_VK_TEST_HANDLES")) { uniform_texture_array(0); uniform_texture_array(1); uniform_texture_array(2);return 0; }
     gpu_indices();
     graphics_storage_alias();
     simultaneous_aliases();
@@ -2119,7 +2132,7 @@ int main(void) {
     if (replay_features().textureCompressionASTC_LDR) uploaded_texture(NVN_FORMAT_RGBA_ASTC_4x4);
     else puts("ASTC upload sampling skipped: device lacks textureCompressionASTC_LDR");
     initial_texture_content();
-    uniform_texture_array();
+    uniform_texture_array(0); uniform_texture_array(1); uniform_texture_array(2);
     compute_driver_constants();
     many_resource_bindings();
     vertex_output_defaults();
