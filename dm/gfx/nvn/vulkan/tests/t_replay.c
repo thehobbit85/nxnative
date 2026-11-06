@@ -36,7 +36,7 @@ static prog_t depth_copy_program = {.nstage = 2};
 static prog_t image_draw = {.nstage = 2}, image_compute = {.nstage = 1};
 static prog_t feedback_program = {.nstage = 2};
 static prog_t depth_clamp_program = {.nstage = 2};
-static prog_t offset_program = {.nstage=2};
+static prog_t offset_program = {.nstage=2}, fill_program = {.nstage=2};
 static prog_t alpha_program[3] = {{.nstage=2},{.nstage=2},{.nstage=2}};
 static prog_t mixed_color_program={.nstage=2};
 static prog_t logic_program[2] = {{.nstage=2},{.nstage=2}};
@@ -68,6 +68,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &divisor_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x56+stage; return 1; }
     if (p == &image_draw || p == &image_compute) { assert(stage < p->nstage); memset(key, 0, 8); key[7] = p == &image_compute ? 0x5f : stage ? 0x5e : 0x35; return 1; }
     if (p == &feedback_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x5d : 0x35; return 1; }
+    if (p == &fill_program) { assert(stage < 2); memset(key,0,8); key[7] = stage ? 0x53 : 0x68; return 1; }
     if (p == &offset_program) { assert(stage < 2); memset(key,0,8); key[7] = stage ? 0x53 : 0x60; return 1; }
     if (p == &depth_clamp_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x53 : 0x5c; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
@@ -126,6 +127,7 @@ static void clear_and_readback(NVNformat format) {
 
 #include "../../../tests/recorded_list.h"
 #include "../../../tests/polygon_offset_corpus.h"
+#include "../../../tests/polygon_fill_corpus.h"
 #include "../../../tests/alpha_coverage_corpus.h"
 
 // The payload width is in bytes. The recorder allows partial updates to either stage group's block.
@@ -2684,6 +2686,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_VIEWPORT")) { queue_viewport_origin(); origin_facing(); return 0; }
     if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
+    if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features().fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_OFFSET")) { polygon_offset(&offset_program); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_CLAMP")) { depth_clamp(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
@@ -2749,6 +2752,7 @@ int main(void) {
     nested_depth_ranges();
     depth_clamp();
     polygon_offset(&offset_program);
+    polygon_fill(&fill_program,replay_features().fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME"));
     alpha_references();
     logic_operations();
     sparse_mrt_outputs();

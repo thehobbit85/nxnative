@@ -360,7 +360,7 @@ static void *completion_thread(void *a) {
 
 // ---------- Device ----------
 static int g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
-static int g_logic_op;
+static int g_logic_op, g_non_solid_fill;
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
 static int g_has_surface;
@@ -475,6 +475,8 @@ static void vk_init_(void) {
     g_depth_bias_clamp = f2.features.depthBiasClamp;
     if (getenv("DM_VK_NO_LOGIC_OP")) f2.features.logicOp = VK_FALSE;
     g_logic_op = f2.features.logicOp;
+    if (getenv("DM_VK_NO_WIREFRAME")) f2.features.fillModeNonSolid = VK_FALSE;
+    g_non_solid_fill = f2.features.fillModeNonSolid;
     f13.robustImageAccess = VK_FALSE;
     const char *ext[7]; uint32_t next = 0;
     g_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
@@ -1944,7 +1946,13 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.rasterizerDiscardEnable = k->rasterizer_discard;
     rs.depthClampEnable = k->depth_clamp;
-    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = (VkCullModeFlags)k->poly.cull; rs.frontFace = k->poly.front ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    // Metal maps NVN's LINE to wireframe and both FILL and POINT to solid.
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    if (k->poly.mode==NVN_POLYGON_MODE_LINE) {
+        if (g_non_solid_fill) rs.polygonMode=VK_POLYGON_MODE_LINE;
+        else RED_ONCE(116,"wireframe is unavailable on this device; drawing filled triangles");
+    }
+    rs.cullMode = (VkCullModeFlags)k->poly.cull; rs.frontFace = k->poly.front ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     if (k->origin_ll) rs.frontFace = rs.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     rs.depthBiasEnable = (k->poly.offset_en & NVN_POLYGON_OFFSET_ENABLE_FILL) != 0;
     rs.lineWidth = 1;
