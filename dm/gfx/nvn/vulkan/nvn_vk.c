@@ -2090,20 +2090,7 @@ static int bind_storage(VkDescriptorSet ds, const sbind *b, int stage) {
     vkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
     return 1;
 }
-static VkDescriptorSet write_set(shader_t *s, int stage) {
-    // Every statically used descriptor must be populated before submitting this pipeline.
-    for (int i = 0; i < s->nb; ++i) {
-        const sbind *b = &s->b[i];
-        if (b->type == BT_SIMG) continue;
-        if (is_texel(b) && b->count <= 32) continue;
-        if ((b->type == BT_CIS || b->type == BT_TEX) && b->count <= 32 && (b->kind == K_TEXU || b->kind == K_TEX)) continue;
-        if (b->type == BT_SAMP && b->count <= 32 && b->skind != S_NONE) continue;
-        if (b->count != 1 || (b->type != BT_UBO && b->type != BT_SSBO && b->type != BT_CIS)) {
-            RED_ONCE(22, "cannot populate descriptor %u type %d count %u (shader %s)", b->binding, b->type, b->count, s->key);
-            return VK_NULL_HANDLE;
-        }
-    }
-    memset(g_bound_images[stage], 0, sizeof g_bound_images[stage]);
+static VkDescriptorSet allocate_shader_set(const shader_t *s) {
     VkDescriptorSet ds; VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, C->dp, 1, &s->dsl};
     VkResult result = vkAllocateDescriptorSets(g_dev, &ai, &ds);
     if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
@@ -2122,6 +2109,23 @@ static VkDescriptorSet write_set(shader_t *s, int stage) {
         result = vkAllocateDescriptorSets(g_dev, &ai, &ds);
     }
     VKCHECK(result);
+    return ds;
+}
+static VkDescriptorSet write_set(shader_t *s, int stage) {
+    // Every statically used descriptor must be populated before submitting this pipeline.
+    for (int i = 0; i < s->nb; ++i) {
+        const sbind *b = &s->b[i];
+        if (b->type == BT_SIMG) continue;
+        if (is_texel(b) && b->count <= 32) continue;
+        if ((b->type == BT_CIS || b->type == BT_TEX) && b->count <= 32 && (b->kind == K_TEXU || b->kind == K_TEX)) continue;
+        if (b->type == BT_SAMP && b->count <= 32 && b->skind != S_NONE) continue;
+        if (b->count != 1 || (b->type != BT_UBO && b->type != BT_SSBO && b->type != BT_CIS)) {
+            RED_ONCE(22, "cannot populate descriptor %u type %d count %u (shader %s)", b->binding, b->type, b->count, s->key);
+            return VK_NULL_HANDLE;
+        }
+    }
+    memset(g_bound_images[stage], 0, sizeof g_bound_images[stage]);
+    VkDescriptorSet ds = allocate_shader_set(s);
     VkWriteDescriptorSet w[DM_VK_MAX_BINDINGS]; VkDescriptorBufferInfo bi[DM_VK_MAX_BINDINGS]; int nw = 0;
     for (int i = 0; i < s->nb; i++) {
         const sbind *b = &s->b[i];
@@ -2711,6 +2715,48 @@ static int depth_copy_scaled(vtex *s, vtex *d, const p_copy_t2t *c, uint32_t sl,
     }
     return 1;
 }
+// NVN depth downsampling selects sample zero. Reading it explicitly also
+// works on Vulkan 1.1 devices without a depth/stencil resolve extension.
+static void resolve_depth(const p_copy_t2t *c, vtex *src, vtex *dst, uint32_t sl, uint32_t sly, uint32_t dl, uint32_t dly) {
+    static const uint32_t code[] =
+#include "resolve_depth.frag.inc"
+    ;
+    static shader_t fragment = {.key = "resolve-depth", .stage = 1, .nb = 1, .b = {{.type = BT_TEX, .count = 1}}};
+    static VkPipelineLayout layout;
+    if (!layout) {
+        VkDescriptorSetLayoutBinding binding = {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo set = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 1, &binding};
+        VKCHECK(vkCreateDescriptorSetLayout(g_dev, &set, NULL, &fragment.dsl));
+        VkPushConstantRange push = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 2*sizeof(int32_t)};
+        VkPipelineLayoutCreateInfo info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &fragment.dsl, 1, &push};
+        VKCHECK(vkCreatePipelineLayout(g_dev, &info, NULL, &layout));
+    }
+    view_t view = {.set_levels=1,.base_level=sl,.nlevels=1,.set_layers=1,.min_layer=sly,.nlayers=1};
+    VkImageView source = tex_view(src,c->src,&view,1,VK_IMAGE_VIEW_TYPE_2D,VIEW_SAMPLED);
+    view.base_level=dl; view.min_layer=dly;
+    VkImageView destination = tex_view(dst,c->dst,&view,1,VK_IMAGE_VIEW_TYPE_2D,VIEW_ATTACHMENT);
+    if (!source || !destination) { RED_ONCE(96, "depth resolve requires a sampled source and renderable destination"); return; }
+    pso_key k = {.vs=clear_vertex(), .fs=clear_shader(&fragment,code,sizeof code), .prim=NVN_DRAW_PRIMITIVE_TRIANGLES,
+                 .df=dst->f.f, .stencil=dst->f.stencil, .ds={.dt=1,.dw=1,.df=NVN_COMPARE_FUNC_ALWAYS}};
+    VkPipeline pipeline = pso_get(&k,layout);
+    if (!pipeline) return;
+    VkDescriptorSet set = allocate_shader_set(&fragment);
+    VkDescriptorImageInfo image = {.imageView=source,.imageLayout=VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,NULL,set,0,0,1,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,&image};
+    vkUpdateDescriptorSets(g_dev,1,&write,0,NULL);
+    VkExtent2D size = {dst->w >> dl ? dst->w >> dl : 1, dst->h >> dl ? dst->h >> dl : 1};
+    rp_desc pass = {.dv=destination,.df=dst->f.f,.stencil=dst->f.stencil,.dl=VK_ATTACHMENT_LOAD_OP_LOAD,.sl=VK_ATTACHMENT_LOAD_OP_LOAD,
+                    .w=size.width,.h=size.height,.layout=VK_IMAGE_LAYOUT_GENERAL};
+    begin_tracked_pass(&pass);
+    VkRect2D rect = {{c->dr.xoffset,c->dr.yoffset},{(uint32_t)c->dr.width,(uint32_t)c->dr.height}};
+    clear_draw_state(pipeline,rect,size,0);
+    vkCmdBindDescriptorSets(C->cb,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,1,&set,0,NULL);
+    int32_t offset[] = {c->sr.xoffset-c->dr.xoffset,c->sr.yoffset-c->dr.yoffset};
+    vkCmdPushConstants(C->cb,layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof offset,offset);
+    vkCmdDraw(C->cb,3,1,0,0);
+    rp_end(C->cb);
+    barrier_all(C->cb);
+}
 static void copy_t2t(const p_copy_t2t *c) {
     if (vk_skip() & SK_T2T) return;
     if (g_plog) LOG("plog:  t2t %llu (fmt %#x) %dx%d → %llu (fmt %#x) %dx%d flags %#x", (unsigned long long)c->src->serial, c->src->d.format, c->sr.width, c->sr.height, (unsigned long long)c->dst->serial, c->dst->d.format, c->dr.width, c->dr.height, c->flags);
@@ -2730,11 +2776,12 @@ static void copy_t2t(const p_copy_t2t *c) {
     }
     int same = c->sr.width == c->dr.width && c->sr.height == c->dr.height;
     if (s->samples != d->samples) {
-        if (!(c->flags & DM_COPY_RESOLVE) || s->samples <= 1 || d->samples != 1 || depth ||
+        if (!(c->flags & DM_COPY_RESOLVE) || s->samples <= 1 || d->samples != 1 ||
             !same || s->f.f != d->f.f) {
             RED_ONCE(96, "unsupported resolve between formats %d/%d with %u/%u samples", s->f.f,d->f.f,s->samples,d->samples);
             return;
         }
+        if (depth) { resolve_depth(c,s,d,sl,sly,dl,dly); return; }
         VkImageResolve region = {{VK_IMAGE_ASPECT_COLOR_BIT, sl, sly, 1}, {c->sr.xoffset,c->sr.yoffset,0},
                                  {VK_IMAGE_ASPECT_COLOR_BIT, dl, dly, 1}, {c->dr.xoffset,c->dr.yoffset,0},
                                  {(uint32_t)c->sr.width,(uint32_t)c->sr.height,1}};

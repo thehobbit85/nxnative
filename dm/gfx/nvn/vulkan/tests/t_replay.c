@@ -819,6 +819,48 @@ static void multisample_colors(void) {
     puts("Vulkan 4x resolve averaged one red sample and preserved the adjacent array layer");
 }
 
+static void multisample_depth(void) {
+    tex_t source = {.serial=0x8122,.d={.width=8,.height=8,.depth=1,.levels=1,.samples=4,
+        .target=NVN_TEXTURE_TARGET_2D_MULTISAMPLE,.format=NVN_FORMAT_DEPTH32F}};
+    tex_t resolved = source, output = source;
+    resolved.serial++; resolved.d.samples=1; resolved.d.target=NVN_TEXTURE_TARGET_2D;
+    output.serial+=2; output.d.samples=1; output.d.target=NVN_TEXTURE_TARGET_2D; output.d.format=NVN_FORMAT_RGBA8;
+    nvn_tex_layout(&source.d,&source.L); nvn_tex_layout(&resolved.d,&resolved.L); nvn_tex_layout(&output.d,&output.L);
+    samp_par nearest = {0};
+    mtl_reg_tex(909,&resolved,NULL); mtl_reg_samp(909,&nearest);
+    list_t list = {0};
+    uint8_t pixels[8][8][4];
+    RECORD(OP_CLEAR_TEX, p_clear_tex, .tex=&resolved,.r={.width=8,.height=8,.depth=1},.mask=15,.c.f={0});
+    RECORD(OP_SET_RT, p_set_rt, .depth=&source);
+    RECORD(OP_CLEAR_DS, p_clear_ds, .depth=.75f,.depth_mask=1);
+    RECORD(OP_SCISSOR, p_scissor, .x=2,.y=1,.w=3,.h=4);
+    RECORD(OP_CLEAR_DS, p_clear_ds, .depth=.5f,.depth_mask=1);
+    // Change sample 0 in even columns and sample 1 in odd columns. Neither
+    // minimum, maximum nor average can reproduce sample zero throughout.
+    RECORD(OP_SCISSOR, p_scissor, .w=8,.h=8);
+    p_bind_state state={.kind=5};
+    ds_st ds={.dt=1,.dw=1,.df=NVN_COMPARE_FUNC_ALWAYS};
+    memcpy(state.bytes,&ds,sizeof ds); put(&list,OP_BIND_STATE,&state,sizeof state);
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&one_sample_program,.stages=3);
+    RECORD(OP_DRAW, p_draw, .prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_COPY_T2T, p_copy_t2t, .src=&source,.dst=&resolved,.flags=DM_COPY_RESOLVE,
+           .sr={.width=8,.height=8,.depth=1},.dr={.width=8,.height=8,.depth=1});
+    RECORD(OP_SET_RT, p_set_rt, .n=1,.color={&output});
+    RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&depth_copy_program,.stages=3);
+    RECORD(OP_BIND_TEX1, p_bind_tex1, .stage=1|BIND_TEX1_NOBASE,.slot=0,.h=909|(909ull<<20));
+    RECORD(OP_DRAW, p_draw, .prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+    RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&output,.src=(uintptr_t)pixels,.r={.width=8,.height=8,.depth=1});
+    put(&list,OP_END,NULL,0); mtl_queue_activate(0x8122);
+    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    for (int y=0;y<8;y++) for (int x=0;x<8;x++) {
+        int expected = x % 2 == 0 ? 64 : x>=2 && x<5 && y>=1 && y<5 ? 128 : 191;
+        if (abs((int)pixels[y][x][0]-expected)>1) die("sample-zero depth resolve at %d,%d: %u",x,y,pixels[y][x][0]);
+    }
+    mtl_reg_tex(909,NULL,NULL); mtl_tex_release(&source); mtl_tex_release(&resolved); mtl_tex_release(&output);
+    mtl_queue_forget(0x8122);
+    puts("Vulkan depth resolve selects sample zero, including a scissored depth clear");
+}
+
 static void texture_clear_regions(void) {
     for (int volume = 0; volume < 2; volume++) {
         tex_t texture = {.serial=0x8119 + volume, .d={.width=8,.height=8,.depth=4,.levels=2,
@@ -1672,7 +1714,7 @@ static void native_warp_width(unsigned available) {
 int main(void) {
     if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
-    if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); return 0; }
+    if (getenv("DM_VK_TEST_MSAA")) { multisample_colors(); multisample_depth(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
     if (width) { native_warp_width((unsigned)atoi(width)); return 0; }
@@ -1731,5 +1773,6 @@ int main(void) {
     integer_attachment_clears();
     texture_clear_regions();
     multisample_colors();
+    multisample_depth();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
