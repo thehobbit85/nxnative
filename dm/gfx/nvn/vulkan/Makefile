@@ -73,9 +73,9 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/000000000000004d.spv $(B)/shaders/000000000000004e.spv $(B)/shaders/000000000000004f.spv $(B)/shaders/0000000000000050.spv $(B)/shaders/0000000000000051.spv \
          $(B)/shaders/0000000000000052.spv $(B)/shaders/0000000000000053.spv $(B)/shaders/0000000000000054.spv $(B)/shaders/0000000000000055.spv \
          $(B)/shaders/0000000000000056.spv $(B)/shaders/0000000000000057.spv $(B)/shaders/0000000000000058.spv $(B)/shaders/0000000000000059.spv $(B)/shaders/000000000000005a.spv $(B)/shaders/000000000000005b.spv \
-         $(B)/shaders/be5c489b134ec370.spv $(B)/shaders/9954f8894fadd956.spv
+         $(B)/shaders/be5c489b134ec370.spv $(B)/shaders/9954f8894fadd956.spv $(B)/shaders/ee208c00f07f83b4.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
-# Public recorder keys hash a 0x880-byte guest control section and one code byte (0 or 1).
+# Public recorder keys hash a 0x880-byte guest control section and one code byte per fixture stage.
 $(B)/shaders/be5c489b134ec370.spv: $(B)/shaders/0000000000000035.spv
 	cp $< $@
 	cp $(<:.spv=.vk.txt) $(@:.spv=.vk.txt)
@@ -83,6 +83,10 @@ $(B)/shaders/9954f8894fadd956.spv: tests/public_bindings.frag
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	printf 'stage ps\nb 0 cis 1 tex 3 -1 samp_tex 3\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/ee208c00f07f83b4.spv: tests/public_bindings.frag
+	mkdir -p $(B)/shaders
+	$(GLSLC) --target-env=vulkan1.1 -DSEPARATE $< -o $@
+	printf 'stage ps\nb 0 tex 1 tex 131 -1 - -1 view=1 num=0\nb 1 samp 1 samp 7 -1 - -1\n' > $(@:.spv=.vk.txt)
 $(B)/shaders/000000000000005b.spv: tests/packed_streams.vert tests/packed_streams.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
