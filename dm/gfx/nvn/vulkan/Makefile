@@ -51,7 +51,11 @@ resource-interface-fixture: fixture
 	python3 ../../../android/tests/resource_shapes_fixture.py $(abspath $(B))/resource-many many
 	cp $(B)/resource-many/export/00000000feed6100.spv $(B)/resource-many/export/00000000feed6100.vk.txt $(B)/shaders/
 	python3 tests/stamp_shader_contract.py $(B)/shaders
-replay-test: fixture
+$(B)/t_present_rect: tests/t_present_rect.c present_rect.h
+	mkdir -p $(B)
+	$(CC) $(CFLAGS) $< -lm -o $@
+replay-test: fixture $(B)/t_present_rect
+	$(B)/t_present_rect
 	DM_VK_DIR="$(abspath $(B))/shaders" $(B)/t_replay
 fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000000002.spv \
          $(B)/shaders/0000000000000003.spv $(B)/shaders/0000000000000004.spv $(B)/shaders/0000000000000021.spv $(B)/shaders/0000000000000022.spv $(B)/shaders/0000000000000031.spv $(B)/shaders/0000000000000032.spv \
@@ -94,7 +98,7 @@ $(B)/shaders/0000000000000040.spv: tests/buffer.comp tests/buffer.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/buffer.vk.txt $(@:.spv=.vk.txt)
-$(B)/t_replay: $(SRC) tests/resource_shapes.inc ../../../android/tests/resource_shapes_cases.h tests/driver_c2.inc tests/split_handle.inc tests/uniform_storage.inc spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h shader_contract.h warp_width.h geometry_contract.h meshstage_contract.h uniform_address.h split_handle.h driver_c2.h driver_c0.h resource_contract.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
+$(B)/t_replay: $(SRC) tests/resource_shapes.inc ../../../android/tests/resource_shapes_cases.h tests/driver_c2.inc tests/split_handle.inc tests/uniform_storage.inc spv_vertex_fetch.h spv_scaled32.h spv_output_defaults.h spv_draw_parameters.h spv_buffer_bias.h shader_contract.h warp_width.h geometry_contract.h meshstage_contract.h uniform_address.h present_rect.h split_handle.h driver_c2.h driver_c0.h resource_contract.h ../nvn_obj.h ../nvn_mtl.h ../nvn_timestamp.h ../dmsh_abi.h ../nvn_dirty.h ../nvn_tex.h ../nvn_refl.h ../../../third_party/bcdec/bcdec.h $(GAME_H) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) $(SRC) -o $@ $(LIBS)
 $(GAME_H): | profile
