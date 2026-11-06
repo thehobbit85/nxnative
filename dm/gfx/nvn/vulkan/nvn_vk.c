@@ -1661,6 +1661,7 @@ static struct {
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     visibility_counter *visibility;
     p_prim_restart restart; p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; p_scissor sc; int has_sc, rasterizer_discard;
+    uint8_t vp_sw[16][4];   // component selectors XOR the identity, as recorded by NVN
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
     float blend_color[4]; int64_t copy_stride, copy_img_stride;
     int tex_base, samp_base;
@@ -2570,7 +2571,14 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     // Vulkan's positive height implements NVN lower-left; upper-left needs a flip.
     float x = 0, y = 0, w = (float)P.w, h = (float)P.h;
     if (S.has_vp) { x = S.vp[0][0]; y = S.vp[0][1]; w = S.vp[0][2]; h = S.vp[0][3]; }
-    VkViewport vv = {x, g_origin_ll ? y : y + h, w, g_origin_ll ? h : -h, S.dr[0], S.dr[1]};
+    const uint8_t *sw = S.vp_sw[0];
+    int flip_y = !sw[0] && sw[1] == 1 && !sw[2] && !sw[3];
+    if (!flip_y && (sw[0] || sw[1] || sw[2] || sw[3]))
+        RED_ONCE(108, "viewport swizzle %u,%u,%u,%u not implemented (drawn unswizzled)", sw[0], sw[1] ^ 2, sw[2] ^ 4, sw[3] ^ 6);
+    // Mirroring the viewport about its centre also reverses facing; leave
+    // the queue's winding and the scissor unchanged, as on Metal.
+    int positive_height = g_origin_ll ^ flip_y;
+    VkViewport vv = {x, positive_height ? y : y + h, w, positive_height ? h : -h, S.dr[0], S.dr[1]};
     vkCmdSetViewport(cb, 0, 1, &vv);
     VkRect2D sc = render_scissor();
     vkCmdSetScissor(cb, 0, 1, &sc);
@@ -3493,6 +3501,14 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
             case OP_RAST_DISCARD: S.rasterizer_discard = ((const p_rast_discard *)a)->on != 0; break;
             case OP_VIEWPORTS: { const p_viewports *b = (const p_viewports *)a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
+            case OP_VP_SWIZZLE: {
+                const p_vp_swizzle *b = (const p_vp_swizzle *)a;
+                if (h.size < sizeof h + offsetof(p_vp_swizzle, sw) || (unsigned)b->first > 16 ||
+                    (unsigned)b->n > 16u - (unsigned)b->first || h.size < sizeof h + offsetof(p_vp_swizzle, sw) + 4u * b->n)
+                    die("Vulkan: invalid viewport swizzle record");
+                if (b->n) memcpy(S.vp_sw[b->first], b->sw, 4u * b->n);
+                break;
+            }
             case OP_DEPTH_RANGE: { const p_depth_range *b = (const p_depth_range *)a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
             case OP_PUSH_CONST: {
                 const p_push_const *b = (const p_push_const *)a;

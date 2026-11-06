@@ -1104,6 +1104,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** the whole picture upside down (Absolum's title logo and "Press Any Button" mirrored top to bottom); a red-reporting stub for `nvnCommandBufferSetViewportSwizzles`.
 - **Cause:** the game keeps NVN's lower-left window origin (handled as for Link's Awakening, [Lower-left window origin](#lower-left-window-origin)) and, twice a frame, sets viewport 0's swizzle with `nvnCommandBufferSetViewportSwizzles` to (x, −y, z, w), which negates clip-space y: how a renderer with OpenGL heritage flips its picture.
 - **Fix:** the swizzle is recorded (`OP_VP_SWIZZLE`) and applied at the draw as a viewport flipped about its centre, the same mapping. Facing is decided after the swizzle on the GPU as in Metal, so the winding stays. Other swizzles (axis exchanges, negated x / z / w) give a red line and are drawn unswizzled.
+- **Vulkan verification.** The Android replay test compares all 256 combinations of device origin, queue origin, winding, triangle orientation, face culling and Y swizzle against the Metal expectations. A second draw moves viewport zero across the target and checks the scissored pixels on both sides after changing an inactive viewport.
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (FNA3D's NVN driver, `FNA3D_Driver_NVN.cpp`).
 
 ### Black shapes on sprites when Unreal's GPU work runs late
