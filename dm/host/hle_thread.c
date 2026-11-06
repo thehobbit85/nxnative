@@ -1044,8 +1044,17 @@ void dm_guest_sleep_ns(int64_t ns) {
 // A host hook's bounded wait on a host condition variable (m held), a sleep to a garbage collector's pause like dm_guest_sleep_ns; the caller checks its condition and the clock
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns) {
     thr_t *me = pthread_getspecific(g_keythr); if (me) me->sleeping = 1;
+#ifdef __ANDROID__
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_sec += ns / 1000000000;
+    ts.tv_nsec += ns % 1000000000;
+    if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+    pthread_cond_timedwait_monotonic_np(c, m, &ts);
+#else
     struct timespec ts = {ns / 1000000000, ns % 1000000000};
     pthread_cond_timedwait_relative_np(c, m, &ts);
+#endif
     if (me) me->sleeping = 0;
 }
 int svc_thread(int num, uint64_t *regs) {

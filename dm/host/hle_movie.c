@@ -512,7 +512,11 @@ static void md_pump_ev(mdec_t *d, int ev) { if (MD_AUDIO(d)) md_event(d, ev); el
 static void md_pump(mdec_t *d);
 static void *md_pump_thread(void *arg) {
     mdec_t *d = arg;
+#ifdef __ANDROID__
+    pthread_setname_np(pthread_self(), "dm movie pump");
+#else
     pthread_setname_np("dm movie pump");
+#endif
     pthread_mutex_lock(&d->pkm);
     for (;;) {
         while (!d->pk_go && !d->pk_quit) pthread_cond_wait(&d->pkc, &d->pkm);
