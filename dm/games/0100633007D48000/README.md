@@ -50,6 +50,8 @@ The separate asset deployment uses the merged RomFS image directly. Synthetic AP
 
 ## Found on this game
 
+- The Android exporter reads the shared compiler's [packed reflection](../../../docs/reference/shaders.md#android-capture-reads-packed-reflection).
+
 - [Vulkan geometry exports preserve logical stage and output bounds](../../../docs/reference/shaders.md#vulkan-geometry-exports-preserve-logical-stage-and-output-bounds): Android preparation and portable export preserve all native, compute and reader variants of `665c16a6dc819f9e`; Vulkan geometry replay remains open.
 
 - [Vulkan vertex capture matches Metal's raw output words](../../../docs/reference/shaders.md#vulkan-vertex-capture-matches-metals-raw-output-words): resolved a false live-output detection caused by a literal SPIR-V instruction number matching an output variable ID; Android geometry replay remains open.
