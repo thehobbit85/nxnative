@@ -11,7 +11,7 @@ CFLAGS += -O1 -Wall -Werror -Wno-unused-function
 REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_alpha.h spv_fragment_outputs.h
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
 $(B)/t_replay: ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/logic.inc
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
@@ -80,7 +80,7 @@ fixture: $(B)/t_replay $(B)/shaders/0000000000000001.spv $(B)/shaders/0000000000
          $(B)/shaders/98076dcbe001b8d9.spv $(B)/shaders/0f505d6a0231e82b.spv $(B)/shaders/ea957dc56076e186.spv $(B)/shaders/000000000000005c.spv $(B)/shaders/000000000000005d.spv \
          $(B)/shaders/000000000000005e.spv $(B)/shaders/000000000000005f.spv $(B)/shaders/c7bfdf71f80f7dd4.spv $(B)/shaders/0000000000000060.spv \
          $(B)/shaders/0000000000000061.spv $(B)/shaders/0000000000000062.spv $(B)/shaders/0000000000000063.spv \
-         $(B)/shaders/0000000000000064.spv $(B)/shaders/0000000000000065.spv $(B)/shaders/0000000000000066.spv
+         $(B)/shaders/0000000000000064.spv $(B)/shaders/0000000000000065.spv $(B)/shaders/0000000000000066.spv $(B)/shaders/0000000000000067.spv
 	python3 tests/stamp_shader_contract.py $(B)/shaders
 # Public recorder keys hash a 0x880-byte guest control section and one code byte per fixture stage.
 $(B)/shaders/be5c489b134ec370.spv: $(B)/shaders/0000000000000035.spv
@@ -181,9 +181,9 @@ $(B)/shaders/0000000000000063.spv: tests/alpha.frag
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 -DINTEGER_TARGET=1 $< -o $@
 	echo 'stage ps' > $(@:.spv=.vk.txt)
-$(B)/shaders/0000000000000064.spv $(B)/shaders/0000000000000065.spv: tests/logic.frag
+$(B)/shaders/0000000000000064.spv $(B)/shaders/0000000000000065.spv $(B)/shaders/0000000000000067.spv: tests/logic.frag
 	mkdir -p $(B)/shaders
-	$(GLSLC) --target-env=vulkan1.1 -DUINT_TARGET=$(if $(filter %65.spv,$@),1,0) $< -o $@
+	$(GLSLC) --target-env=vulkan1.1 -DUINT_TARGET=$(if $(filter %65.spv,$@),1,0) -DMIXED_TARGET=$(if $(filter %67.spv,$@),1,0) $< -o $@
 	printf 'stage ps\nb 0 ubo 1 cbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
 $(B)/shaders/0000000000000053.spv: tests/depth_range.frag
 	mkdir -p $(B)/shaders
@@ -363,6 +363,16 @@ $(B)/t_buffer_bias: tests/t_buffer_bias.c spv_buffer_bias.h
 buffer-bias-check: $(B)/t_buffer_bias $(B)/shaders/0000000000000043.spv
 	$(B)/t_buffer_bias $(B)/shaders/0000000000000043.spv $(B)/buffer-biased.spv
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/buffer-biased.spv
+
+$(B)/t_integer_outputs: tests/t_integer_outputs.c spv_integer_outputs.h spv_fragment_outputs.h spv_alpha.h
+	mkdir -p $(B)
+	$(BUILD_CC) -O1 -g -Wall -Werror $(BUILD_CFLAGS) $< -o $@
+.PHONY: integer-outputs-check
+integer-outputs-check: $(B)/t_integer_outputs $(B)/shaders/0000000000000067.spv
+	$(B)/t_integer_outputs $(B)/shaders/0000000000000067.spv $(B)/integer-mixed.spv 2 0 1
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/integer-mixed.spv
+	$(B)/t_integer_outputs $(B)/shaders/0000000000000067.spv $(B)/integer-signed.spv 1 2 0
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/integer-signed.spv
 
 $(B)/shaders/000000000000004d.spv: tests/split_handle.frag tests/split_combined.vk.txt
 	mkdir -p $(B)/shaders

@@ -19,6 +19,7 @@
 #include "spv_vertex_fetch.h"
 #include "spv_output_defaults.h"
 #include "spv_alpha.h"
+#include "spv_integer_outputs.h"
 #include "spv_draw_parameters.h"
 #include "spv_buffer_bias.h"
 #include "shader_contract.h"
@@ -1175,6 +1176,11 @@ typedef struct vin_module {
     VkShaderModule module;
     struct vin_module *next;
 } vin_module;
+typedef struct fragment_variant {
+    uint8_t uint_mask, sint_mask, alpha;
+    VkShaderModule module;
+    struct fragment_variant *next;
+} fragment_variant;
 typedef struct shader shader_t;
 struct shader {
     shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
@@ -1182,7 +1188,7 @@ struct shader {
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
     char key[17]; int stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
-    VkShaderModule mod, alpha_mod; int tried_alpha; fragment_outputs outputs; VkDescriptorSetLayout dsl;
+    VkShaderModule mod; fragment_variant *fragment_variants; fragment_outputs outputs; VkDescriptorSetLayout dsl;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
     sbind b[DM_VK_MAX_BINDINGS]; int nb; uint8_t vin[32]; uint32_t vin_mask; int pack_locations;   // vin: component type per vertex input location (0 float, 1 uint, 2 int)
     uint8_t *c1; uint32_t c1_len; uint32_t tg[3];
@@ -1609,7 +1615,7 @@ static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BI
     shader_t *s=malloc(sizeof *s);
     if(!s) return NULL;
     *s=*base;s->buffer_variants=NULL;s->vertex_variants=NULL;s->cpp=VK_NULL_HANDLE;s->cpl=VK_NULL_HANDLE;s->mod=VK_NULL_HANDLE;
-    s->alpha_mod=VK_NULL_HANDLE; s->tried_alpha=0;
+    s->fragment_variants=NULL;
     memcpy(s->buffer_bias,bias,sizeof s->buffer_bias);
     s->next_buffer_variant=base->buffer_variants;base->buffer_variants=s;
     char path[1024];size_t bytes;
@@ -1624,23 +1630,35 @@ static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BI
     return s;
 }
 static VkDescriptorSetLayout g_empty_dsl;
-static VkShaderModule alpha_module(shader_t *fs) {
-    if (fs->tried_alpha) return fs->alpha_mod;
-    fs->tried_alpha=1;
+static VkShaderModule fragment_module(shader_t *fs, uint8_t uint_mask, uint8_t sint_mask, int alpha) {
+    if (!uint_mask && !sint_mask && !alpha) return fs->mod;
+    for (fragment_variant *v=fs->fragment_variants;v;v=v->next)
+        if (v->uint_mask==uint_mask && v->sint_mask==sint_mask && v->alpha==alpha) return v->module;
+    fragment_variant *v=calloc(1,sizeof *v);
+    if (!v) return VK_NULL_HANDLE;
+    v->uint_mask=uint_mask; v->sint_mask=sint_mask; v->alpha=alpha;
+    v->next=fs->fragment_variants; fs->fragment_variants=v;
     char path[1024]; size_t bytes=0, words=0;
     snprintf(path,sizeof path,"%s/%s.spv",g_vkdir,fs->key);
     uint32_t *spv=read_file(path,&bytes);
-    if (spv) spv=stage_spv(spv,&bytes,fs); // includes this variant's SSBO offsets and descriptor set
+    if (spv) spv=stage_spv(spv,&bytes,fs); // retain this variant's SSBO offsets and descriptor set
     const char *reason="cannot reload fragment shader";
-    uint32_t *variant=spv ? spv_alpha(spv,bytes/4,&words,&reason) : NULL;
-    free(spv);
-    if (variant) {
-        VkShaderModuleCreateInfo mi={VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,NULL,0,words*4,variant};
-        VkResult r=vkCreateShaderModule(g_dev,&mi,NULL,&fs->alpha_mod); free(variant);
-        if (r==VK_SUCCESS) return fs->alpha_mod;
-        fs->alpha_mod=VK_NULL_HANDLE; reason="driver rejected fragment variant";
+    if (spv && (uint_mask || sint_mask)) {
+        uint32_t *typed=spv_integer_outputs(spv,bytes/4,uint_mask,sint_mask,&words,&reason);
+        free(spv); spv=typed; bytes=words*4;
     }
-    LOG("[RED] vk: alpha test unavailable for %s (%s)",fs->key,reason);
+    if (spv && alpha) {
+        uint32_t *tested=spv_alpha(spv,bytes/4,&words,&reason);
+        free(spv); spv=tested; bytes=words*4;
+    }
+    if (spv) {
+        VkShaderModuleCreateInfo mi={VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,NULL,0,bytes,spv};
+        VkResult r=vkCreateShaderModule(g_dev,&mi,NULL,&v->module); free(spv);
+        if (r==VK_SUCCESS) return v->module;
+        v->module=VK_NULL_HANDLE; reason="driver rejected fragment variant";
+    }
+    LOG("[RED] vk: fragment %s with uint mask %#x, sint mask %#x, alpha test %d unavailable (%s)",
+        fs->key,uint_mask,sint_mask,alpha,reason);
     return VK_NULL_HANDLE;
 }
 typedef struct { shader_t *vs, *fs; VkPipelineLayout pl; } prog_vk;
@@ -1829,7 +1847,7 @@ static void set_rt(const p_set_rt *r) {
 
 // Pipelines, cached by everything they are built from
 typedef struct {
-    shader_t *vs, *fs; int prim;
+    shader_t *vs, *fs; VkShaderModule fragment_module; int prim;
     va_st attr[32]; int nattr; vs_st stream[16]; int nstream, split_instances;
     blend_st blend[8]; color_st color; chmask_st chmask; ds_st ds; poly_st poly; int samples, logic, alpha_to_coverage;
     VkFormat cf[8]; int nc; VkFormat df; int stencil, origin_ll, rasterizer_discard, depth_clamp;
@@ -1853,7 +1871,7 @@ static VkCompareOp cop(int f) { return f >= 1 && f <= 8 ? (VkCompareOp)(f - 1) :
 static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, k->vs->mod, "main", NULL},
                                              {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, k->fs ? k->fs->mod : VK_NULL_HANDLE, "main", NULL}};
-    if (k->color.alpha_func) st[1].module=k->fs->alpha_mod;
+    if (k->fragment_module) st[1].module=k->fragment_module;
     if (k->vs->subgroup.requiredSubgroupSize) st[0].pNext = &k->vs->subgroup;
     if (k->fs && k->fs->subgroup.requiredSubgroupSize) st[1].pNext = &k->fs->subgroup;
     VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[32]; uint32_t nvb = 0, nva = 0; uint32_t used = 0;
@@ -2629,7 +2647,21 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     // Like the Metal side entry, all compare functions share one pipeline.
     // Integer color 0 bypasses the test; a depth-only pass may still discard.
     k.color.alpha_func = fs && S.color.alpha_func && S.color.alpha_func!=NVN_ALPHA_FUNC_ALWAYS &&
-        clear_color_type(P.cf[0])==CLEAR_FLOAT && alpha_module(fs);
+        clear_color_type(P.cf[0])==CLEAR_FLOAT && fs->outputs.alpha_var;
+    if (fs) {
+        uint8_t uint_mask=0, sint_mask=0;
+        for (int i=0;i<k.nc;++i) if (fs->outputs.targets & (1u<<i)) {
+            enum clear_type target=clear_color_type(k.cf[i]);
+            if (target==CLEAR_UINT) uint_mask|=1u<<i;
+            if (target==CLEAR_SINT) sint_mask|=1u<<i;
+        }
+        uint_mask &= ~fs->outputs.uint_targets; sint_mask &= ~fs->outputs.sint_targets;
+        k.fragment_module=fragment_module(fs,uint_mask,sint_mask,k.color.alpha_func);
+        if (!k.fragment_module && k.color.alpha_func) {
+            k.color.alpha_func=0; k.fragment_module=fragment_module(fs,uint_mask,sint_mask,0);
+        }
+        if (!k.fragment_module) SKIP(1);
+    }
     color_operations(&k);
     if (P.dt) { k.df = P.dt->f.f; k.stencil = P.dt->f.stencil; k.ds = S.ds; }
     if (g_plog) LOG("plog:  draw vs %s fs %s n %u depth t%d w%d f%d stencil %d f%d ops %d/%d/%d ref %u vm %#x wm %#x blend %#x mask %#x cull %d", vs->key, fs ? fs->key : "-", dw ? dw->count : di->count,
