@@ -6,15 +6,18 @@ static id<MTLComputePipelineState> g_tf_prepare;
 static void tf_state_gpu(const p_tf_state *b) {
     rp_end(); ubd_land();
     if (!g_tf_state) { g_tf_state = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared]; res_add(g_tf_state); }
+    // The internal shared buffer participates in the same blit hazards as guest
+    // memory. A resume immediately followed by a save reads its new contents.
+    uint64_t state = (uintptr_t)g_tf_state.contents;
     if (b->what == 0) {
         id<MTLBuffer> buf; size_t off = arena_alloc(32, &buf);
         uint32_t initial[8] = {0,0,0,0,0,1,0,0}; memcpy((uint8_t *)buf.contents + off, initial, 32);
-        enc_b_copy_buffer(blit(), buf, off, g_tf_state, 0, 32);
+        enc_b_copy_buffer(blit_buf(0,0,state,state+32), buf, off, g_tf_state, 0, 32);
     } else if (b->ctl) {
         void *buffer; uint64_t off, gpu;
         if (!mtl_gpu_addr(b->ctl, 32, &buffer, &off, &gpu)) { RED_ONCE(103, "transform feedback control buffer is outside a memory pool"); return; }
-        if (b->what == 3) enc_b_copy_buffer(blit_buf(b->ctl,b->ctl+32,0,0), (__bridge id<MTLBuffer>)buffer, off, g_tf_state, 0, 32);
-        else { enc_b_copy_buffer(blit_buf(0,0,b->ctl,b->ctl+32), g_tf_state, 0, (__bridge id<MTLBuffer>)buffer, off, 32); pend_add(b->ctl,32,4); }
+        if (b->what == 3) enc_b_copy_buffer(blit_buf(b->ctl,b->ctl+32,state,state+32), (__bridge id<MTLBuffer>)buffer, off, g_tf_state, 0, 32);
+        else { enc_b_copy_buffer(blit_buf(state,state+32,b->ctl,b->ctl+32), g_tf_state, 0, (__bridge id<MTLBuffer>)buffer, off, 32); pend_add(b->ctl,32,4); }
     }
     g_wr_epoch++; g_mdx_epoch++;
 }

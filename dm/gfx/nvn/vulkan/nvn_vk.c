@@ -148,7 +148,23 @@ static VkDescriptorPool descriptor_pool_new(const uint32_t *need) {
     VkDescriptorPool pool; VKCHECK(vkCreateDescriptorPool(g_dev, &dpi, NULL, &pool)); return pool;
 }
 #include "visibility.h"
-enum { POST_VISIBILITY_ADD = 4, POST_VISIBILITY_RESET };
+// Each NVN queue owns its feedback cursors. A queued submission keeps the
+// buffer alive if the guest finalizes its queue before the GPU has finished.
+typedef struct {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    uint64_t last_submission;
+    _Atomic unsigned refs;
+} feedback_control;
+enum { FEEDBACK_BYTES = 8 * sizeof(uint32_t) };
+static void feedback_release(feedback_control *control) {
+    if (control && atomic_fetch_sub(&control->refs, 1) == 1) {
+        vkDestroyBuffer(g_dev, control->buffer, NULL);
+        vkFreeMemory(g_dev, control->memory, NULL);
+        free(control);
+    }
+}
+enum { POST_VISIBILITY_ADD = 4, POST_VISIBILITY_RESET, POST_FEEDBACK_RELEASE };
 typedef struct { int kind; void *dst; uint32_t mode, v; uint64_t addr; uint32_t type; const uint8_t *src; size_t n;
                  visibility_counter *visibility; const uint64_t *samples; } post_t;   // kind 1 event, 2 counter, 3 copy ring → guest
 typedef struct vtex vtex;
@@ -324,6 +340,7 @@ static void ctx_complete(ctx_t *c) {
         }
         else if (p->kind == POST_VISIBILITY_ADD) p->visibility->samples += *p->samples;
         else if (p->kind == POST_VISIBILITY_RESET) p->visibility->samples = 0;
+        else if (p->kind == POST_FEEDBACK_RELEASE) feedback_release(p->dst);
         visibility_release(p->visibility);
     }
     c->npost = 0;
@@ -1837,6 +1854,8 @@ static struct {
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     visibility_counter *visibility;
+    feedback_control *feedback;
+    int feedback_active;
     p_prim_restart restart; p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; p_scissor sc; int has_sc, rasterizer_discard;
     uint8_t vp_sw[16][4];   // component selectors XOR the identity, as recorded by NVN
     uint8_t push[2][DMSH_PUSH_SIZE];   // graphics stages share one NVN2 c[24], compute has its own
@@ -2753,6 +2772,7 @@ static void color_operations(pso_key *k) {
 }
 
 static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_index) {
+    if (S.feedback_active) RED_ONCE(101, "transform feedback varying capture is unavailable");
     g_nwb = 0;
     if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
     if (!S.bst[0]) SKIP(0);
@@ -3519,6 +3539,45 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     VkDeviceSize offset = copy_in(src, n, 16);
     if (offset != VK_WHOLE_SIZE) buffer_written(dst, n, C->ring, offset, C->ringp + offset);
 }
+static void feedback_state(const p_tf_state *op) {
+    S.feedback_active = op->what == 0 || op->what == 3;
+    if (op->what != 0) {
+        if (!op->ctl) return;
+        if (!mtl_addr(op->ctl, FEEDBACK_BYTES, NULL, NULL)) {
+            RED_ONCE(103, "transform feedback control is outside a registered memory pool");
+            return;
+        }
+    }
+    if (!S.feedback) {
+        S.feedback = calloc(1, sizeof *S.feedback);
+        if (!S.feedback) die("Vulkan: cannot allocate feedback control");
+        atomic_init(&S.feedback->refs, 1);
+        S.feedback->buffer = buf_new(FEEDBACK_BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &S.feedback->memory, NULL);
+    }
+    feedback_control *control = S.feedback;
+    if (control->last_submission != g_fence + 1) {
+        control->last_submission = g_fence + 1;
+        atomic_fetch_add(&control->refs, 1);
+        post_add((post_t){.kind=POST_FEEDBACK_RELEASE, .dst=control});
+    }
+    pass_end();
+    barrier_all(C->cb);
+    if (op->what == 0) {
+        const uint32_t initial[8] = {0, 0, 0, 0, 0, 1, 0, 0};
+        vkCmdUpdateBuffer(C->cb, control->buffer, 0, sizeof initial, initial);
+    } else if (op->what == 3) {
+        VkDeviceSize offset = copy_in(op->ctl, FEEDBACK_BYTES, 4);
+        VkBufferCopy region = {offset, 0, FEEDBACK_BYTES};
+        vkCmdCopyBuffer(C->cb, C->ring, control->buffer, 1, &region);
+    } else {
+        VkDeviceSize offset = ring_alloc(FEEDBACK_BYTES, 4);
+        VkBufferCopy region = {0, offset, FEEDBACK_BYTES};
+        vkCmdCopyBuffer(C->cb, control->buffer, C->ring, 1, &region);
+        buffer_written(op->ctl, FEEDBACK_BYTES, C->ring, offset, C->ringp + offset);
+    }
+    barrier_all(C->cb);
+}
 static void buffer_update(uint64_t addr, const void *data, uint64_t n) {
     if (!n) return;
     gw_wait_prior(addr, n);
@@ -3584,6 +3643,7 @@ void mtl_queue_forget(uint64_t serial) {
     if (!*at) return;
     queue_state *q = *at; *at = q->next;
     visibility_release(g_active_queue == q ? S.visibility : q->s.visibility);
+    feedback_release(g_active_queue == q ? S.feedback : q->s.feedback);
     if (g_active_queue == q) { g_active_queue = NULL; state_defaults(); memset(&P, 0, sizeof P); }
     free(q);
 }
@@ -3614,6 +3674,7 @@ static void mtl_exec_(const uint8_t *p) {
                 mtl_sub_counter(addr, (uint32_t)type);
                 break;
             }
+            case OP_TF_STATE: feedback_state((const p_tf_state *)a); break;
             case OP_RENDER_COND: condition_set((const p_render_cond *)a); break;
             case OP_RESET_COUNTER: {
                 uint64_t type; memcpy(&type, a, sizeof type);

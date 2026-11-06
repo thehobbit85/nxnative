@@ -522,6 +522,7 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 #include "recorded_sampler_reduction.h"
 #include "recorded_sparse_texture.h"
 #include "recorded_query_lifetime.h"
+#include "recorded_feedback_control.h"
 
 int main(void) {
     load_bootstrap();
@@ -675,6 +676,7 @@ int main(void) {
     check_sampler_reduction(&device, &queue, NVN_FORMAT_RGBA8);
     check_sparse_textures(&device, &queue);
     check_query_lifetimes(&device,&queue,&qb);
+    check_feedback_controls(&device, &queue);
 #ifdef DM_VK_PUBLIC_BINDINGS
     check_linear_transfer(&device, &queue, &pool, storage);
     check_packed_texels(&device, &queue, &pool, storage);
