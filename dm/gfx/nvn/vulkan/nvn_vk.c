@@ -3821,9 +3821,13 @@ void mtl_set_origin_lower_left(int on) { g_origin_ll = on; }
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_frame(uint64_t f) { (void)f; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
+#include "public_texels.inc"
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
-    (void)t; (void)level; (void)layer0; (void)row; RED_ONCE(80, "CPU texture reads return zeros");
-    memset(dst, 0, img * (size_t)(r->depth > 0 ? r->depth : 1));
+    if (!mtl_tex_gpu_owned(t->serial)) {
+        if (!storage_texels(t, level, layer0, r, dst, row, img)) RED_ONCE(80, "CPU texture storage read outside its region or unsupported layout");
+        return;
+    }
+    RED_ONCE(80, "CPU read of a GPU-owned texture is unavailable");
 }
 
 // Guest extents for checked address lookup and open-ended storage bindings.

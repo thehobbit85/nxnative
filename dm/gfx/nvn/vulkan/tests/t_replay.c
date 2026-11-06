@@ -41,6 +41,9 @@ static prog_t origin_program = {.nstage = 2};
 static prog_t draw_parameters_program = {.nstage = 2};
 static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
 static const void *flushed_storage;
+// The raw replay fixture has no shared recorder or sparse guest page tables.
+int nvn_sparse_pool(const void *pool) { (void)pool; return 0; }
+uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t addr, uint64_t size) { abort(); }
 int nvn_flushed(const void *p, uint64_t n) { (void)n; return p == flushed_storage; }
 int nvn_dpool_base(const void *pool, int texture) {
     return texture && pool == &texture_pool ? 2048 : texture && pool == &alternate_texture_pool ? 4096 :
