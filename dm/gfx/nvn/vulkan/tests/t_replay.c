@@ -1943,16 +1943,19 @@ static void image_order(void) {
 
 // Each output reads both attachments as they stood before this draw. The
 // attachments deliberately share their format and dimensions.
-static void attachment_feedback(void) {
+enum { FEEDBACK_WIDTHS = 19, FEEDBACK_RUNS = FEEDBACK_WIDTHS * 2 };
+typedef struct { uint8_t slot[2][FEEDBACK_WIDTHS * 2 * 4]; } feedback_pixels;
+
+static uint64_t feedback_submit(unsigned run, unsigned width, feedback_pixels *pixels) {
     tex_t target[2];
-    uint8_t pixels[2][16], initial[][4] = {{16,32,48,255},{64,80,96,255}};
+    uint8_t initial[][4] = {{16,32,48,255},{64,80,96,255}};
     list_t list = {0};
     for (int i=0; i<2; ++i) {
-        target[i] = (tex_t){.serial=0xb190+i, .d={.width=2,.height=2,.depth=1,.levels=1,
+        target[i] = (tex_t){.serial=0x8fb000+2*run+i, .d={.width=width,.height=2,.depth=1,.levels=1,
             .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
         nvn_tex_layout(&target[i].d,&target[i].L);
         mtl_reg_tex(981+i, &target[i], NULL);
-        p_clear_tex clear = {.tex=&target[i], .r={.width=2,.height=2,.depth=1},.mask=15};
+        p_clear_tex clear = {.tex=&target[i], .r={.width=width,.height=2,.depth=1},.mask=15};
         for (int c=0; c<4; ++c) clear.c.f[c] = initial[i][c] / 255.0f;
         put(&list, OP_CLEAR_TEX, &clear, sizeof clear);
         RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=1,.slot=i,.h=981+i);
@@ -1963,19 +1966,40 @@ static void attachment_feedback(void) {
     RECORD(OP_BARRIER,uint32_t,NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_INVALIDATE_TEXTURE_BIT);
     RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
     for (int i=0; i<2; ++i)
-        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target[i],.src=(uintptr_t)pixels[i],.r={.width=2,.height=2,.depth=1});
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target[i],.src=(uintptr_t)pixels->slot[i],.r={.width=width,.height=2,.depth=1});
     put(&list, OP_END, NULL, 0);
-    mtl_queue_activate(0xb190);
-    mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
-    const uint8_t want[][4] = {{32,64,16,255},{16,32,64,255}};
+    mtl_sub_begin(); mtl_exec(list.bytes);
+    uint64_t fence = mtl_sub_commit();
     for (int i=0; i<2; ++i) {
-        for (int p=0; p<4; ++p) {
-            uint8_t *got = pixels[i]+4*p;
-            if (memcmp(got,want[i],4)) die("feedback slot %d pixel %d: %u/%u/%u expected %u/%u/%u",
-                2*i,p,got[0],got[1],got[2],want[i][0],want[i][1],want[i][2]);
-        }
         mtl_reg_tex(981+i, NULL, NULL);
         mtl_tex_release(&target[i]);
+    }
+    return fence;
+}
+
+static void attachment_feedback(void) {
+    // Change dimensions past the snapshot cache capacity, reuse the guest
+    // descriptor IDs immediately, and only wait after all submissions.
+    feedback_pixels results[FEEDBACK_RUNS] = {0};
+    const uint8_t want[][4] = {{32,64,16,255},{16,32,64,255}};
+    void mtl_fb_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *);
+    uint64_t before, after, reuse, tile, wait;
+    mtl_fb_stats(&before, &reuse, &tile, &wait);
+    uint64_t fence = 0;
+    mtl_queue_activate(0xb190);
+    for (unsigned run=0; run<FEEDBACK_RUNS; ++run)
+        fence = feedback_submit(run, 1 + run % FEEDBACK_WIDTHS, &results[run]);
+    assert(mtl_wait(fence, UINT64_MAX));
+    mtl_fb_stats(&after, &reuse, &tile, &wait);
+    if (after-before != 4*FEEDBACK_RUNS)
+        die("expected %u feedback snapshots, got %llu", 4*FEEDBACK_RUNS, (unsigned long long)(after-before));
+    for (unsigned run=0; run<FEEDBACK_RUNS; ++run) {
+        unsigned width = 1 + run % FEEDBACK_WIDTHS;
+        for (int i=0; i<2; ++i) for (unsigned p=0; p<2*width; ++p) {
+            const uint8_t *got = results[run].slot[i]+4*p;
+            if (memcmp(got,want[i],4)) die("feedback run %u width %u slot %d pixel %u: %u/%u/%u expected %u/%u/%u",
+                run,width,2*i,p,got[0],got[1],got[2],want[i][0],want[i][1],want[i][2]);
+        }
     }
     mtl_queue_forget(0xb190);
     puts("Vulkan sparse MRT feedback preserved both attachments across the guest barrier");

@@ -3,11 +3,17 @@
 // needs the same for 3D World and Captain Toad, profile key feedback_snap). Here it holds for every game: the pass is split before such a draw, the attachment's level and layer
 // copied into a snapshot image (reused between draws of the same format and size), and the draw samples the snapshot. Not done when the draw's colour mask leaves that attachment alone, nor again
 // while no draw has written the attachment since its last snapshot. A 3D attachment is left as it was
-typedef struct { vtex *image; uint64_t serial; uint32_t lv, ly; } fbsnap_t;
+typedef struct { vtex *image; uint64_t serial, last_use; uint32_t lv, ly; } fbsnap_t;
 static fbsnap_t g_fbs[16]; static int g_nfbs;
+static uint64_t g_fb_clock;
 static fbsnap_t *g_fb_active[8];
 static unsigned g_fb_mask;
-static uint64_t g_fb_copies;
+static _Atomic uint64_t g_fb_copies, g_fb_reuses;
+
+void mtl_fb_stats(uint64_t *copies, uint64_t *reuses, uint64_t *tile, uint64_t *wait) {
+    *copies = g_fb_copies; *reuses = g_fb_reuses;
+    *tile = 0; *wait = 0;
+}
 
 // Only a single sampled mip and layer that overlaps the active attachment
 // needs substitution. Other mip/layer views read the original guest image.
@@ -39,7 +45,7 @@ static fbsnap_t *fb_cached(int slot) {
 }
 static fbsnap_t *fb_snap_for(vtex *v, int i, fbsnap_t *e, unsigned reserved) {
     uint32_t lv = P.clv[i], ly = P.cly[i], w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
-    if (e && !P.cwr[i]) return e;
+    if (e && !P.cwr[i]) { g_fb_reuses++; return e; }
     // Equal-shaped sources sampled by the same draw need distinct images.
     if (!e) for (int k = 0; k < g_nfbs; ++k) {
         if (!(reserved & (1u << k)) && g_fbs[k].image->f.f == v->f.f && g_fbs[k].image->samples == v->samples && g_fbs[k].image->w == w && g_fbs[k].image->h == h) {
@@ -47,7 +53,6 @@ static fbsnap_t *fb_snap_for(vtex *v, int i, fbsnap_t *e, unsigned reserved) {
         }
     }
     if (!e) {
-        if (g_nfbs == 16) { RED_ONCE(40, "same-pass feedback: more than 16 snapshot shapes; the draw samples its attachment directly"); return NULL; }
         VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
             VK_IMAGE_TYPE_2D, v->f.f, {w,h,1}, 1, 1, v->samples, VK_IMAGE_TILING_OPTIMAL,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
@@ -61,7 +66,15 @@ static fbsnap_t *fb_snap_for(vtex *v, int i, fbsnap_t *e, unsigned reserved) {
         snap->blk = img_mem(mr, &snap->m, &snap->moff); snap->msize = mr.size;
         VKCHECK(vkBindImageMemory(g_dev, img, snap->m, snap->moff));
         to_general(C->cb, img, snap->aspect);
-        e = &g_fbs[g_nfbs++]; e->image = snap;
+        if (g_nfbs < (int)(sizeof g_fbs / sizeof *g_fbs)) e = &g_fbs[g_nfbs++];
+        else {
+            // At most eight entries are reserved by this draw. Descriptors
+            // already recorded can still reference the retired image's views.
+            for (int k = 0; k < g_nfbs; ++k)
+                if (!(reserved & (1u << k)) && (!e || g_fbs[k].last_use < e->last_use)) e = &g_fbs[k];
+            tex_free(e->image);
+        }
+        e->image = snap;
         LOG("vk: same-pass feedback: snapshot %ux%u format %d made (serial %llu)", w, h, (int)v->f.f, (unsigned long long)v->serial);
     }
     VkImageCopy c = {{VK_IMAGE_ASPECT_COLOR_BIT, lv, ly, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {w, h, 1}};
@@ -102,6 +115,7 @@ static void fb_prepare(shader_t *fs) {   // before a draw (pass open): find the 
     for (int a = 0; a < P.n; ++a) if (want & (1u << a)) {
         fbsnap_t *e = fb_snap_for(P.ct[a], a, cached[a], reserved);
         if (!e) continue;
+        e->last_use = ++g_fb_clock;
         reserved |= 1u << (e - g_fbs);
         g_fb_active[a] = e;
         g_fb_mask |= 1u << a;
