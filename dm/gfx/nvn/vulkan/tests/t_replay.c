@@ -785,6 +785,47 @@ static void conditional_rendering(void) {
     puts("Vulkan conditional clears and draws matched all four modes, pending timestamps and unknown reports");
 }
 
+static void texture_clear_regions(void) {
+    for (int volume = 0; volume < 2; volume++) {
+        tex_t texture = {.serial=0x8119 + volume, .d={.width=8,.height=8,.depth=4,.levels=2,
+            .target=volume ? NVN_TEXTURE_TARGET_3D : NVN_TEXTURE_TARGET_2D_ARRAY, .format=NVN_FORMAT_RGBA8}};
+        nvn_tex_layout(&texture.d, &texture.L);
+        list_t list = {0};
+        uint8_t pixels[2][4*8*8*4] = {{0}};
+        for (int lv=0; lv<2; lv++) {
+            int size = 8 >> lv, layers = volume ? 4 >> lv : 4;
+            RECORD(OP_CLEAR_TEX, p_clear_tex, .tex=&texture, .has_view=1, .view={.set_levels=1,.base_level=lv,.nlevels=1},
+                   .r={.width=size,.height=size,.depth=layers}, .mask=15, .c.f={1,0,1,1});
+        }
+        // ClearTexture has its own (clipped) region and ignores the current
+        // draw scissor. Unsigned values are interpreted in the selected view.
+        RECORD(OP_SCISSOR, p_scissor, .x=7,.y=7,.w=1,.h=1);
+        int first = volume ? 1 : 2, count = volume ? 1 : 2;
+        view_t alias = {.set_levels=1,.base_level=1,.nlevels=1, .set_layers=!volume,.min_layer=volume?0:1,
+                        .nlayers=volume?0:3, .set_format=1,.format=NVN_FORMAT_RGBA8UI};
+        RECORD(OP_CLEAR_TEX, p_clear_tex, .tex=&texture, .has_view=1,.view=alias,.is_uint=1,
+               .r={.xoffset=-1,.yoffset=1,.zoffset=1,.width=4,.height=2,.depth=count}, .mask=6,.c.u={9,39,71,0});
+        for (int lv=0; lv<2; lv++) {
+            int size = 8 >> lv, layers = volume ? 4 >> lv : 4;
+            RECORD(OP_COPY_T2B, p_copy_b2t, .tex=&texture, .has_view=1, .view={.set_levels=1,.base_level=lv,.nlevels=1},
+                   .r={.width=size,.height=size,.depth=layers}, .src=(uintptr_t)pixels[lv]);
+        }
+        put(&list, OP_END, NULL, 0); mtl_queue_activate(0x8119);
+        mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
+        for (int lv=0; lv<2; lv++) {
+            int size = 8 >> lv, layers = volume ? 4 >> lv : 4;
+            for (int z=0; z<layers; z++) for (int y=0; y<size; y++) for (int x=0; x<size; x++) {
+                int hit = lv == 1 && z >= first && z < first+count && x < 3 && y >= 1 && y < 3;
+                uint8_t expected[] = {255, hit ? 39 : 0, hit ? 71 : 255, 255};
+                if (memcmp(expected, &pixels[lv][4*((z*size+y)*size+x)], 4))
+                    die("texture clear volume %d level %d slice %d at %d,%d", volume,lv,z,x,y);
+            }
+        }
+        mtl_tex_release(&texture); mtl_queue_forget(0x8119);
+    }
+    puts("Vulkan texture clears preserve neighboring channels, pixels, array layers, volume slices and mip levels");
+}
+
 static void integer_attachment_clears(void) {
     tex_t target = {.serial = 0x8114, .d = {.width = 4, .height = 2, .depth = 1, .levels = 1,
         .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA32F}};
@@ -1595,7 +1636,7 @@ static void native_warp_width(unsigned available) {
 }
 
 int main(void) {
-    if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); depth_copies(); return 0; }
+    if (getenv("DM_VK_TEST_CLEAR_RECT")) { scissored_attachment_clears(); integer_attachment_clears(); texture_clear_regions(); depth_copies(); return 0; }
     if (getenv("DM_VK_TEST_RENDER_COND")) { assert(DM_GAME_RENDER_COND); conditional_rendering(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_RANGE")) { nested_depth_ranges(); return 0; }
     const char *width = getenv("DM_VK_TEST_WARP_WIDTH");
@@ -1653,5 +1694,6 @@ int main(void) {
     scissored_attachment_clears();
     conditional_rendering();
     integer_attachment_clears();
+    texture_clear_regions();
     puts("NVN compute image writes, cube-sampled draw, full/compact bindings and fenced Vulkan readback passed");
 }
