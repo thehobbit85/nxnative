@@ -23,6 +23,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--serial', required=True); p.add_argument('--apk', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--stress-cycles', type=int, default=0, help='cycles per game process for the --lifecycle fixture on an AOSP emulator')
     p.add_argument('--adb', default=str(Path(os.environ.get('ANDROID_SDK_ROOT', '')) / 'platform-tools/adb'))
     a = p.parse_args()
     if not a.serial.startswith('emulator-'): p.error('this automated install test is restricted to an emulator')
@@ -52,7 +53,7 @@ def main():
     adb('shell', 'am', 'force-stop', PACKAGE)
     adb('shell', 'am', 'start', '-W', '-n', PACKAGE + '/com.nxnative.MenuActivity')
     wait_for(lambda: shell('cat ' + EXTERNAL + '/.unpacked 2>/dev/null || true').strip() == assets_id, 'matching assets installed')
-    shell("printf 'DM_DBG=1\\n' > " + EXTERNAL + '/env.txt')
+    shell("printf 'DM_DBG=1\\n" + ("DM_AUDIO=1\\n" if a.stress_cycles else "") + "' > " + EXTERNAL + '/env.txt')
 
     def start_guest():
         shell('rm -f ' + EXTERNAL + '/log.txt')
@@ -61,6 +62,18 @@ def main():
         current = log()
         assert 'APP_FIXTURE_SAVE_COMMITTED' in current and 'APP_FIXTURE_ASSETS_READY' in current and 'APP_FIXTURE_FAILED' not in current
         return current
+
+    if a.stress_cycles:
+        if a.stress_cycles < 3: p.error('--stress-cycles requires at least three cycles')
+        from app_lifecycle_stress import run
+        try:
+            result = run(base, PACKAGE, start_guest, shell, log, wait_for, a.output, a.stress_cycles)
+            (a.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+            print(json.dumps(result), flush=True)
+        finally:
+            (a.output / 'last-process.log').write_text(log())
+            adb('shell', 'am', 'force-stop', PACKAGE)
+        return
 
     start_guest()
     # Framework key input -> native frontend -> shared HID -> relocated guest import.

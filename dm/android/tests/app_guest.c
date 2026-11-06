@@ -46,6 +46,9 @@ static void sleep_frame(void) {
     __asm__ volatile("svc #0x0b" : "+r"(x0) : : "memory");
 }
 static void require(int ok) { if (!ok) { NOTE("APP_FIXTURE_FAILED\n"); for (;;) sleep_frame(); } }
+#ifdef APP_LIFECYCLE
+#include "app_lifecycle.h"
+#endif
 #ifdef APP_HAPTICS
 #include "app_haptics.h"
 #endif
@@ -191,6 +194,9 @@ void nnMain(void) {
     require(font_state(0) == 1 && font_address(0) != NULL);
     require(font_state(5) == 1 && font_address(5) != NULL);
     NOTE("APP_FIXTURE_ASSETS_READY\n");
+#ifdef APP_LIFECYCLE
+    lifecycle_audio_start();
+#endif
     NVNdevice device; NVNdeviceBuilder db;
     API(nvnDeviceBuilderSetDefaults)(&db); require(API(nvnDeviceInitialize)(&device, &db));
     NVNqueue queue; NVNqueueBuilder qb;
@@ -222,6 +228,9 @@ void nnMain(void) {
 #endif
     uint64_t last_buttons = 0;
     for (unsigned frame = 0;; frame++) {
+#ifdef APP_LIFECYCLE
+        lifecycle_audio_poll();
+#endif
 #ifdef APP_MOTION
         if (!(frame % 10)) report_motion();
 #endif
