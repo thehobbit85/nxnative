@@ -2865,6 +2865,39 @@ static void empty_texels(void) {
     mtl_reg_tex(989,NULL,NULL); mtl_tex_release(&live); mtl_queue_forget(989);
     puts("Empty float, signed and atomic typed descriptors preserve neighboring work and zero reads");
 }
+#include "../../../tests/packed_texel_corpus.h"
+
+typedef struct { float values[4][4]; int32_t size; } float_texel_results;
+static void read_float_views(float_texel_results result[2]) {
+    memset(result,0xff,2*sizeof *result);
+    mtl_queue_activate(990); mtl_sub_begin(); list_t list={0};
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&scaled_texels_program,.stages=0x20);
+    RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=2,.h={990,991});
+    for (unsigned slot=0;slot<2;slot++) {
+        uint32_t params[]={slot,0,0,0}; push_constants(&list,1,240,params,sizeof params);
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&result[slot],.size=sizeof result[slot]);
+        RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
+    }
+    put(&list,OP_END,NULL,0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+}
+
+static void packed_buffer_texels(void) {
+    uint16_t words[4]; memcpy(words,packed_texel_words,sizeof words);
+    for (size_t i=0;i<sizeof packed_texels/sizeof *packed_texels;i++) {
+        tex_t t={.serial=0x12a00+i,.mem=(uint8_t *)words,.d={.width=4,.height=1,.depth=1,.levels=1,
+                 .target=NVN_TEXTURE_TARGET_BUFFER,.format=packed_texels[i].format}};
+        nvn_tex_layout(&t.d,&t.L);
+        view_t map={.set_swizzle=1,.swz={4,5,2,0}};
+        mtl_reg_tex(990,&t,NULL); mtl_reg_tex(991,&t,&map);
+        float_texel_results result[2]; read_float_views(result);
+        for (int sw=0;sw<2;sw++) {
+            assert(result[sw].size==4);
+            assert(packed_texel_matches(&packed_texels[i],sw,result[sw].values));
+        }
+        mtl_reg_tex(990,NULL,NULL); mtl_reg_tex(991,NULL,NULL); mtl_queue_forget(990);
+    }
+    puts("Eight packed 16-bit formats match the NVN Metal texture-view corpus");
+}
 static void scaled_texels(void) {
     // The two views share every byte. One converts unsigned integers, and
     // the other sign-extends the same bits before converting to float.
@@ -2884,16 +2917,7 @@ static void scaled_texels(void) {
                 .d={.width=4,.height=1,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_BUFFER,.format=format}};
             nvn_tex_layout(&view.d,&view.L); mtl_reg_tex(990+sign,&view,NULL);
         }
-        struct { float values[4][4]; int32_t size; } result[2]; memset(result,0xff,sizeof result);
-        mtl_queue_activate(990); mtl_sub_begin(); list_t list={0};
-        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&scaled_texels_program,.stages=0x20);
-        RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=2,.h={990,991});
-        for (unsigned sign=0;sign<2;sign++) {
-            uint32_t params[]={sign,0,0,0}; push_constants(&list,1,240,params,sizeof params);
-            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&result[sign],.size=sizeof result[sign]);
-            RECORD(OP_DISPATCH,p_dispatch,.x=4,.y=1,.z=1);
-        }
-        put(&list,OP_END,NULL,0); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        float_texel_results result[2]; read_float_views(result);
         for (int sign=0;sign<2;sign++) for (unsigned i=0;i<4;i++) for (unsigned c=0;c<4;c++) {
             unsigned n=cases[shape[sign]].channels,bits=cases[shape[sign]].bits;
             if (result[sign].size!=4) die("scaled texel %ux%u, sign%d size %d expected 4",n,bits,sign,result[sign].size);
@@ -2913,6 +2937,7 @@ static void scaled_texels(void) {
     puts("Signed and unsigned scaled texels preserve their integer values, units and missing channels");
 }
 static void typed_buffers(void) {
+    packed_buffer_texels();
     scaled_texels();
     empty_texels();
     typed_srgb();
