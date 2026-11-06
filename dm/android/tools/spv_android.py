@@ -21,7 +21,7 @@ from dm.android.tools.spv_capture import geometry_capture
 from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
 from dm.android.tools import spv_resources
 from dm.android.tools.spv_globalmem import global_memory_fields, lower_physical_addresses, drop_unused_int64
-from dm.android.tools import spv_geometry, spv_half, spv_meshstage, spv_pool, spv_texture_offsets
+from dm.android.tools import spv_geometry, spv_half, spv_image_access, spv_meshstage, spv_pool, spv_texture_offsets
 from dm.android.tools.spv_cache import capture_cache
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
@@ -152,15 +152,12 @@ def prepare_spirv(data):
     if not any(len(x) > masks[opcode(x)] and x[masks[opcode(x)]] & 0x30
                for x in ins if opcode(x) in masks):
         drop.add(25)
-    # The translator can emit OpImageWrite to an Unknown-format storage image
-    # without declaring StorageImageWriteWithoutFormat (Legends Z-A). Only
-    # require the feature for a shader that actually writes such a loaded image.
-    unformatted = {x[1] for x in ins if opcode(x) == 25 and x[7] == 2 and x[8] == 0}
-    loads = {x[2] for x in ins if opcode(x) == 61 and x[1] in unformatted}
-    writes = any(opcode(x) == 99 and x[1] in loads for x in ins)
+    # The shared chain also feeds Metal, whose unformatted storage accesses
+    # do not require Vulkan's per-operation capability declarations.
+    declared = {x[1] for x in ins if opcode(x) == 17}
     words = list(header)
-    if writes and not any(opcode(x) == 17 and x[1] == 56 for x in ins):
-        words.extend((2 << 16 | 17, 56))
+    for capability in sorted(spv_image_access.required(ins) - declared):
+        words.extend((2 << 16 | 17, capability))
     for x in ins:
         op = opcode(x)
         if op == 17 and x[1] in drop:
