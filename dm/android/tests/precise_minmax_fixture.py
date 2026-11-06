@@ -1,4 +1,5 @@
 """Execute the numeric-operand NaN behavior shared by guest min, max and saturation."""
+import argparse
 import ast
 from pathlib import Path
 import re
@@ -28,6 +29,32 @@ def number(word):
     return struct.unpack('<f', struct.pack('<I', word))[0]
 
 
+def minmax_program():
+    ops = record_address(16) + [read_word(16, 0), read_word(17, 1),
+                                alu(0x209, 18, 16, 17, 0, (87, 3, 7)),
+                                alu(0x209, 19, 16, 17, 0, (87, 3, 7), (90, 1, 1)),
+                                store(18, 8), store(19, 12), EXIT]
+    return assemble(ops)
+
+
+def tiny_inputs(work, preserve):
+    # Independent native M2 Metal checks show the compare sees zeros but
+    # returns the second register's original bits. ARM64 Lavapipe orders the
+    # subnormal numbers. On both devices an equal zero selects the RHS.
+    values = (0, 0x80000000, 1, 0x80000001, 0x007fffff, 0x807fffff, 0x00400000, 0x80400000)
+    seed, expected = [], []
+    for a in values:
+        for b in values:
+            lo = hi = b
+            if preserve and number(a) != number(b):
+                lo, hi = (a, b) if number(a) < number(b) else (b, a)
+            seed.extend((a, b, GUARD, GUARD))
+            expected.extend((a, b, lo, hi))
+    key = '00000000feedbb00'
+    case = (key, [64, 1, 1], minmax_program(), expected + [GUARD] * 8, {'arch': 'sm86'})
+    export_cases(work, [case], initial_words={key: seed + [GUARD] * 8}, metal_transform=apple_precise())
+
+
 def generate(work):
     values = (0x00000000, 0x80000000, 1, 0x807fffff, 0x00800000, 0x80800000, 0x3e800000,
               0xbf000000, 0x3f800000, 0xc0000000, 0x7f800000, 0xff800000,
@@ -49,9 +76,7 @@ def generate(work):
             else:
                 lo, hi = b, a
             pairs.append((a, b, lo, hi))
-    ops = record_address(16) + [read_word(16, 0), read_word(17, 1), alu(0x209, 18, 16, 17, 0, (87, 3, 7)),
-                                alu(0x209, 19, 16, 17, 0, (87, 3, 7), (90, 1, 1)), store(18, 8), store(19, 12), EXIT]
-    binary = assemble(ops)
+    binary = minmax_program()
     cases, initial = [], {}
     for i in range(0, len(pairs), 64):
         chunk = pairs[i:i + 64]
@@ -80,4 +105,12 @@ def generate(work):
 
 
 if __name__ == '__main__':
-    generate(Path(sys.argv[1]).resolve())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('directory', type=Path)
+    parser.add_argument('--tiny', choices=('preserve', 'compare-as-zero'),
+                        help='check the device-specific min/max model for pairs of zeros and subnormals')
+    args = parser.parse_args()
+    if args.tiny:
+        tiny_inputs(args.directory.resolve(), args.tiny == 'preserve')
+    else:
+        generate(args.directory.resolve())
