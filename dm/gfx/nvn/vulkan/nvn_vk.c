@@ -347,9 +347,10 @@ static void *completion_thread(void *a) {
         if (r != VK_SUCCESS) die("Vulkan: waiting for a submission failed (%d)", (int)r);
         ctx_complete(c);
         pthread_mutex_lock(&g_mu);
-        g_done = c->fence_val; memmove(g_pend, g_pend + 1, --g_npend * sizeof *g_pend);
+        uint64_t completed = c->fence_val;
+        g_done = completed; memmove(g_pend, g_pend + 1, --g_npend * sizeof *g_pend);
         pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
-        garbage_free(c->fence_val);
+        garbage_free(completed);   // c can now belong to a later submission
     }
     return NULL;
 }
