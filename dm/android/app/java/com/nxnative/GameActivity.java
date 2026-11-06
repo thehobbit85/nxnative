@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /** The native host still runs once per :game process. */
 public final class GameActivity extends NativeActivity {
     private final Binder processLifetime = new Binder();
+    private final GameKeyboard keyboard = new GameKeyboard(this);
     private GameControllers controllers;
     private OfflineWeb web;
     static native boolean nativePadAttach(int id, String descriptor);
@@ -24,6 +25,10 @@ public final class GameActivity extends NativeActivity {
     private static native boolean nativeWebKey(int device, int key, int action, boolean controller);
     private static native void nativeWebAxes(int device, float[] axes);
     private static String text(byte[] bytes) { return bytes == null ? "" : new String(bytes, StandardCharsets.UTF_8); }
+
+    public byte[] readKeyboard(byte[] title, byte[] subtitle, byte[] guide, byte[] initial, int min, int max) {
+        return keyboard.read(text(title), text(subtitle), text(guide), text(initial), min, max);
+    }
 
     public int[] displayPixels() {
         // VI asks for the physical display mode, not the app's surface size or
@@ -54,9 +59,9 @@ public final class GameActivity extends NativeActivity {
         super.onCreate(saved); // NativeActivity registers the native input methods here.
         controllers = new GameControllers(this);
     }
-    @Override protected void onPause() { paused = true; if (web != null) web.pause(true); super.onPause(); }
-    @Override protected void onResume() { super.onResume(); paused = false; if (web != null) web.pause(false); }
-    @Override protected void onDestroy() { if (controllers != null) controllers.close(); if (web != null) { web.close(); web = null; } super.onDestroy(); }
+    @Override protected void onPause() { paused = true; keyboard.pause(true); if (web != null) web.pause(true); super.onPause(); }
+    @Override protected void onResume() { super.onResume(); paused = false; keyboard.pause(false); if (web != null) web.pause(false); }
+    @Override protected void onDestroy() { keyboard.pause(true); if (controllers != null) controllers.close(); if (web != null) { web.close(); web = null; } super.onDestroy(); }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if (web != null && web.active()) {
             if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) { if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) web.back(); return true; }

@@ -46,6 +46,9 @@ static void sleep_frame(void) {
     __asm__ volatile("svc #0x0b" : "+r"(x0) : : "memory");
 }
 static void require(int ok) { if (!ok) { NOTE("APP_FIXTURE_FAILED\n"); for (;;) sleep_frame(); } }
+#ifdef APP_KEYBOARD
+#include "app_keyboard.h"
+#endif
 #ifdef APP_WATCH
 static uintptr_t watch_heap(size_t size) {
     register uint64_t x0 __asm__("x0") = 0; register uint64_t x1 __asm__("x1") = size;
@@ -213,6 +216,9 @@ void nnMain(void) {
 #endif
     uint64_t last_buttons = 0;
     for (unsigned frame = 0;; frame++) {
+#ifdef APP_KEYBOARD
+        if (frame == 10) check_keyboard();
+#endif
         pad_state state; uint32_t id = 32;
         require(hid_read(&state, 1, &id) == 1);
         if (state.buttons && state.buttons != last_buttons) NOTE("APP_FIXTURE_BUTTON_DOWN\n");
