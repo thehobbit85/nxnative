@@ -21,7 +21,7 @@ from dm.android.tools.spv_capture import geometry_capture
 from dm.android.tools.spv_bindless import driver_array_fields, split_handle_fields
 from dm.android.tools import spv_resources
 from dm.android.tools.spv_globalmem import global_memory_fields, lower_physical_addresses, drop_unused_int64
-from dm.android.tools import spv_geometry, spv_half, spv_image_access, spv_meshstage, spv_pool, spv_texture_offsets, spv_warp
+from dm.android.tools import spv_geometry, spv_half, spv_image_access, spv_meshstage, spv_pool, spv_texture_offsets, spv_warp, spv_warp_native
 from dm.android.tools.spv_cache import capture_cache
 TOOLS = ROOT / 'dm/gfx/tools'
 XLATE = TOOLS / 'dmsh_xlate_bin/dmsh_xlate'
@@ -176,7 +176,7 @@ def export_spirv(data, optimizer):
     # translator can retain unused texture declarations that SPIRV-Cross drops
     # from Metal's argument buffer (Link's Awakening's uber shaders).
     data = spv_texture_offsets.lower(data)
-    data = spv_warp.lower(data)
+    data = spv_warp_native.lower(spv_warp.lower(data))
     data = spv_half.lower(data)
     data, physical = lower_physical_addresses(prepare_spirv(data))
     result = subprocess.run([optimizer, '--eliminate-dead-variables', '-', '-o', '-'],

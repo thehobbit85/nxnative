@@ -1,0 +1,23 @@
+#version 450
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_vote : require
+layout(local_size_x = LANES) in;
+layout(set=0, binding=0, std430) buffer Results { uint words[]; };
+void main() {
+    uint physical = gl_LocalInvocationIndex;
+    uint lane = gl_SubgroupInvocationID;
+    bool predicate = (physical / 32u == 2u) ? (physical % 2u == 0u) : ((physical / 32u) % 2u != 0u);
+    uint i = physical * 10u;
+    words[i] = lane;
+    words[i + 1] = subgroupShuffle(physical, 0u);
+    words[i + 2] = subgroupShuffle(physical, (lane ^ 3u) & 31u);
+    uvec4 mask = subgroupBallot(predicate);
+    words[i + 3] = mask.x;
+    words[i + 4] = mask.y | mask.z | mask.w;
+    words[i + 5] = uint(subgroupAll(predicate));
+    words[i + 6] = uint(subgroupAny(predicate));
+    words[i + 7] = uint(subgroupAllEqual(predicate));
+    words[i + 8] = gl_SubgroupEqMask.x;
+    words[i + 9] = gl_SubgroupLeMask.x;
+}

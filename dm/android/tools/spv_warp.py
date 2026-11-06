@@ -3,7 +3,7 @@ import math
 import struct
 
 from dm.android.tools.spv_capture import Module, instruction
-from dm.android.tools.spv_module import decode, opcode, pointer_operands
+from dm.android.tools.spv_module import decode, opcode, pointer_operands, string_operand
 from dm.android.tools import spv_warp_flow, spv_warp_masks
 
 VOTE_ALL, VOTE_ANY, VOTE_EQUAL = 334, 335, 336
@@ -53,7 +53,7 @@ def _shared_warp_barrier(module, inst):
     return opcode(inst) == 224 and tuple(module.constants.get(i) for i in inst[1:]) == (3, 3, 0x108)
 
 
-def _qualifies(module, lane):
+def supported_subgroup_ops(module, lane):
     bools = set()
     in_function = False
     for inst in module.code:
@@ -68,12 +68,18 @@ def _qualifies(module, lane):
             bools.add(inst[2])
         if lane in pointer_operands(inst) and (op != 61 or inst[3] != lane or inst[1] != module.uint):
             return False
+        if op == 10:
+            extension = string_operand(inst[1:]).lower()
+            if any(name in extension for name in ('subgroup', 'group_non_uniform', 'shader_ballot')):
+                return False
         if op in (73, 74, 75, 332, 5632, 5633):
             # Built-ins and other decorations can be applied indirectly to
             # multiple IDs. ID- and string-valued annotations can also refer
             # to removed variables. Only ordinary decorations are rewritten.
             return False
         scopes = inst[1:3] if op == 224 else inst[1:2] if op == 225 else ()
+        if any(scope not in module.constants for scope in scopes):
+            return False
         if any(module.constants.get(scope) == 3 for scope in scopes) and not _shared_warp_barrier(module, inst):
             # A subgroup barrier still synchronizes physical lanes.
             return False
@@ -176,7 +182,7 @@ def lower(data):
         return data
     # A WorkgroupSize built-in takes precedence over LocalSize. Its value
     # may be specialized at pipeline creation, after we allocate the array.
-    if 25 in builtins or set(range(36, 41)).intersection(builtins) or not _qualifies(module, lane):
+    if 25 in builtins or set(range(36, 41)).intersection(builtins) or not supported_subgroup_ops(module, lane):
         return data
     if exchanges and not _scratch_fits(module, size):
         return data
