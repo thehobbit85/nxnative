@@ -1716,6 +1716,7 @@ int nvn_dpool_base(const void *pool, int texture);   // shared recorder's host-t
 // Index widening/scanning and descriptor-handle decoding happen on the CPU.
 // Finish only an actual GPU dependency, before allocating this command's sets
 // or buffers: a submission cut here would invalidate those allocations later.
+static void begin_segment(void);
 static void cpu_ready(uint64_t addr, uint64_t size) {
     if (!size) return;
     for (int i = 0; i < P.n; i++) {
@@ -1757,7 +1758,7 @@ static void cpu_ready(uint64_t addr, uint64_t size) {
         memcpy((void *)(uintptr_t)lo, w->p + (lo - w->addr), n);
     }
     pthread_mutex_unlock(&g_gwmu);
-    if (gpu) { mtl_wait(mtl_sub_commit(), UINT64_MAX); mtl_sub_begin(); }
+    if (gpu) { mtl_wait(mtl_sub_commit(), UINT64_MAX); begin_segment(); }
 }
 static void uniform_ready(int stage, int reg, int64_t off, uint32_t count) {
     if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16 || off < 0 || !count) return;
@@ -2899,18 +2900,21 @@ static void clear_tex(const p_clear_tex *c) {
 }
 
 // ---------- Submission ----------
-void mtl_sub_begin(void) {
+static void begin_segment(void) {
     vk_init();
     g_ci = (g_ci + 1) % NCTX; ctx_t *c = &g_ctx[g_ci];
     uint64_t w0 = now_ns();
     pthread_mutex_lock(&g_mu); while (c->fence_val > g_done) pthread_cond_wait(&g_cv, &g_mu); pthread_mutex_unlock(&g_mu);
     atomic_fetch_add(&g_wait_ns, now_ns() - w0);
     C = c; C->used = 0; C->capacity = RING; C->up_used = 0; g_ndc = 0; g_wgen++; C->ring = C->ring0; C->ringp = C->ringp0;
-    condition_begin();
     C->dp = C->dp0; VKCHECK(vkResetDescriptorPool(g_dev, C->dp, 0));
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     VKCHECK(vkBeginCommandBuffer(C->cb, &bi)); VKCHECK(vkBeginCommandBuffer(C->up, &bi));
     vkCmdResetQueryPool(C->up, C->qp, 0, 2); vkCmdWriteTimestamp(C->up, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, C->qp, 0);
+}
+void mtl_sub_begin(void) {
+    condition_begin();
+    begin_segment();
 }
 void mtl_sub_index(const uint64_t *h, int n) { (void)h; (void)n; }
 void mtl_exec_rest(const uint64_t *handles, int n) { (void)handles; (void)n; }
