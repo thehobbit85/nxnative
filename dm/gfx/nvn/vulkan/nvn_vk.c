@@ -3512,6 +3512,40 @@ static void copy_t2t(const p_copy_t2t *c) {
     } else { RED_ONCE(52,"no supported texture blit between formats %d and %d",s->f.f,d->f.f); return; }
     barrier_all(C->cb);
 }
+// NVN2's reconstruction command can still produce its spatial output when a
+// temporal scaler or its depth/motion inputs are unavailable. Use the sampled
+// draw for float/HDR destinations even on drivers with no native linear blit.
+static void dlss_eval(const p_dlss *job) {
+    if (!job->tex[DLSS_COLOR] || !job->tex[DLSS_OUTPUT]) {
+        RED_ONCE(118, "DLSS evaluation needs a color input and output"); return;
+    }
+    pass_end();
+    vtex *src=tex_get(job->tex[DLSS_COLOR],0), *dst=tex_get(job->tex[DLSS_OUTPUT],0);
+    if (!src || !dst || src==dst || src->samples!=1 || dst->samples!=1 ||
+        src->target!=NVN_TEXTURE_TARGET_2D || dst->target!=NVN_TEXTURE_TARGET_2D ||
+        src->f.depth || dst->f.depth || clear_color_type(src->f.f)!=CLEAR_FLOAT || clear_color_type(dst->f.f)!=CLEAR_FLOAT ||
+        !(src->usage&VK_IMAGE_USAGE_SAMPLED_BIT) || !(dst->usage&VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+        RED_ONCE(118, "DLSS spatial scaling requires distinct sampled and renderable color images"); return;
+    }
+    p_copy_t2t copy={.src=job->tex[DLSS_COLOR],.dst=job->tex[DLSS_OUTPUT],
+        .sr={job->base[DLSS_COLOR][0],job->base[DLSS_COLOR][1],0,job->iw>0 ? job->iw : (int)src->w,
+             job->ih>0 ? job->ih : (int)src->h,1},
+        .dr={job->base[DLSS_OUTPUT][0],job->base[DLSS_OUTPUT][1],0,job->ow>0 ? job->ow : (int)dst->w,
+             job->oh>0 ? job->oh : (int)dst->h,1}};
+    VkImageSubresourceLayers sub; VkOffset3D off; VkExtent3D extent;
+    if (!texture_copy_region(src,NULL,&copy.sr,&sub,&off,&extent) ||
+        !texture_copy_region(dst,NULL,&copy.dr,&sub,&off,&extent)) {
+        RED_ONCE(118, "DLSS rectangle lies outside its color image"); return;
+    }
+    if (!draw_image_slice(&copy,src,dst,0,0,0,0,1)) {
+        RED_ONCE(118, "DLSS spatial scaling failed for the bound color formats"); return;
+    }
+    dst->gpu=1;
+    if (dst->linrow) { lin_writeback(dst); barrier_all(C->cb); }
+    for (int i=0;i<P.n;i++) if (P.ct[i]==dst) P.cwr[i]=1;
+    RED_ONCE(118, "DLSS temporal reconstruction unavailable; scaled the input color bilinearly");
+}
+
 static void clear_tex(const p_clear_tex *c) {
     if (!c->tex || (vk_skip() & SK_CLEAR)) return;
     if (g_plog) LOG("plog:  clear tex %llu fmt %#x", (unsigned long long)c->tex->serial, c->tex->d.format);
@@ -3760,6 +3794,7 @@ static void mtl_exec_(const uint8_t *p) {
             case OP_COPY_B2T: copy_b2t((const p_copy_b2t *)a); break;
             case OP_COPY_T2T: copy_t2t((const p_copy_t2t *)a); break;
             case OP_COPY_T2B: copy_t2b((const p_copy_b2t *)a); break;
+            case OP_DLSS: dlss_eval((const p_dlss *)a); break;
             case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
             case OP_BARRIER: {
                 // Early replay fixtures used a header-only pass boundary.

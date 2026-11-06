@@ -2,6 +2,8 @@
 // (rec_cb_block), never the recording's stand-in, and fills a 1920x1080 output from a flat 960x540 colour; two evaluations through the same scaler before the submission ends
 // keep each one's own output
 #include "../nvn/nvn_mtl.m"
+#include "recorded_list.h"
+#include "dlss_spatial_corpus.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -34,6 +36,7 @@ static int flat(id<MTLTexture> t, const float want[3]) {   // the middle half of
 }
 int main(void) { @autoreleasepool {
     mtl_init();
+    dlss_spatial_corpus(0);
     tex_t col = texture(90, 960, 540, NVN_FORMAT_RGBA16F), col2 = texture(91, 960, 540, NVN_FORMAT_RGBA16F), dep = texture(92, 960, 540, NVN_FORMAT_DEPTH32F),
           mot = texture(93, 960, 540, NVN_FORMAT_RG16F), out = texture(94, 1920, 1080, NVN_FORMAT_RGBA16F), out2 = texture(95, 1920, 1080, NVN_FORMAT_RGBA16F);
     const float a[3] = {0.5f, 0.25f, 0.75f}, b[3] = {0.125f, 0.625f, 0.25f};
