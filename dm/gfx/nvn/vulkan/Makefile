@@ -4,7 +4,7 @@ HOST = ../../../host
 NVN = ..
 B ?= build
 $(B)/t_replay: tests/wrapped_buffer.inc
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: wrapped_buffer.inc spv_wrapped_buffer.h block_targets.inc block_targets_finish.inc native_reduction.inc
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: wrapped_buffer.inc spv_wrapped_buffer.h block_targets.inc block_targets_finish.inc native_reduction.inc diagnostics.inc ../../../third_party/flip/tool/stb_image_write.h
 $(B)/t_wrapped_buffer: tests/t_wrapped_buffer.c spv_wrapped_buffer.h spv_texel_bias.h
 	mkdir -p $(B)
 	$(CC) $(CFLAGS) $< -o $@
@@ -27,7 +27,7 @@ $(B)/shaders/00000000feed9e04.spv: tests/wrapped_buffer_table.comp Makefile
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	printf 'stage cs\ntg 1 1 1\nb 0 cis 8192 tex_htab 7 0 samp_htab 8 runtime=1 pool_slot=0 soff=0 view=1 num=2\nb 1 ssbo 1 sbuf 0 -1 - -1\nb 2 ssbo 1 htab_map 0 -1 - -1 ro\n' > $(@:.spv=.vk.txt)
-$(B)/t_replay: tests/block_targets.inc
+$(B)/t_replay: tests/block_targets.inc tests/diagnostics.inc ../../../third_party/flip/tool/stb_image.h
 fixture: $(B)/shaders/00000000feed9f01.spv $(B)/shaders/00000000feed9f02.spv
 $(B)/shaders/00000000feed9f01.spv: tests/block_target.frag Makefile
 	mkdir -p $(@D)

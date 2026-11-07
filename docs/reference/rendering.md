@@ -1696,6 +1696,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
 
+### Android live image inspection
+
+- **Symptom** — `DM_CTL shot`, `texraw` and `texlist` reported unavailable Vulkan controls.
+- **Cause** — the renderer exposed environment-selected BMP dumps while these shared control entry points had placeholders.
+- **Fix** — queued `shot` requests write PNGs at the requested present offset, applying the VI crop and raster origin. `texraw` waits for submitted GPU writes and saves mip zero of all array layers, cube faces or 3D slices. Its text header gives width, height, Vulkan format, tightly packed row bytes and the slice count when greater than one. Combined depth/stencil images export the depth aspect. `texlist` filters the shared registered texture table by NVN target. Readback retains the image under the resource lock, and output is published by renaming a completed temporary file. PNG encoding reuses the vendored stb implementation with its C entry point restored.
+- **Found on** — the Android diagnostic fixture checks delayed screenshot timing, cropped pixel values in both origins, raw array slices, missing textures and unwritable output paths in both render modes.
+- **Remaining** — screenshot output scaling, non-RGBA8 presentation conversion, multisample inspection, per-frame target dumps and live command capture require further implementation or qualification.
+
 ### Android presentation without a window
 
 - **Symptom:** LLVM reports an uninitialized window-generation value when the Android CLI presents without a NativeActivity window.
