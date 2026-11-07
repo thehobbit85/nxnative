@@ -1310,6 +1310,7 @@ typedef struct { tex_t t; view_t v; uint8_t ok, has_v; } treg_t;
 static treg_t *g_treg; static int g_ntreg;
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static int g_nsreg;
 static _Atomic int g_has_reduction_samplers;
+static uint64_t g_registration_generation=1; // guarded by g_rmu
 static vtex *registered_texture(int id, treg_t *registration) {
     pthread_mutex_lock(&g_rmu);
     *registration = id > 0 && id < g_ntreg ? g_treg[id] : (treg_t){0};
@@ -1320,6 +1321,7 @@ static vtex *registered_texture(int id, treg_t *registration) {
 void mtl_reg_tex(int id, const tex_t *t, const view_t *v) {
     if (id < 0) return;
     pthread_mutex_lock(&g_rmu);
+    g_registration_generation++;
     if (!t) { if (id < g_ntreg) g_treg[id] = (treg_t){0}; pthread_mutex_unlock(&g_rmu); return; }
     if (id >= g_ntreg) { int n = id + 1024; g_treg = realloc(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
     g_treg[id].t = *t; g_treg[id].ok = 1; g_treg[id].has_v = v != NULL; if (v) g_treg[id].v = *v;
@@ -1332,6 +1334,7 @@ void mtl_reg_image(int id, const tex_t *t, const view_t *v) {
 void mtl_reg_samp(int id, const samp_par *p) {
     if (id < 0) return;
     pthread_mutex_lock(&g_rmu);
+    g_registration_generation++;
     if (id >= g_nsreg) { int n = id + 256; g_sreg = realloc(g_sreg, n * sizeof *g_sreg); g_sreg_ok = realloc(g_sreg_ok, n); memset(g_sreg_ok + g_nsreg, 0, n - g_nsreg); g_nsreg = n; }
     g_sreg[id] = *p; g_sreg_ok[id] = 1;
     if (p->reduction == NVN_SAMPLER_REDUCTION_MIN || p->reduction == NVN_SAMPLER_REDUCTION_MAX) g_has_reduction_samplers = 1;
@@ -1467,13 +1470,14 @@ static VkSampler samp_get(int sid, border_view view, int reduce_in_shader) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2 };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
-enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU, S_SAMP_SLOTS, S_SAMP_C2 };
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2, K_TEX_POOL, K_POOL_BOUNDS };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU, S_SAMP_SLOTS, S_SAMP_C2, S_SAMP_POOL };
 static int sampler_source(const char *kind) {
+    if (!strcmp(kind,"samp_pool")) return S_SAMP_POOL;
     if (!strcmp(kind,"samp_c2a")) return S_SAMP_C2;
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:!strcmp(kind,"samp_slots")?S_SAMP_SLOTS:S_NONE;
 }
-typedef struct { uint32_t binding, count, storage_image, logical_count; uint8_t type, kind, skind, read_only, table, texel_atomic, multisample, depth_image; int16_t slot; int16_t reg, sreg; int32_t off, soff, view, num, driver_sampler; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
+typedef struct { uint32_t binding, count, storage_image, logical_count; uint8_t type, kind, skind, read_only, table, pool, texel_atomic, multisample, depth_image; int16_t slot; int16_t reg, sreg; int32_t off, soff, view, num, driver_sampler; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 #include "spv_sampler_pairs.inc"
 #include "spv_storage_texels.inc"
 typedef struct vin_module {
@@ -1870,9 +1874,6 @@ static shader_t *shader_by_key(const char *key) {
             if (!strcmp(kind, "gmem_map") || !strcmp(kind, "gmem_log")) {
                 LOG("[RED] vk: shader %s requires physical-address pool replay", key); free(txt); free(spv); return s;
             }
-            if (!strcmp(kind, "tex_pool") || !strcmp(kind, "samp_pool") || !strcmp(kind, "pool_bounds")) {
-                LOG("[RED] vk: shader %s requires runtime descriptor pool replay", key); free(txt); free(spv); return s;
-            }
             sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = off; e->sreg = (int16_t)sreg;
             if (dm_vk_resource_line(ln, strlen(ln), &e->shape)) { free(txt); free(spv); return s; }
             e->soff = e->view = -1;
@@ -1892,6 +1893,8 @@ static shader_t *shader_by_key(const char *key) {
             if (!strcmp(kind,"geometry") && reg == 5 && e->type == BT_UBO) e->kind=K_CAPTURE_CONTROL;
             if (!strcmp(kind,"tex_slots")) e->kind=K_TEX_SLOTS;
             if (!strcmp(kind,"tex_c2a")) e->kind=K_TEX_C2;
+            if (!strcmp(kind,"tex_pool")) e->kind=K_TEX_POOL;
+            if (!strcmp(kind,"pool_bounds")) e->kind=K_POOL_BOUNDS;
             e->skind = sampler_source(sk);
             if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
             if (e->kind==K_TEX_SLOTS || e->skind==S_SAMP_SLOTS) {
@@ -1913,6 +1916,16 @@ static shader_t *shader_by_key(const char *key) {
                     e->driver_sampler=(int32_t)offset;
                 }
             }
+            if (e->kind==K_TEX_POOL || e->skind==S_SAMP_POOL) {
+                int slot;
+                field=strstr(ln," runtime=1 pool_slot=");
+                int sampler=e->type==BT_SAMP;
+                if (!field || sscanf(field," runtime=1 pool_slot=%d",&slot)!=1 || slot<0 || slot>=DM_VK_MAX_BINDINGS ||
+                    cnt!=(sampler ? 4096 : 1048576) || (!sampler && e->type!=BT_TEX)) goto bad_table;
+                e->slot=(int16_t)slot;e->table=1;e->pool=1;e->logical_count=cnt;e->count=1;
+                s->has_tables=1;
+            }
+            if (e->kind==K_POOL_BOUNDS && (e->type!=BT_UBO || cnt!=1 || reg<1 || reg>=DM_VK_MAX_BINDINGS)) goto bad_table;
             if (!strcmp(kind, "htab_map")) {
                 if (e->type != BT_SSBO || cnt != 1 || reg < 0 || reg >= DM_VK_MAX_BINDINGS) goto bad_table;
                 e->kind = K_TABLE_MAP; e->slot = reg;
@@ -3367,6 +3380,17 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
                 VkDeviceSize offset = ring_put(table->map, bytes, g_props.limits.minStorageBufferOffsetAlignment);
                 if (offset == VK_WHOLE_SIZE) return VK_NULL_HANDLE;
                 *d = (VkDescriptorBufferInfo){C->ring, offset, bytes};
+            } else if (b->kind==K_POOL_BOUNDS) {
+                uint32_t bounds[DM_VK_MAX_BINDINGS][4]={{0}};
+                for (int j=0;j<s->nb;j++) if (s->b[j].pool) {
+                    int slot=s->b[j].slot;
+                    if (slot>=b->reg) return VK_NULL_HANDLE;
+                    bounds[slot][0]=table_cache[stage][slot]->map[0];
+                }
+                VkDeviceSize size=(unsigned)b->reg*sizeof bounds[0];
+                VkDeviceSize offset=ring_put(bounds,size,g_props.limits.minUniformBufferOffsetAlignment);
+                if (offset==VK_WHOLE_SIZE) return VK_NULL_HANDLE;
+                *d=(VkDescriptorBufferInfo){C->ring,offset,size};
             } else if (b->kind == K_CBUF && b->reg >= 0 && b->reg < 16) {
                 const p_bind_buf *u = &S.ubo[stage][b->reg];
                 uint64_t n = u->size > 65536 ? 65536 : u->size;
@@ -5156,6 +5180,7 @@ void mtl_alias_drop_pool(const void *pool) {
     // or RegisterImage explicitly makes the ID live again. Encoded Vulkan views
     // retain their normal deferred resource lifetime through the submit fence.
     for (int i = 0; i < g_ntreg; i++) if (g_treg[i].ok && g_treg[i].t.pool == pool) g_treg[i].ok = 0;
+    g_registration_generation++;
     pthread_mutex_unlock(&g_rmu);
 }
 // This backend has no shared sparse-tile heap to release. Sparse residency and

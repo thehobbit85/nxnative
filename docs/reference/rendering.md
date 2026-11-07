@@ -42,6 +42,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on** — the existing Maxwell C2 fixture executes 2,432 guarded cases per render mode, including all 301 entries, out-of-range indices and fixed sampler OR. A divergent separate-image/sampler fixture covers table shrinking and regrowth. The three transformed modules pass `spirv-val`, and the normal Android host builds.
 - **Open** — physical-driver and game qualification remains scheduled for the later validation pass. Runtime nonuniform descriptor indexing is required.
 
+### Vulkan bindless resource pools
+
+- **Symptom** — a shader requires runtime descriptor pool replay after exporting `tex_pool`, `samp_pool` and `pool_bounds`.
+- **Cause** — storage-loaded handles address the current registration pools directly. Sparse guest IDs can span a million texture entries and 4,096 sampler entries.
+- **Fix** — reuse the runtime descriptor index-map lowering and compact descriptor layouts. Build a snapshot from the currently bound pool bases, deduplicate identical texture/view and sampler registrations, and preserve each guest ID in the logical map. Populate the exported bounds block from the snapshot length. Registration changes and retired backing pools invalidate cached snapshots. The normal descriptor and submission machinery retains resources used by earlier commands.
+- **Found on** — the existing actual-Maxwell pool export executes 1,024 divergent lane samples per render mode through sparse IDs up to 65,536, missing entries, both pool bases, empty textures and sampler re-registration. Its compacted module passes `spirv-val`.
+- **Open** — the compact set must fit the device descriptor limits. Large live working sets, physical drivers and game-level qualification remain part of the later validation pass.
+
 ### Vulkan descriptor exhaustion within one submission
 
 - **Symptom:** later draws or dispatches disappear after `descriptor pool exhausted in one submission: draws are dropped`.

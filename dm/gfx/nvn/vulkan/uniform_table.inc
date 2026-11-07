@@ -3,11 +3,27 @@
 // guest indices and maps empty/out-of-range elements to descriptor zero.
 enum { TABLE_ELEMENTS = 8192 };
 typedef struct {
-    uint64_t handles[TABLE_ELEMENTS+1];
-    uint32_t map[TABLE_ELEMENTS+2], count;
+    uint64_t *handles;
+    uint32_t *map, count, handle_capacity, map_capacity;
+    uint64_t registration_generation;
+    int pool_base, pool_kind;
 } handle_table;
 static handle_table *table_cache[6][DM_VK_MAX_BINDINGS]; // replay thread scratch
 static uint64_t pool_remaining(uint64_t addr);
+static int table_reserve(handle_table *table,uint32_t length,uint32_t handles) {
+    if (table->map_capacity<length+2) {
+        uint32_t *map=realloc(table->map,(size_t)(length+2)*sizeof *map);
+        if (!map) return 0;
+        table->map=map;table->map_capacity=length+2;
+    }
+    if (table->handle_capacity<handles) {
+        uint64_t *values=realloc(table->handles,(size_t)handles*sizeof *values);
+        if (!values) return 0;
+        table->handles=values;table->handle_capacity=handles;
+    }
+    return 1;
+}
+#include "resource_pools.inc"
 
 typedef struct { const uint8_t *bytes; uint32_t length; } table_source;
 static uint32_t table_word(table_source source, uint32_t i) {
@@ -27,9 +43,11 @@ static table_source table_words(int stage, int reg, int off) {
 }
 static int build_table(int stage, const sbind *b) {
     handle_table **entry = &table_cache[stage][b->slot];
-    if (!*entry) *entry = malloc(sizeof **entry);
+    if (!*entry) *entry = calloc(1,sizeof **entry);
     handle_table *table = *entry;
     if (!table) return 0;
+    if (b->pool) return build_resource_pool(table,b);
+    table->pool_kind=0;
     table_source texture = {0}, sampler = {0};
     if (!b->logical_count) {
         if (b->type != BT_SAMP) texture = table_words(stage,b->reg,b->off);
@@ -37,6 +55,7 @@ static int build_table(int stage, const sbind *b) {
     }
     uint32_t n = texture.length > sampler.length ? texture.length : sampler.length;
     if (b->logical_count) n=b->logical_count;
+    if (!table_reserve(table,n,n+1)) return 0;
     uint16_t slots[2*TABLE_ELEMENTS] = {0};
     table->handles[0] = 0; table->count = 1; table->map[0] = n; table->map[n+1] = 0;
     uint64_t fixed = b->driver_sampler < 0 ? 0 :

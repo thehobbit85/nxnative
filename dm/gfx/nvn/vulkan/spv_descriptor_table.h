@@ -68,9 +68,11 @@ static uint32_t *spv_descriptor_table(const uint32_t *words,size_t count,
         const uint32_t *pointer=words+ids[var[1]].declaration;
         if ((pointer[0]&0xffff)!=32 || pointer[0]>>16!=4 || pointer[2] || pointer[3]>=bound || !ids[pointer[3]].declaration) goto fail;
         const uint32_t *fixed=words+ids[pointer[3]].declaration;
-        if ((fixed[0]&0xffff)!=28 || fixed[0]>>16!=4 || fixed[3]>=bound || !ids[fixed[3]].declaration) goto fail;
-        const uint32_t *size=words+ids[fixed[3]].declaration;
-        if ((size[0]&0xffff)!=43 || size[0]>>16!=4 || size[3]!=edits[e].count) goto fail;
+        if (edits[e].count) {
+            if ((fixed[0]&0xffff)!=28 || fixed[0]>>16!=4 || fixed[3]>=bound || !ids[fixed[3]].declaration) goto fail;
+            const uint32_t *size=words+ids[fixed[3]].declaration;
+            if ((size[0]&0xffff)!=43 || size[0]>>16!=4 || size[3]!=edits[e].count) goto fail;
+        } else if ((fixed[0]&0xffff)!=29 || fixed[0]>>16!=3) goto fail;
         // These arrays contain images, combined images or samplers. The
         // wrapped-buffer pass subsequently changes selected 2D interfaces.
         if (fixed[2]>=bound || !ids[fixed[2]].declaration) goto fail;
@@ -78,7 +80,7 @@ static uint32_t *spv_descriptor_table(const uint32_t *words,size_t count,
         unsigned op=element[0]&0xffff;
         if (op!=25 && op!=26 && op!=27) goto fail;
         if (op==25 && element[3]==5) cap_count=4;
-        uint32_t runtime=0,new_pointer=0;
+        uint32_t runtime=edits[e].count ? 0 : pointer[3],new_pointer=edits[e].count ? 0 : var[1];
         for (size_t at=0;at<module.globals.n;at+=module.globals.w[at]>>16) {
             const uint32_t *p=module.globals.w+at;
             if ((p[0]&0xffff)==29 && p[2]==fixed[2]) runtime=p[1];
