@@ -2923,6 +2923,8 @@ static int texel_binding(const sbind *b, int stage, uint32_t element, texel_rang
     if (!ok) RED_ONCE(21, "unsupported typed buffer range, format, view or storage binding");
     return ok;
 }
+// Unlike Metal's residency lookup, this backend's range lookup has no side effects.
+int mtl_addr_known(uint64_t addr, uint64_t len) { return mtl_addr(addr,len,NULL,NULL); }
 static uint64_t pool_remaining(uint64_t addr);
 static p_bind_buf storage_binding(const sbind *b, int stage) {
     p_bind_buf u = {0};

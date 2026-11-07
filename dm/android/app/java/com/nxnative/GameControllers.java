@@ -7,6 +7,7 @@ import java.util.HashMap;
 /** Observe gamepads independently of button presses so idle players stay connected. */
 final class GameControllers implements InputManager.InputDeviceListener {
     private final InputManager input;
+    private final GameActivity activity;
     private final GameMotion motion;
     private final GameHaptics haptics;
     private boolean closed;
@@ -18,6 +19,7 @@ final class GameControllers implements InputManager.InputDeviceListener {
     private final HashMap<Integer, Pad> attached = new HashMap<>();
 
     GameControllers(GameActivity activity, GameMotion motion, GameHaptics haptics) {
+        this.activity = activity;
         this.haptics = haptics;
         this.motion = motion;
         input = activity.getSystemService(InputManager.class);
@@ -53,6 +55,7 @@ final class GameControllers implements InputManager.InputDeviceListener {
                 motion.controller(d);
             }
         }
+        activity.controllerSupportChanged();
     }
 
     @Override public void onInputDeviceAdded(int id) { refresh(); }

@@ -77,6 +77,7 @@ static void web_register(JNIEnv *env, jobject activity) {
     // NativeActivity dlopens the host itself; it does not associate that dlopen
     // with GameActivity's Java class loader as System.loadLibrary would.
     const JNINativeMethod methods[] = {
+        {"nativeControllerPlayers", "()I", (void *)controller_players},
         {"nativeWebEvent", "(JII[B)V", (void *)Java_com_nxnative_GameActivity_nativeWebEvent},
         {"nativeWebPad", "()[J", (void *)Java_com_nxnative_GameActivity_nativeWebPad},
         {"nativeMotionModes", "()I", (void *)motion_modes},

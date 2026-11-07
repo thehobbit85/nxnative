@@ -55,6 +55,17 @@ static void require(int ok) { if (!ok) { NOTE("APP_FIXTURE_FAILED\n"); for (;;) 
 #ifdef APP_MOTION
 #include "app_motion.h"
 #endif
+#ifdef APP_CONTROLLER_PROMPT
+extern uint32_t controller_show(int32_t *info,const int8_t *arg);
+static void check_controller_prompt(void) {
+    int32_t info[2];int8_t arg[0x20]={0};arg[1]=8;
+    require(controller_show(info,arg)==0);
+    arg[0]=8;
+    NOTE("APP_CTRL_WAIT1\n");require(controller_show(info,arg)==(202u | 3101u << 9));
+    NOTE("APP_CTRL_WAIT2\n");require(controller_show(info,arg)==(202u | 3101u << 9));
+    NOTE("APP_CTRL_PASSED\n");
+}
+#endif
 #ifdef APP_KEYBOARD
 #include "app_keyboard.h"
 #endif
@@ -236,6 +247,9 @@ void nnMain(void) {
 #endif
 #ifdef APP_KEYBOARD
         if (frame == 10) check_keyboard();
+#endif
+#ifdef APP_CONTROLLER_PROMPT
+        if (frame == 10) check_controller_prompt();
 #endif
         pad_state state; uint32_t id = 32;
         require(hid_read(&state, 1, &id) == 1);

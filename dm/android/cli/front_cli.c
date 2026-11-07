@@ -23,3 +23,5 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     (void)title; (void)sub; (void)guide; (void)initial; (void)max_chars; (void)out; (void)out_cap;
     return -1;
 }
+
+int front_ctrl_support(int min, int max) { (void)min; (void)max; return -1; }

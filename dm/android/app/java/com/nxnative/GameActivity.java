@@ -16,6 +16,10 @@ public final class GameActivity extends NativeActivity {
     private final Binder processLifetime = new Binder();
     private final GameKeyboard keyboard = new GameKeyboard(this);
     private GameControllers controllers;
+    private final GameControllerSupport controllerSupport = new GameControllerSupport(this);
+    static native int nativeControllerPlayers();
+    public int showControllerSupport(int min, int max) { return controllerSupport.show(min, max); }
+    void controllerSupportChanged() { controllerSupport.changed(); }
     private GameMotion motion;
     private GameHaptics haptics;
     static native void nativeHapticRoute(int player, boolean available, boolean controller);
@@ -78,9 +82,9 @@ public final class GameActivity extends NativeActivity {
         if (motion != null) motion.focus(focused);
         if (!focused && haptics != null) haptics.stop();
     }
-    @Override protected void onPause() { paused = true; if (haptics != null) haptics.stop(); if (motion != null) motion.resume(false); keyboard.pause(true); if (web != null) web.pause(true); super.onPause(); }
-    @Override protected void onResume() { super.onResume(); paused = false; if (motion != null) motion.resume(true); keyboard.pause(false); if (web != null) web.pause(false); }
-    @Override protected void onDestroy() { if (motion != null) motion.resume(false); keyboard.pause(true); if (controllers != null) controllers.close(); if (haptics != null) haptics.stop(); if (web != null) { web.close(); web = null; } super.onDestroy(); }
+    @Override protected void onPause() { paused = true; controllerSupport.pause(true); if (haptics != null) haptics.stop(); if (motion != null) motion.resume(false); keyboard.pause(true); if (web != null) web.pause(true); super.onPause(); }
+    @Override protected void onResume() { super.onResume(); paused = false; controllerSupport.pause(false); if (motion != null) motion.resume(true); keyboard.pause(false); if (web != null) web.pause(false); }
+    @Override protected void onDestroy() { controllerSupport.close(); if (motion != null) motion.resume(false); keyboard.pause(true); if (controllers != null) controllers.close(); if (haptics != null) haptics.stop(); if (web != null) { web.close(); web = null; } super.onDestroy(); }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if (web != null && web.active()) {
             if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) { if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) web.back(); return true; }

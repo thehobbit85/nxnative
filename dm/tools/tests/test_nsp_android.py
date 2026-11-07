@@ -2,7 +2,6 @@
 import importlib.util
 import json
 import os
-from contextlib import nullcontext
 from pathlib import Path
 import sys
 import tempfile
@@ -57,9 +56,7 @@ class AndroidTarget(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); keys = root / 'keys'; keys.touch()
             args = nsp.parse_args([tmp, '--platform', 'android', '--keys', str(keys)])
-            reader = types.SimpleNamespace(contents=None, check_keys=lambda fam: None)
             with mock.patch.object(nsp, 'check_native_python'), mock.patch.object(nsp, 'configure_dotnet'), \
-                 mock.patch.object(nsp, 'package_title_reader', return_value=nullcontext(reader)), \
                  mock.patch.object(nsp, 'scan_nsps', side_effect=AssertionError('package scan began before Android preflight')), \
                  mock.patch.object(nsp, 'run', side_effect=nsp.BuildError('Android SDK unavailable')), \
                  mock.patch.dict(os.environ, {'ANDROID_NDK_HOME': tmp, 'ANDROID_SDK_ROOT': tmp}):

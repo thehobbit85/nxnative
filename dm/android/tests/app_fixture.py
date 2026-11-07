@@ -13,7 +13,7 @@ from dm.tools.tests.test_nso import make_nso
 from dm.host.tests.gate.fixture import module
 
 
-def build(output, ndk, program=None, web=False, display=False, watch=False, controllers=False, keyboard=False, motion=False, haptics=False, lifecycle=False):
+def build(output, ndk, program=None, web=False, display=False, watch=False, controllers=False, keyboard=False, motion=False, haptics=False, lifecycle=False, controller_prompt=False):
     output.mkdir(parents=True, exist_ok=True)
     tc = ndk / 'toolchains/llvm/prebuilt' / ('darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64') / 'bin'
     asm = output / 'entry.S'
@@ -57,6 +57,8 @@ def build(output, ndk, program=None, web=False, display=False, watch=False, cont
                        audio_start='_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE',
                        audio_append='_ZN2nn5audio20AppendAudioOutBufferEPNS0_8AudioOutEPNS0_14AudioOutBufferE',
                        audio_release='_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE')
+    if controller_prompt:
+        imports['controller_show'] = '_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE'
     if keyboard:
         imports['keyboard_show'] = '_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE'
     if controllers:
@@ -79,6 +81,7 @@ def build(output, ndk, program=None, web=False, display=False, watch=False, cont
                     *(['-DAPP_DISPLAY=1'] if display else []),
                     *(['-DAPP_CONTROLLERS=1'] if controllers else []),
                     *(['-DAPP_KEYBOARD=1'] if keyboard else []),
+                    *(['-DAPP_CONTROLLER_PROMPT=1'] if controller_prompt else []),
                     *(['-DAPP_HAPTICS=1'] if haptics else []),
                     *(['-DAPP_MOTION=1'] if motion else []),
                     *(['-DAPP_LIFECYCLE=1'] if lifecycle else []),
@@ -158,10 +161,11 @@ if __name__ == '__main__':
     p.add_argument('--display', action='store_true', help='display resolution service fixture')
     p.add_argument('--watch', nargs='?', const='heap', choices=('heap', 'alias', 'stack'), help='managed write-watch diagnostic fixture')
     p.add_argument('--controllers', action='store_true', help='sample two guest controllers for the Android input test')
+    p.add_argument('--controller-prompt', action='store_true', help='controller applet cancellation and lifecycle checks')
     p.add_argument('--keyboard', action='store_true', help='native text dialog and guest encoding checks')
     p.add_argument('--motion', action='store_true', help='read the live six-axis sensor through the guest API')
     p.add_argument('--haptics', action='store_true', help='drive the guest vibration handles from test buttons')
     p.add_argument('--lifecycle', action='store_true', help='present while polling and recycling real guest AudioOut buffers')
     a = p.parse_args()
     if not a.ndk: p.error('set ANDROID_NDK_HOME or --ndk')
-    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display, a.watch, a.controllers, a.keyboard, a.motion, a.haptics, a.lifecycle)
+    build(a.output.resolve(), Path(a.ndk), a.program_index, a.web, a.display, a.watch, a.controllers, a.keyboard, a.motion, a.haptics, a.lifecycle, a.controller_prompt)
