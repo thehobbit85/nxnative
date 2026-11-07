@@ -2774,7 +2774,7 @@ static int shader_reductions(const shader_t *s, sample_reduction *edits, size_t 
             float limit = g_props.limits.maxSamplerLodBias;
             float lod_bias = fminf(fminf(15.99f, limit), fmaxf(fmaxf(-16, -limit), p.lod_bias));
             edits[(*count)++] = (sample_reduction){b->binding, p.reduction == NVN_SAMPLER_REDUCTION_MIN,
-                p.minf == 1 || p.minf == 3 || p.minf == 5, p.magf != 0, lo, hi, lod_bias};
+                p.minf == 1 || p.minf == 3 || p.minf == 5, p.magf != 0, lo, hi, lod_bias, limit};
         }
     }
     return 1;
