@@ -417,6 +417,10 @@ def write_stage(key, raw, refl, destination, validator, optimizer):
     meta.update(key=key, tg=refl.get('threadgroup_size') if refl['stage'] in ('cs', 'ts', 'ms') else None,
                 bindings=bindings, warp_width=spv_warp_width.requirement(data, optimizer), **requirements(data))
     (destination / (key + '.vk.txt')).write_text(vk_txt(meta))
+    if refl['stage'] == 'ms':
+        reader = spv_meshstage.reader(refl['mesh_stage'])
+        reflection = dict(stage='vs', bindings=[dict(msl_name='dm_mesh_output', kind='mesh', reg=1)])
+        write_stage(key + '.mr', reader, reflection, destination, validator, optimizer)
     if refl['stage'] == 'vs':
         try:
             captured, control = geometry_capture(data)

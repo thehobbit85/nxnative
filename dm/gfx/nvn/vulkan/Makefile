@@ -827,3 +827,9 @@ global-memory-fixture: fixture
 	cp $(B)/global-memory-fixture/export/*.spv $(B)/global-memory-fixture/export/*.vk.txt $(B)/shaders/
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: global_memory.inc
 $(B)/t_replay: ../../../android/tests/global_memory_cases.h
+
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: mesh_replay.inc meshstage_contract.h
+$(B)/t_replay: tests/mesh_replay.inc
+.PHONY: mesh-replay-fixture
+mesh-replay-fixture: fixture
+	GLSLC="$(GLSLC)" python3 tests/mesh_fixture.py "$(B)/shaders"

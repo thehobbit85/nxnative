@@ -7,7 +7,12 @@ $(CLEAR_COLOR_HEADERS): $(CLEAR_GEN)/clear_color.%.inc: $(CLEAR_SRC)/clear_color
 	@mkdir -p "$(@D)"
 	"$(GLSLC)" --target-env=vulkan1.1 -O -mfmt=c -DCOLOR_TYPE=$* "$<" -o "$@.tmp"
 	@mv "$@.tmp" "$@"
-CLEAR_HEADERS += $(GEOMETRY_PACK_HEADERS)
+MESH_PACK_HEADERS := $(addprefix $(CLEAR_GEN)/mesh_pack.,0.inc 1.inc 2.inc)
+CLEAR_HEADERS += $(GEOMETRY_PACK_HEADERS) $(MESH_PACK_HEADERS)
+$(MESH_PACK_HEADERS): $(CLEAR_GEN)/mesh_pack.%.inc: $(CLEAR_SRC)/geometry_pack.comp
+	@mkdir -p "$(@D)"
+	"$(GLSLC)" --target-env=vulkan1.1 -O -mfmt=c -DMESH=1 -DPASS=$* "$<" -o "$@.tmp"
+	@mv "$@.tmp" "$@"
 $(GEOMETRY_PACK_HEADERS): $(CLEAR_GEN)/geometry_pack.%.inc: $(CLEAR_SRC)/geometry_pack.comp
 	@mkdir -p "$(@D)"
 	"$(GLSLC)" --target-env=vulkan1.1 -O -mfmt=c -DPASS=$* "$<" -o "$@.tmp"
