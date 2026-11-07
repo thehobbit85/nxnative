@@ -27,6 +27,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** synthetic `typed_buffers` replay: float/signed/unsigned reads, combined and samplerless descriptors, arrays with missing elements, format reinterpretation, exact size queries, a typed range overlapping a broader SSBO, shared image/buffer atomics, GPU-written input within/across submissions, dependent consumers and untouched guards. The shifted writable array fixture exercises a store, an atomic through the other view and an immediate read in one invocation at three relative offsets under forced legacy alignment. `typed_graphics` adds shared vertex/fragment image atomics over three draws, sampled buffers selected by GPU-produced uniform handles, ordered inline updates and a later compute consumer, with and without submission splits.
 - **Open:** typed descriptor pointers escaping to a function, and padded views exceeding the device texel limit, need further lowering. Packed formats on devices lacking native typed fetch still need coverage. Sparse texture buffers and public CPU texture operations need their own qualification. This is a tested slice, not full typed-buffer parity.
 
+### Vulkan logical texture and sampler slots
+
+- **Symptom** — a translated shader reports that `tex_slots` or `samp_slots` replay is required.
+- **Cause** — the shader exports a nonuniform array of logical NVN slots when its original handle arithmetic cannot be reduced to one fixed binding.
+- **Fix** — reuse sampled-image and typed-buffer descriptor population for all array elements. A texture element takes the combined slot, then the separate slot. A sampler element takes the separate sampler, then the sampler in the combined handle. The affected shader receives logical indices in C2's texture/sampler tables while overlapping image entries retain their image handles. The shared `tex_dyn_slots` profile opt-in remains required. Nonuniform capabilities and descriptor limits are checked before creating the layout.
+- **Found on** — the existing Maxwell export fixture executes 1,792 divergent buffer reads through all 32 slots, with separate-slot fallback, mismatched image shapes and output guards. A sampled-array fixture verifies independent samplers, combined-handle fallback and logical C2 words in both render modes.
+
 ### Vulkan descriptor exhaustion within one submission
 
 - **Symptom:** later draws or dispatches disappear after `descriptor pool exhausted in one submission: draws are dropped`.

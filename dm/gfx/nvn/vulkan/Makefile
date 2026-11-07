@@ -787,3 +787,15 @@ sampler-reduction-check: $(B)/t_sample_reduction $(REDUCTION_SHADERS) $(REDUCTIO
 	done
 	$(B)/t_sample_reduction $(B)/shaders/0000000000000075.spv $(B)/reduction-no-import.spv 0 no-import
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-no-import.spv
+
+$(B)/t_replay: tests/logical_slots.inc
+fixture: $(B)/shaders/00000000feedaa02.spv
+$(B)/shaders/00000000feedaa02.spv: tests/logical_slots.comp Makefile
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage cs\ntg 32 1 1\nb 0 tex 32 tex_slots -1 -1 - -1 view=1 num=0\nb 1 samp 32 samp_slots -1 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\nb 3 ubo 1 drvcb -1 2 - -1\n' > $(@:.spv=.vk.txt)
+.PHONY: logical-slots-fixture
+logical-slots-fixture: fixture
+	PATH="$(dir $(GLSLC)):$$PATH" python3 ../../../android/tests/resource_shapes_fixture.py $(B)/logical-slot-fixture slots
+	cp $(B)/logical-slot-fixture/export/00000000feed6100.spv $(B)/shaders/00000000feedaa01.spv
+	cp $(B)/logical-slot-fixture/export/00000000feed6100.vk.txt $(B)/shaders/00000000feedaa01.vk.txt
