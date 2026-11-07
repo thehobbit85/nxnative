@@ -122,11 +122,13 @@ static uint32_t *spv_wrapped_buffer(const uint32_t *words,size_t count,const uin
     m.ids=calloc(m.bound,sizeof *m.ids);
     if (!m.ids) goto fail;
     size_t functions=count;
-    int capability=0;size_t found=0;
+    int capability=0, nonuniform_images=0, nonuniform_buffers=0;size_t found=0;
     for (size_t i=5;i<count;) {
         const uint32_t *p=words+i;unsigned length=p[0]>>16,op=p[0]&0xffff;
         if (!length || length>count-i) goto fail;
         if (op==17 && length==2 && p[1]==46) capability=1;
+        if (op==17 && length==2 && p[1]==5307) nonuniform_images=1;
+        if (op==17 && length==2 && p[1]==5311) nonuniform_buffers=1;
         if (op>=19 && op<=33 && length>=2 && p[1]<m.bound) {
             m.ids[p[1]].declaration=i;
             if (op==20) m.module.boolean=p[1];
@@ -157,6 +159,7 @@ static uint32_t *spv_wrapped_buffer(const uint32_t *words,size_t count,const uin
     }
     if (!texel_append(&output,words,5)) goto fail;
     if (!capability) WRAP_OP(&output,17,46); // SampledBuffer
+    if (nonuniform_images && !nonuniform_buffers) WRAP_OP(&output,17,5311); // UniformTexelBufferArrayNonUniformIndexing
     for (size_t i=5;i<functions;i+=words[i]>>16) {
         const uint32_t *p=words+i;unsigned length=p[0]>>16,op=p[0]&0xffff;
         if (op==59 && length>=4 && p[2]<m.bound && m.ids[p[2]].affected) {

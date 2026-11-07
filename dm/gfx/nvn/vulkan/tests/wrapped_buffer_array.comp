@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x=1) in;
+#ifdef SEPARATE
+#extension GL_EXT_samplerless_texture_functions : require
+layout(binding=0) uniform utexture2D source[3];
+layout(binding=2) uniform sampler fixed_sampler;
+#define SOURCE(i) usampler2D(source[i],fixed_sampler)
+#else
+layout(binding=0) uniform usampler2D source[3];
+#define SOURCE(i) source[i]
+#endif
+layout(binding=1,std430) buffer Result { uvec4 values[]; } result;
+void main() {
+    uint lane=gl_GlobalInvocationID.x;
+    uint index=lane==0 ? 16384 : lane==1 ? 16 : 0;
+    result.values[lane]=uvec4(texelFetch(SOURCE(lane),ivec2(index%16384,index/16384),0).x,
+        textureSize(SOURCE(lane),0),textureQueryLevels(SOURCE(lane)));
+}

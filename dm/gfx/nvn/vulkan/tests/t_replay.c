@@ -36,6 +36,8 @@ static prog_t layered_program[2]={{.nstage=2},{.nstage=2}};
 static prog_t geometry_program={.nstage=3};
 static prog_t geometry_explicit_program={.nstage=3};
 static prog_t wrapped_buffer_program={.nstage=1};
+static prog_t wrapped_table_program={.nstage=1};
+static prog_t wrapped_array_program[2]={{.nstage=1},{.nstage=1}};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -82,6 +84,10 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    for (unsigned form=0;form<2;form++) if (p==&wrapped_array_program[form]) {
+        assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=2+form;return 1;
+    }
+    if (p==&wrapped_table_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=4;return 1; }
     if (p==&wrapped_buffer_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=1;return 1; }
     if (p==&geometry_program) { assert(stage<3);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9c;key[7]=1+stage;return 1; }
     if (p==&geometry_explicit_program) { assert(stage<3);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=stage==1 ? 0x9d : 0x9c;key[7]=1+stage;return 1; }

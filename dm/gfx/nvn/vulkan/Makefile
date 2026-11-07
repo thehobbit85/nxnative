@@ -13,6 +13,20 @@ $(B)/shaders/00000000feed9e01.spv: tests/wrapped_buffer.comp
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0 view=1 num=2 fetch1d=1\nb 1 ssbo 1 sbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 1 -1 - -1\nb 3 cis 1 tex 1 -1 samp_tex 1\n' > $(@:.spv=.vk.txt)
+fixture: $(B)/shaders/00000000feed9e02.spv $(B)/shaders/00000000feed9e03.spv
+$(B)/shaders/00000000feed9e02.spv: tests/wrapped_buffer_array.comp Makefile
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 3 tex_ubo 7 16 samp_tex 0 view=1 num=2\nb 1 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/00000000feed9e03.spv: tests/wrapped_buffer_array.comp Makefile
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DSEPARATE $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 tex 3 tex_ubo 7 16 - -1 view=1 num=2\nb 1 ssbo 1 sbuf 0 -1 - -1\nb 2 samp 1 samp 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+fixture: $(B)/shaders/00000000feed9e04.spv
+$(B)/shaders/00000000feed9e04.spv: tests/wrapped_buffer_table.comp Makefile
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 8192 tex_htab 7 0 samp_htab 8 runtime=1 pool_slot=0 soff=0 view=1 num=2\nb 1 ssbo 1 sbuf 0 -1 - -1\nb 2 ssbo 1 htab_map 0 -1 - -1 ro\n' > $(@:.spv=.vk.txt)
 $(B)/t_replay: tests/layered_attachments.inc
 $(B)/t_replay: tests/geometry_replay.inc
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: geometry_replay.inc ../nvn_geometry.h

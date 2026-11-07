@@ -52,7 +52,7 @@ static VkPhysicalDeviceMemoryProperties g_memp; static VkPhysicalDevicePropertie
 static uint64_t g_timestamp_mask;
 static int g_segment_timestamps, g_cut_draws;
 static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
-static int g_draw_parameters, g_descriptor_tables;
+static int g_draw_parameters, g_descriptor_tables, g_texel_descriptor_tables;
 static uint32_t g_vertex_divisor_limit = 1;
 static VkPhysicalDeviceTexelBufferAlignmentProperties g_texel_limits;
 static VkPhysicalDeviceSubgroupProperties g_subgroup;
@@ -577,6 +577,9 @@ static void vk_init_(void) {
     g_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
         f12.runtimeDescriptorArray && f12.shaderSampledImageArrayNonUniformIndexing :
         indexing.runtimeDescriptorArray && indexing.shaderSampledImageArrayNonUniformIndexing;
+    g_texel_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
+        f12.runtimeDescriptorArray && f12.shaderUniformTexelBufferArrayNonUniformIndexing :
+        indexing.runtimeDescriptorArray && indexing.shaderUniformTexelBufferArrayNonUniformIndexing;
     if (dv < VK_API_VERSION_1_2 && descriptor_indexing) ext[next++] = VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME;
     if (div_extension) {
         ext[next++]=div_extension;
@@ -2609,7 +2612,8 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
 // All storage descriptors of a command are resolved together. Overlapping
 // ranges share one backing allocation, so writes and atomics through either
 // descriptor see the same bytes, including across vertex and fragment sets.
-#define MAX_BUFFER_BINDINGS (2 * DM_VK_MAX_BINDINGS * 32) // two stages, reflected bindings, descriptor-array elements
+#define MAX_STAGE_TEXELS (DM_VK_MAX_BINDINGS * 32)
+#define MAX_BUFFER_BINDINGS (2 * (MAX_STAGE_TEXELS + DM_VK_MAX_BINDINGS))
 typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; VkDeviceSize texel_align; int writable, conflict; } storage_range;
 static storage_range g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
 static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
@@ -2660,7 +2664,7 @@ static VkFormat scaled_texel_format(unsigned format,uint32_t *encoding) {
 }
 static int texel_binding(const sbind *b, int stage, uint32_t element, texel_range *out) {
     *out = (texel_range){0};
-    uint64_t handle = b->kind == K_IMG && b->reg >= 0 && (uint32_t)b->reg + element < 32 ? S.img[stage][b->reg + element] : sampled_handle(stage, b, element);
+    uint64_t handle = b->kind == K_IMG && b->reg >= 0 && (uint32_t)b->reg + element < 32 ? S.img[stage][b->reg + element] : descriptor_handle(stage, b, element);
     int id = (int)(handle & 0xfffff), ok = 1;
     pthread_mutex_lock(&g_rmu);
     treg_t tr = id > 0 && id < g_ntreg ? g_treg[id] : (treg_t){0};
@@ -2841,11 +2845,17 @@ static int prepare_storage(shader_t **first, shader_t **second) {
     shader_t *stages[] = {*first, second ? *second : NULL};
     for (int st = 0; st < 2; st++) {
         shader_t *s = stages[st]; if (!s) continue;
+        uint32_t texel_count=0;
         for (int i = 0; i < s->nb; i++) {
             const sbind *b = &s->b[i];
             if (b->kind==K_GEOMETRY) continue;
             uint32_t count = is_texel(b) ? b->count : 1;
-            if (count > 32) return 0;
+            if (is_texel(b)) {
+                if (count>MAX_STAGE_TEXELS-texel_count) {
+                    RED_ONCE(23,"typed descriptor count exceeds the per-stage replay capacity");return 0;
+                }
+                texel_count+=count;
+            }
             for (uint32_t element = 0; element < count; element++) {
             p_bind_buf u = storage_binding(b, s->guest_stage);
             VkDeviceSize texel_align=0;
@@ -2908,7 +2918,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
                 bias[b]=(uint32_t)((g_storage[i].off+u.addr-g_storage[i].addr)%g_props.limits.minStorageBufferOffsetAlignment);break;
             }
         }
-        static texel_bias texels[DM_VK_MAX_BINDINGS*32];
+        static texel_bias texels[MAX_STAGE_TEXELS];
         size_t nt=0;
         if (needs_texel_variant && !shader_texel_biases(s,texels,&nt)) return 0;
         static sample_reduction *reductions;
@@ -2987,7 +2997,8 @@ static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
         VkBuffer view_buffer=t.single_usage ? single_usage_buffer(buffer,t.single_usage) : buffer;
         if (!view_buffer) { RED_ONCE(21,"cannot share Vulkan ring memory with a single-usage typed view"); return 0; }
         VkBufferViewCreateInfo vi = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, view_buffer, t.format, offset-prefix, size+prefix};
-        VKCHECK(vkCreateBufferView(g_dev, &vi, NULL, &views[element]));
+        unsigned slot=element%32;
+        VKCHECK(vkCreateBufferView(g_dev, &vi, NULL, &views[slot]));
         if (C->nbv == C->cbv) {
             if (C->cbv > SIZE_MAX / 2 / sizeof *C->bv) die("Vulkan: typed view tracking size overflow");
             size_t capacity = C->cbv ? C->cbv * 2 : 64;
@@ -2995,14 +3006,18 @@ static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
             if (!next) die("Vulkan: cannot track typed buffer views");
             C->bv = next; C->cbv = capacity;
         }
-        C->bv[C->nbv++] = views[element];
+        C->bv[C->nbv++] = views[slot];
         if (t.range.addr && b->type == BT_STB && !b->read_only) {
             if (g_nwb == sizeof g_wb / sizeof *g_wb) die("Vulkan: too many writable buffer bindings");
             g_wb[g_nwb++] = (gw_t){.addr = t.range.addr, .size = size, .buf = buffer, .off = offset, .p = mapped};
         }
+        if (slot==31 || element+1==b->count) {
+            VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding,
+                element-slot,slot+1,descriptor_type[b->type],NULL,NULL,views};
+            vkUpdateDescriptorSets(g_dev,1,&write,0,NULL);
+        }
     }
-    VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0, b->count, descriptor_type[b->type], NULL, NULL, views};
-    vkUpdateDescriptorSets(g_dev, 1, &write, 0, NULL); return 1;
+    return 1;
 }
 // The descriptor set is populated before the draw/dispatch. Only transfer ownership
 // to the GPU after a command using it has actually been recorded.

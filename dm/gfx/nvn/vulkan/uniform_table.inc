@@ -83,7 +83,8 @@ static int prepare_tables(shader_t **selected) {
     s = malloc(sizeof *s);
     if (!s) return 0;
     *s = *base;
-    s->buffer_variants=NULL; s->vertex_variants=NULL; s->cpp=VK_NULL_HANDLE; s->cpl=VK_NULL_HANDLE;
+    s->buffer_variants=NULL; s->vertex_variants=NULL; s->wrapped_variants=NULL;
+    s->fragment_variants=NULL; s->cpp=VK_NULL_HANDLE; s->cpl=VK_NULL_HANDLE;
     for (int i=0; i<s->nb; i++) {
         sbind *b=&s->b[i];
         if (b->table) b->count = table_cache[s->guest_stage][b->slot]->count;
