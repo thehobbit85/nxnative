@@ -37,6 +37,7 @@ static prog_t task_mesh_program={.nstage=3};
 static prog_t mesh_program={.nstage=2};
 static prog_t geometry_program={.nstage=3};
 static prog_t geometry_explicit_program={.nstage=3};
+static prog_t wrapped_mixed_program={.nstage=1};
 static prog_t wrapped_buffer_program={.nstage=1};
 static prog_t block_target_program={.nstage=2}, block_sample_program={.nstage=1};
 static prog_t wrapped_table_program={.nstage=1};
@@ -95,6 +96,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (unsigned form=0;form<3;form++) if (p==&wrapped_array_program[form]) {
         assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=form==2 ? 5 : 2+form;return 1;
     }
+    if (p==&wrapped_mixed_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=6;return 1; }
     if (p==&block_target_program || p==&block_sample_program) {
         memset(key,0,8);
         if (p==&block_target_program && !stage) key[7]=0x35;
