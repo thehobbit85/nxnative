@@ -2211,7 +2211,9 @@ static void pass_end(void) {
         if (wb) barrier_all(C->cb);
     }
 }
+static void diagnostic_note_targets(const rp_desc *pass);
 static void begin_tracked_pass(const rp_desc *d) {
+    diagnostic_note_targets(d);
     VkFramebuffer fb = rp_begin(C->cb, d);
     if (fb) {
         if (C->nfb == C->cfb) { C->cfb = C->cfb ? 2 * C->cfb : 256; C->fb = realloc(C->fb, C->cfb * sizeof *C->fb); }
@@ -4721,7 +4723,8 @@ static int rt_bpp(VkFormat format) {
         case VK_FORMAT_R4G4B4A4_UNORM_PACK16: case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
         case VK_FORMAT_R5G6B5_UNORM_PACK16: case VK_FORMAT_B5G6R5_UNORM_PACK16:
         case VK_FORMAT_R5G5B5A1_UNORM_PACK16: case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
-        case VK_FORMAT_A1R5G5B5_UNORM_PACK16: case VK_FORMAT_D16_UNORM: return 2;
+        case VK_FORMAT_A1R5G5B5_UNORM_PACK16: case VK_FORMAT_A4B4G4R4_UNORM_PACK16:
+        case VK_FORMAT_D16_UNORM: return 2;
         case VK_FORMAT_B10G11R11_UFLOAT_PACK32: case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
         case VK_FORMAT_X8_D24_UNORM_PACK32: case VK_FORMAT_D32_SFLOAT:
         case VK_FORMAT_D24_UNORM_S8_UINT: case VK_FORMAT_D32_SFLOAT_S8_UINT: return 4;
@@ -5175,6 +5178,5 @@ void nvn_cap_submit(int n, const uint64_t *handles) {
     if (getenv("DM_NVN_CAPTURE")) RED_ONCE(90, "live NVN capture is not implemented; use DM_VK_SHOTS / DM_VK_RTDUMP for images");
 }
 void nvn_cap_present(const tex_t *t, const int crop[4]) { (void)t; (void)crop; }
-void dm_gfx_texdump_next(const char *path) { (void)path; LOG("[RED] vk: DM_CTL texdump is unavailable; use DM_VK_RTDUMP"); }
 void dm_gfx_passdump_next(long n) { if (n > 0) atomic_store(&g_passdump_request, n); }
 void dm_gfx_restop(void) { LOG("vk: no Metal residency set; Vulkan image-memory totals are logged every 600 presents"); }

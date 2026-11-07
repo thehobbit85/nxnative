@@ -26,42 +26,61 @@ typedef struct {
     VkFormat format;
 } diagnostic_image;
 
+static int diagnostic_read_locked(vtex *texture,uint32_t level,uint32_t layer,uint32_t slices,
+                                  VkFormat format,diagnostic_image *out) {
+    int bytes=rt_bpp(format);
+    VkImageAspectFlags aspect=texture->aspect;
+    if (aspect&VK_IMAGE_ASPECT_DEPTH_BIT) aspect=VK_IMAGE_ASPECT_DEPTH_BIT;
+    if (!bytes || bytes!=rt_bpp(texture->f.f) || texture->samples!=VK_SAMPLE_COUNT_1_BIT) {
+        LOG("[RED] vk: diagnostic texture %llu format %d samples %u needs a conversion",(unsigned long long)texture->serial,format,texture->samples);
+        return 0;
+    }
+    if (level>=texture->levels) return 0;
+    uint32_t width=texture->w>>level, height=texture->h>>level;
+    if (!width) width=1;
+    if (!height) height=1;
+    uint32_t layers=texture->target==NVN_TEXTURE_TARGET_3D ? texture->d>>level : texture->layers;
+    if (!layers) layers=1;
+    if (layer>=layers || !slices || slices>layers-layer) return 0;
+    size_t row=(size_t)width*bytes, size=row*height;
+    if (size>SIZE_MAX/slices) return 0;
+    size*=slices;
+    uint8_t *data=malloc(size);
+    if (!data) return 0;
+    VkDeviceMemory memory;
+    void *mapped;
+    VkBuffer buffer=buf_new(size,VK_BUFFER_USAGE_TRANSFER_DST_BIT,&memory,&mapped);
+    VkBufferImageCopy region={.imageSubresource={aspect,level,0,1},.imageExtent={width,height,1}};
+    if (texture->target==NVN_TEXTURE_TARGET_3D) {
+        region.imageOffset.z=layer;
+        region.imageExtent.depth=slices;
+    } else {
+        region.imageSubresource.baseArrayLayer=layer;
+        region.imageSubresource.layerCount=slices;
+    }
+    VkCommandBuffer command=once_begin();
+    barrier_all(command);
+    vkCmdCopyImageToBuffer(command,texture->img,VK_IMAGE_LAYOUT_GENERAL,buffer,1,&region);
+    once_end(command);
+    memcpy(data,mapped,size);
+    *out=(diagnostic_image){data,row,size,width,height,slices,format};
+    vkDestroyBuffer(g_dev,buffer,NULL);
+    vkFreeMemory(g_dev,memory,NULL);
+    return 1;
+}
+
 static int diagnostic_read(uint64_t serial,int all_slices,diagnostic_image *out) {
     if (!g_dev) return 0;
     mtl_finish();
     pthread_mutex_lock(&g_rmu);
     vtex *texture=tex_find(serial);
-    if (!texture) {
-        pthread_mutex_unlock(&g_rmu);
-        LOG("[RED] vk: diagnostic texture %llu has no host image",(unsigned long long)serial);
-        return 0;
-    }
-    int bytes=rt_bpp(texture->f.f);
-    VkImageAspectFlags aspect=texture->aspect;
-    if (aspect&VK_IMAGE_ASPECT_DEPTH_BIT) aspect=VK_IMAGE_ASPECT_DEPTH_BIT;
-    if (!bytes || texture->samples!=VK_SAMPLE_COUNT_1_BIT) {
-        LOG("[RED] vk: diagnostic texture %llu format %d samples %u needs a conversion",(unsigned long long)serial,texture->f.f,texture->samples);
-        pthread_mutex_unlock(&g_rmu);return 0;
-    }
-    uint32_t slices=all_slices ? (texture->target==NVN_TEXTURE_TARGET_3D ? texture->d : texture->layers) : 1;
-    size_t row=(size_t)texture->w*bytes, size=row*texture->h;
-    if (!slices || size>SIZE_MAX/slices) { pthread_mutex_unlock(&g_rmu);return 0; }
-    size*=slices;
-    uint8_t *data=malloc(size);
-    if (!data) { pthread_mutex_unlock(&g_rmu);return 0; }
-    VkDeviceMemory memory;void *mapped;
-    VkBuffer buffer=buf_new(size,VK_BUFFER_USAGE_TRANSFER_DST_BIT,&memory,&mapped);
-    VkBufferImageCopy region={.imageSubresource={aspect,0,0,1},.imageExtent={texture->w,texture->h,1}};
-    if (texture->target==NVN_TEXTURE_TARGET_3D) region.imageExtent.depth=slices;
-    else region.imageSubresource.layerCount=slices;
-    VkCommandBuffer command=once_begin();barrier_all(command);
-    vkCmdCopyImageToBuffer(command,texture->img,VK_IMAGE_LAYOUT_GENERAL,buffer,1,&region);
-    once_end(command);
-    memcpy(data,mapped,size);
-    *out=(diagnostic_image){data,row,size,texture->w,texture->h,slices,texture->f.f};
-    vkDestroyBuffer(g_dev,buffer,NULL);vkFreeMemory(g_dev,memory,NULL);
+    int ok=0;
+    if (texture) {
+        uint32_t slices=all_slices ? (texture->target==NVN_TEXTURE_TARGET_3D ? texture->d : texture->layers) : 1;
+        ok=diagnostic_read_locked(texture,0,0,slices,texture->f.f,out);
+    } else LOG("[RED] vk: diagnostic texture %llu has no host image",(unsigned long long)serial);
     pthread_mutex_unlock(&g_rmu);
-    return 1;
+    return ok;
 }
 
 static int diagnostic_write(const char *path,const char *header,const void *data,size_t bytes) {
@@ -77,6 +96,13 @@ static int diagnostic_write(const char *path,const char *header,const void *data
     if (ok) chmod(path,0644);
     else { LOG("[RED] vk: diagnostic output %s failed (%s)",path,strerror(errno));unlink(temporary); }
     return ok;
+}
+
+static void diagnostic_write_png(const char *path,const uint8_t *rgba,uint32_t width,uint32_t height) {
+    int bytes=0;
+    uint8_t *png=stbi_write_png_to_mem(rgba,width*4,width,height,4,&bytes);
+    if (png && diagnostic_write(path,NULL,png,bytes)) LOG("vk: screenshot written to %s (%ux%u)",path,width,height);
+    free(png);
 }
 
 static void diagnostic_png(const tex_t *texture,const int crop[4],const char *path) {
@@ -103,10 +129,8 @@ static void diagnostic_png(const tex_t *texture,const int crop[4],const char *pa
         uint8_t *pixel=rgba+((size_t)y*width+x)*4;
         pixel[0]=source[bgr ? 2 : 0];pixel[1]=source[1];pixel[2]=source[bgr ? 0 : 2];pixel[3]=255;
     }
-    int bytes=0;
-    uint8_t *png=stbi_write_png_to_mem(rgba,width*4,width,height,4,&bytes);
-    if (png && diagnostic_write(path,NULL,png,bytes)) LOG("vk: screenshot written to %s (%ux%u)",path,width,height);
-    free(png);free(rgba);free(image.data);
+    diagnostic_write_png(path,rgba,width,height);
+    free(rgba);free(image.data);
 }
 
 void dm_gfx_shot_at(long frames,const char *path) {
@@ -121,6 +145,8 @@ void dm_gfx_shot_at(long frames,const char *path) {
     pthread_mutex_unlock(&g_diagnostic_mu);
 }
 
+#include "diagnostic_targets.inc"
+
 static void diagnostic_present(const tex_t *texture,uint64_t frame,const int crop[4]) {
     diagnostic_shot due[DIAGNOSTIC_SHOTS];unsigned count=0,keep=0;
     pthread_mutex_lock(&g_diagnostic_mu);
@@ -131,6 +157,7 @@ static void diagnostic_present(const tex_t *texture,uint64_t frame,const int cro
     g_nshots=keep;
     pthread_mutex_unlock(&g_diagnostic_mu);
     for (unsigned i=0;i<count;i++) diagnostic_png(texture,crop,due[i].path);
+    diagnostic_dump_targets(frame);
 }
 
 void dm_gfx_texraw(uint64_t serial,const char *path) {

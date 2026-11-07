@@ -5,6 +5,7 @@
 
 void dm_gfx_texraw(uint64_t serial,const char *path);
 void dm_gfx_texlist(int target);
+void dm_gfx_texdump_next(const char *path);
 
 static void graphics_diagnostics(void) {
 #ifdef __ANDROID__
@@ -49,11 +50,32 @@ static void graphics_diagnostics(void) {
         }
         stbi_image_free(image);
     }
+    tex_t target={.serial=0x17d01,.d={.width=8,.height=8,.depth=2,.levels=2,
+        .target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA16F}};
+    nvn_tex_layout(&target.d,&target.L);
+    dm_gfx_texdump_next("canceled-%d.png");
+    list=(list_t){0};
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target},.has_cview={1},
+        .cview={{.set_levels=1,.base_level=1,.nlevels=1,.set_layers=1,.min_layer=1,.nlayers=1}});
+    RECORD(OP_SCISSOR,p_scissor,.x=0,.y=0,.w=4,.h=4);
+    RECORD(OP_CLEAR_COLOR,p_clear_color,.index=0,.mask=15,.rgba={.25f,.5f,1.f,.75f});
+    put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    dm_gfx_texdump_next("diagnostic-target-%d.png"); // Release the canceled request's pins.
+    mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    mtl_tex_release(&target); // The pending dump owns the selected image.
+    mtl_present(&texture,0,NULL);
+    const char *target_path="diagnostic-target-97537-1-1.png";
+    int target_w,target_h,components;uint8_t *target_image=stbi_load(target_path,&target_w,&target_h,&components,4);
+    assert(target_image && target_w==4 && target_h==4);
+    for (unsigned i=0;i<16;i++) {
+        assert(target_image[4*i]==64 && target_image[4*i+1]==128 && target_image[4*i+2]==255 && target_image[4*i+3]==255);
+    }
+    stbi_image_free(target_image);unlink(target_path);
     unlink(raw);dm_gfx_texraw(UINT64_MAX,raw);assert(access(raw,F_OK));
     dm_gfx_texraw(texture.serial,"/proc/nxnative-unwritable.raw");
     dm_gfx_shot_at(1,"/proc/nxnative-unwritable.png");mtl_present(&texture,0,NULL);
     mtl_reg_tex(1650,NULL,NULL);mtl_tex_release(&texture);mtl_pool_del(pixels);mtl_queue_forget(1650);
     mtl_set_origin_lower_left(0);unlink(png);
     assert(!chdir(previous) && !rmdir(directory));free(previous);
-    puts("Graphics controls preserve delayed PNG crops/origin, raw array slices and failed-output diagnostics");
+    puts("Graphics controls preserve delayed PNG crops/origin, raw slices, canceled/released mip-layer targets and failed outputs");
 }
