@@ -69,13 +69,13 @@ static int prepare_tables(shader_t **selected) {
     shader_t *base = *selected;
     if (!base || !base->has_tables) return 1;
     for (int i=0; i<base->nb; i++)
-        if (base->b[i].table && !build_table(base->stage,&base->b[i])) return 0;
+        if (base->b[i].table && !build_table(base->guest_stage,&base->b[i])) return 0;
     shader_t *s = base;
     while (s) {
         int match = 1;
         for (int i=0; i<s->nb; i++) {
             const sbind *b = &s->b[i];
-            if (b->table && b->count != table_cache[s->stage][b->slot]->count) { match = 0; break; }
+            if (b->table && b->count != table_cache[s->guest_stage][b->slot]->count) { match = 0; break; }
         }
         if (match) { *selected=s; return s->dsl != VK_NULL_HANDLE; }
         s = s == base ? base->table_variants : s->next_table_variant;
@@ -86,7 +86,7 @@ static int prepare_tables(shader_t **selected) {
     s->buffer_variants=NULL; s->vertex_variants=NULL; s->cpp=VK_NULL_HANDLE; s->cpl=VK_NULL_HANDLE;
     for (int i=0; i<s->nb; i++) {
         sbind *b=&s->b[i];
-        if (b->table) b->count = table_cache[s->stage][b->slot]->count;
+        if (b->table) b->count = table_cache[s->guest_stage][b->slot]->count;
     }
     s->dsl=shader_layout(s);
     s->next_table_variant=base->table_variants; base->table_variants=s;
