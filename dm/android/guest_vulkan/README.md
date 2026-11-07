@@ -10,11 +10,13 @@ always return our typed wrappers, which enter the existing guarded host stack;
 native driver pointers and Android-only surface entry points are not exported to
 the guest. Procedure scope and native extension availability are both checked.
 
-The current increment covers instance/device discovery and creation. The only
-exposed extension is `VK_KHR_get_physical_device_properties2`, when the native
-loader supports it. Device extensions, resources, commands and Nintendo VI
-presentation are added as complete families. The Android builder still refuses
-guest Vulkan games until presentation and packaging are qualified.
+The frontend currently covers instance/device discovery, memory, buffers/images,
+descriptors, render passes and SPIR-V graphics pipeline creation. Extension
+enumeration intersects the native driver with implemented families: physical
+device properties2, memory requirements2, dedicated allocation, bind memory2 and
+descriptor update templates. Commands and Nintendo VI presentation are still
+open. The Android builder refuses guest Vulkan games until presentation and
+packaging are qualified.
 
 Allocation callbacks use the host allocator, matching the Apple frontend's
 policy. Instance creation chains and device chains other than core
@@ -36,3 +38,13 @@ make -C dm/android/guest_vulkan/tests GAME=<title-id> B=<scratch-directory>
 Run `t_dispatch` on an ARM64 Android emulator. It uses real registered guest
 entry points and the native Vulkan driver, including two independent devices,
 extension rejection/enumeration, KHR aliases, and a guarded 8 KiB guest stack.
+
+The `resources` target adds `t_resources`, which checks mapped-memory round trips,
+descriptor writes/templates, image/framebuffer creation, native SPIR-V graphics
+pipeline compilation and pipeline-cache export/reload on those same devices and
+stacks. Pixel execution is a separate next check, not implied by pipeline creation.
+
+`generate.py` builds the typed resource wrappers from an explicit command list
+and the repository's pinned Vulkan headers. Run `generate.py --check` to verify
+the checked-in source; unsupported commands are not auto-exported. The compiler
+also verifies every wrapper against its Vulkan function-pointer type.

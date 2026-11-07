@@ -6,8 +6,11 @@
 
 static const char *const instance_extensions[] = {VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME};
 // Device extensions are added as complete command families are implemented.
-static const char *const *device_extensions;
-static const unsigned device_extension_count;
+static const char *const device_extensions[] = {
+    VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME, VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+    VK_KHR_BIND_MEMORY_2_EXTENSION_NAME, VK_KHR_DESCRIPTOR_UPDATE_TEMPLATE_EXTENSION_NAME,
+};
+static const unsigned device_extension_count = sizeof device_extensions / sizeof *device_extensions;
 
 static int listed(const char *name, const char *const *names, unsigned count) {
     for (unsigned i = 0; i < count; ++i) if (!strcmp(name, names[i])) return 1;
