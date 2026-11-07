@@ -3168,7 +3168,13 @@ static void native_warp_width(unsigned available) {
 #ifdef DM_VK_TEST_ANDROID_SURFACE
 #include "present_surface.inc"
 #endif
+#ifdef DM_VK_TEST_SAMPLER_LIMITS
+#include "sampler_limits.inc"
+#endif
 int main(void) {
+#ifdef DM_VK_TEST_SAMPLER_LIMITS
+    sampler_limits(); return 0;
+#endif
 #ifdef DM_VK_TEST_ANDROID_SURFACE
     surface_history(); return 0;
 #endif

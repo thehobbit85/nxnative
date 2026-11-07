@@ -407,6 +407,7 @@ static int g_vertex_stores, g_has_u8, g_storage_ms, g_precise_visibility, g_dept
 static int g_logic_op, g_non_solid_fill;
 static uint32_t g_custom_border_limit, g_custom_border_count;
 static int g_border_from_image, g_border_without_format;
+static float g_max_anisotropy;
 enum { ZERO_BUFFER_BYTES=64<<10 };
 static VkSampler g_dummy_samp; static VkImage g_dummy_img; static VkImageView g_dummy_view; static VkBuffer g_zero_buf, g_support_buf; static VkDeviceMemory g_zero_mem, g_support_mem;
 static void dummies(void);
@@ -534,6 +535,7 @@ static void vk_init_(void) {
     if (dv >= VK_API_VERSION_1_2) { f12.pNext = chain; chain = &f12; f11.pNext = chain; chain = &f11; } else { sdp.pNext = chain; chain = &sdp; }
     VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, chain};
     vkGetPhysicalDeviceFeatures2(g_pd, &f2);
+    g_max_anisotropy = f2.features.samplerAnisotropy ? fminf(16, g_props.limits.maxSamplerAnisotropy) : 1;
     g_draw_parameters = dv >= VK_API_VERSION_1_2 ? f11.shaderDrawParameters : sdp.shaderDrawParameters;
     g_vertex_stores = f2.features.vertexPipelineStoresAndAtomics;
     g_storage_ms = f2.features.shaderStorageImageMultisample;
@@ -1348,8 +1350,13 @@ static VkSampler sampler_for(samp_par p, border_view view) {
     si.minFilter = p.minf == 1 || p.minf == 3 || p.minf == 5 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     si.mipmapMode = p.minf == 4 || p.minf == 5 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU = wrap(p.ws); si.addressModeV = wrap(p.wt); si.addressModeW = wrap(p.wr);
-    si.mipLodBias = p.lod_bias; si.minLod = p.minf >= 2 ? p.lod_min : 0; si.maxLod = p.minf >= 2 ? p.lod_max : 0.25f;
-    if (p.aniso > 1) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = p.aniso > 16 ? 16 : p.aniso; }
+    float bias_limit = g_props.limits.maxSamplerLodBias;
+    si.mipLodBias = fminf(fminf(15.99f, bias_limit), fmaxf(fmaxf(-16, -bias_limit), p.lod_bias));
+    si.minLod = p.minf >= 2 ? fmaxf(0, p.lod_min) : 0;
+    si.maxLod = p.minf >= 2 ? fmaxf(si.minLod, p.lod_max) : 0.25f;
+    // Metal exposes whole-number anisotropy through its sampler descriptor.
+    si.maxAnisotropy = fminf(g_max_anisotropy, fmaxf(1, floorf(p.aniso)));
+    si.anisotropyEnable = si.maxAnisotropy > 1;
     if (p.cmp_mode) { si.compareEnable = VK_TRUE; si.compareOp = (VkCompareOp)(p.cmp_func ? p.cmp_func - 1 : 7); }
     VkSamplerCustomBorderColorCreateInfoEXT custom = {VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT};
     if (border && (view.flags & BORDER_FLOAT_AND_INT)) {
