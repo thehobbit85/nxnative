@@ -33,6 +33,7 @@ static prog_t sampler_reduction_program[13][5][2];
 static prog_t sampler_array_program[3][2][2];
 static prog_t sampler_compare_program[12][2];
 static prog_t layered_program[2]={{.nstage=2},{.nstage=2}};
+static prog_t geometry_program={.nstage=3};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -79,6 +80,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p==&geometry_program) { assert(stage<3);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9c;key[7]=1+stage;return 1; }
     for (int i=0; i<2; i++) if (p==&layered_program[i]) {
         assert(stage<2);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9b;key[7]=stage ? 3 : 1+i;return 1;
     }
@@ -618,6 +620,7 @@ static void float_image_views(void) {
 #include "empty_ms.inc"
 #include "subresource_views.inc"
 #include "layered_attachments.inc"
+#include "geometry_replay.inc"
 #include "one_row_guest.inc"
 #include "sampler_reduction.inc"
 #include "bc_views.inc"
@@ -3303,6 +3306,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_SUBRESOURCES")) { subresource_views(); return 0; }
     if (getenv("DM_VK_TEST_LAYERED")) { layered_attachments(); return 0; }
     if (getenv("DM_VK_TEST_LAYERED_CLEAR")) { layered_clears(); return 0; }
+    if (getenv("DM_VK_TEST_GEOMETRY")) { geometry_replay(); return 0; }
     if (getenv("DM_VK_TEST_ONE_ROW_GUEST")) { one_row_guest(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_COMPARE")) { sampler_reduction_compare(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_ARRAY")) { sampler_reduction_arrays(); return 0; }

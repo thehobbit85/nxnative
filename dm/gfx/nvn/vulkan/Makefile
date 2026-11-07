@@ -4,6 +4,11 @@ HOST = ../../../host
 NVN = ..
 B ?= build
 $(B)/t_replay: tests/layered_attachments.inc
+$(B)/t_replay: tests/geometry_replay.inc
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: geometry_replay.inc ../nvn_geometry.h
+.PHONY: geometry-replay-fixture
+geometry-replay-fixture: fixture
+	GLSLC="$(GLSLC)" python3 tests/geometry_fixture.py "$(B)/shaders"
 fixture: $(B)/shaders/00000000feed9b01.spv $(B)/shaders/00000000feed9b02.spv $(B)/shaders/00000000feed9b03.spv
 $(B)/shaders/00000000feed9b02.spv: LAYER_FLAGS = -DSINGLE_LAYER
 $(B)/shaders/00000000feed9b01.spv $(B)/shaders/00000000feed9b02.spv: tests/layered.vert

@@ -1,6 +1,14 @@
 // Use the exported .vc vertex entry during the ordinary draw. It preserves
 // rasterization and the guest's storage side effects, and emits one unpacked
 // record per vertex/instance. A compute pass packs those records for NVN.
+static shader_t *feedback_capture_shader(shader_t *vs) {
+    if (!vs->capture_variant) {
+        char key[32];
+        snprintf(key,sizeof key,"%.28s.vc",vs->key);
+        vs->capture_variant=shader_by_key(key);
+    }
+    return vs->capture_variant;
+}
 static shader_t *feedback_vertex(shader_t *vs, const p_draw *draw, capture_draw *capture) {
     if (!draw || draw->instances < 0 || (draw->prim != NVN_DRAW_PRIMITIVE_POINTS &&
         draw->prim != NVN_DRAW_PRIMITIVE_LINES && draw->prim != NVN_DRAW_PRIMITIVE_TRIANGLES) ||
@@ -27,12 +35,7 @@ static shader_t *feedback_vertex(shader_t *vs, const p_draw *draw, capture_draw 
         (capacity+63)/64 > g_props.limits.maxComputeWorkGroupCount[0]) {
         RED_ONCE(102, "transform feedback scratch exceeds the device capture range"); return vs;
     }
-    if (!vs->capture_variant) {
-        char key[20];
-        snprintf(key,sizeof key,"%.16s.vc",vs->key);
-        vs->capture_variant=shader_by_key(key);
-    }
-    shader_t *entry = vs->capture_variant;
+    shader_t *entry = feedback_capture_shader(vs);
     if (!entry->mod || !entry->capture_entry || !entry->feedback_layout ||
         memcmp(entry->feedback_layout,vs->feedback_layout,sizeof *vs->feedback_layout)) {
         RED_ONCE(100, "missing transform feedback capture entry for %s", vs->key); return vs;

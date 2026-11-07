@@ -1,0 +1,71 @@
+#version 450
+// The shared Metal geometry compactor's ordered point/line/triangle lists.
+layout(local_size_x=64) in;
+layout(binding=0,std430) readonly buffer Raw { uint raw[]; };
+layout(binding=1,std430) buffer Packed { uint packed[]; };
+layout(binding=2,std430) buffer Counts { uint counts[]; };
+layout(binding=3,std430) buffer Arguments { uint arguments[]; };
+layout(push_constant) uniform Parameters { uint groups, stride, topology, capacity; };
+shared uint sums[64];
+
+uint group_vertices(uint group, bool write_output, uint offset) {
+    uint a=0, b=0, vertices=0, written=0;
+    for (uint i=0; i<stride; i++) {
+        uint value=raw[group*stride+i];
+        if (value==0xffffffffu) { vertices=0; continue; }
+        uint amount=topology==1 ? 1 : topology==6 ? (vertices>0 ? 2 : 0) : (vertices>=2 ? 3 : 0);
+        bool room=offset<=capacity && written<=capacity-offset && amount<=capacity-offset-written;
+        if (write_output && amount>0 && room) {
+            if (amount==3) {
+                packed[offset+written]=(vertices&1u)!=0 ? b : a;
+                packed[offset+written+1]=(vertices&1u)!=0 ? a : b;
+            } else if (amount==2) packed[offset+written]=b;
+            packed[offset+written+amount-1]=value;
+        }
+        written+=amount;
+        a=b; b=value; vertices++;
+    }
+    return written;
+}
+
+void inclusive_scan(uint lane) {
+    barrier();
+    for (uint step=1; step<64; step*=2) {
+        uint addition=lane>=step ? sums[lane-step] : 0;
+        barrier();
+        sums[lane]+=addition;
+        barrier();
+    }
+}
+
+void main() {
+    uint lane=gl_LocalInvocationIndex;
+#if PASS == 0
+    uint group=gl_GlobalInvocationID.x;
+    uint count=group<groups ? group_vertices(group,false,0) : 0;
+    sums[lane]=count;
+    inclusive_scan(lane);
+    if (group<groups) counts[group]=sums[lane]-count;
+    if (lane==63) counts[groups+gl_WorkGroupID.x]=sums[lane];
+#elif PASS == 1
+    uint blocks=(groups+63)/64, chunk=(blocks+63)/64;
+    uint first=lane*chunk, end=min(first+chunk,blocks), total=0;
+    for (uint block=first; block<end; block++) total+=counts[groups+block];
+    sums[lane]=total;
+    inclusive_scan(lane);
+    uint offset=sums[lane]-total;
+    for (uint block=first; block<end; block++) {
+        uint count=counts[groups+block];
+        counts[groups+block]=offset;
+        offset+=count;
+    }
+    if (lane==0) {
+        uint width=topology==1 ? 1 : topology==6 ? 2 : 3;
+        arguments[0]=min(sums[63],capacity-capacity%width);
+        arguments[1]=1; arguments[2]=0; arguments[3]=0; arguments[4]=0;
+    }
+#else
+    uint group=gl_GlobalInvocationID.x;
+    if (group<groups) group_vertices(group,true,counts[group]+counts[groups+group/64]);
+#endif
+}
