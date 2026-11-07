@@ -8,7 +8,7 @@
 #include "nvn_mtl.h"
 
 // This standalone fixture has no loader or SDK module and records Switch 1 work.
-int dm_sdk_ounce(void) { return 0; }
+__attribute__((weak)) int dm_sdk_ounce(void) { return 0; }
 
 #define UNAVAILABLE(ret, name, ...) __attribute__((weak)) ret name(__VA_ARGS__) { die("public recorder fixture reached unavailable hook %s", #name); }
 

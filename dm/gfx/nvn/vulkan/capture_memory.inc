@@ -2,6 +2,7 @@ static void cap_head(void) {
     cap_buf head={0};char line[2048];
 #define CAP_KV(...) do { int length=snprintf(line,sizeof line,__VA_ARGS__); if (length>0) cap_buf_put(&head,line,CAP_MIN((size_t)length,sizeof line-1)); } while (0)
     CAP_KV("format\t%u\nbackend\tvulkan\niface\t%d\nchain\t%s\ntitle\t%s\n",CAP_VERSION,CAP_VK_IFACE,DMSH_CHAIN,DM_GAME_ID);
+    CAP_KV("ounce\t%d\n",dm_sdk_ounce());
     CAP_KV("frame\t%d\nframes\t1\n",g_cap_frame);
     CAP_KV("device\t%s\nvendor\t%u\ndriver\t%u\n",g_props.deviceName,g_props.vendorID,g_props.driverVersion);
     extern char **environ;

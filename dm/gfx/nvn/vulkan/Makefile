@@ -850,3 +850,19 @@ capture-inspect: $(B)/capture-inspect
 $(B)/capture-inspect: tests/capture_inspect.c capture_format.h ../nvn_capture.c ../nvn_capture.h $(wildcard $(LZFSE)/*.[ch])
 	mkdir -p $(B)
 	$(CC) -D_GNU_SOURCE -O2 -I.. -I../include $< ../nvn_capture.c $(wildcard $(LZFSE)/*.c) -o $@
+
+# Offline Vulkan frame replay; only this tool includes the backend to restore
+# captured GPU contents. The application's public interfaces stay unchanged.
+ARCHIVE_REPLAY_SRC = tests/nvn_replay.c tests/replay_recorder.c $(filter-out nvn_vk.c,$(RECORDER_SRC))
+$(B)/nvn_replay: $(ARCHIVE_REPLAY_SRC) nvn_vk.c $(wildcard *.inc *.h ../*.h) ../hle_nvn.c $(CLEAR_HEADERS) $(GAME_H) | profile
+	mkdir -p $(B)
+	$(CC) $(CPPFLAGS) $(RECORDER_CPPFLAGS) $(CFLAGS) -DDM_NVN_VULKAN $(ARCHIVE_REPLAY_SRC) $(RECORDER_LDFLAGS) -o $@ $(LIBS)
+.PHONY: android-capture-replay
+android-capture-replay: RECORDER_CPPFLAGS = -I../../../android/compat
+android-capture-replay: CFLAGS += -fPIC -fvisibility=hidden -Wno-format -ffunction-sections -fdata-sections
+android-capture-replay: RECORDER_LDFLAGS = -Wl,--gc-sections -Wl,--no-undefined -Wl,-z,max-page-size=16384
+android-capture-replay: LIBS = -lvulkan -landroid -lm -ldl
+android-capture-replay: $(B)/nvn_replay
+$(B)/capture-mutate: tests/capture_mutate.c capture_format.h ../nvn_capture.c ../nvn_capture.h ../nvn_obj.h $(wildcard $(LZFSE)/*.[ch]) | profile
+	mkdir -p $(B)
+	$(CC) $(CPPFLAGS) -O2 -o $@ $< ../nvn_capture.c $(wildcard $(LZFSE)/*.c)
