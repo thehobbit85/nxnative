@@ -25,7 +25,7 @@ SRC := $(HOST)/main.c $(HOST)/loader.c $(HOST)/hle.c $(HOST)/crash.c $(HOST)/pro
 # The donor Vulkan implementation lives beside the shared NVN recorder.
 SRC += ../gfx/nvn/vulkan/nvn_vk.c
 SRC += $(HOST)/watch_android.c $(HOST)/memstat_android.c
-LOCAL := compat/sha256.c $(sort $(wildcard src/*.c))
+LOCAL := compat/sha256.c $(sort $(wildcard src/*.c guest_vulkan/*.c))
 SRC += $(sort $(wildcard ../third_party/lzfse/*.c))
 OBJ := $(patsubst ../%,$(OUT)/obj/%.o,$(SRC)) $(patsubst %,$(OUT)/obj/android/%.o,$(LOCAL))
 CODEC_DIR := $(BUILD_ROOT)/codecs
