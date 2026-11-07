@@ -241,6 +241,18 @@ $(B)/t_replay: tests/empty_ms.inc
 $(B)/t_replay: tests/subresource_views.inc
 $(B)/t_replay: tests/sampler_reduction.inc tests/cube_reduction.inc tests/draw_texture_anisotropy.inc
 $(B)/t_replay: tests/sampler_anisotropy.inc
+$(B)/t_replay: tests/sampler_gather.inc
+.PHONY: sampler-gather-fixture
+fixture: sampler-gather-fixture
+sampler-gather-fixture:
+	GLSLC="$(GLSLC)" python3 tests/sampler_gather_fixture.py "$(B)/shaders"
+.PHONY: sampler-gather-check
+sampler-gather-check: sampler-gather-fixture $(B)/t_sample_reduction
+	@set -e; for input in $(B)/shaders/00000000feedb3*.spv; do \
+	  key=$${input##*/}; value=$${key%.spv}; binding=$$(( (0x$$value % 2) * 3 )); \
+	  $(B)/t_sample_reduction "$$input" "$(B)/reduction-$$key" "$$binding" anisotropy; \
+	  $(SPIRV_VAL) --target-env vulkan1.1 "$(B)/reduction-$$key"; \
+	done
 .PHONY: sampler-anisotropy-fixture
 fixture: sampler-anisotropy-fixture
 sampler-anisotropy-fixture:

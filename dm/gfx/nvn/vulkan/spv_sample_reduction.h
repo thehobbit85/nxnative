@@ -426,6 +426,13 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
         }
         uint32_t binding = len >= 4 && p[3] < m.bound ? m.ids[p[3]].binding : 0;
         if (binding && ((op >= 87 && op <= 94) || op == 96 || op == 97 || op == 105 || (op >= 305 && op <= 315))) {
+            // Gather returns four separate base-level texels, without spatial,
+            // mip or anisotropic filtering. The point sampler keeps addressing
+            // and comparison intact; sparse gathers also keep their residency.
+            if (op==96 || op==97 || op==314 || op==315) {
+                if (!texel_append(&m.code.body,p,len)) goto fail;
+                i+=len;continue;
+            }
             *reason = "reduction currently needs a direct 2D/3D/cube float sample or LOD query";
             reduction_filter selected;
             if (!reduction_filter_for(&m, m.ids[p[3]], filters, nf, &selected)) goto fail;

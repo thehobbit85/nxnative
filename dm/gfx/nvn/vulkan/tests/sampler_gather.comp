@@ -1,0 +1,58 @@
+#version 450
+layout(local_size_x=1) in;
+#if SHAPE == 0
+#define TEXTURE texture2D
+#define COLOR_SAMPLER sampler2D
+#define DEPTH_SAMPLER sampler2DShadow
+#define COORD params.coordinate.xy
+#elif SHAPE == 1
+#define TEXTURE texture2DArray
+#define COLOR_SAMPLER sampler2DArray
+#define DEPTH_SAMPLER sampler2DArrayShadow
+#define COORD params.coordinate.xyz
+#elif SHAPE == 2
+#define TEXTURE textureCube
+#define COLOR_SAMPLER samplerCube
+#define DEPTH_SAMPLER samplerCubeShadow
+#define COORD params.coordinate.xyz
+#else
+#define TEXTURE textureCubeArray
+#define COLOR_SAMPLER samplerCubeArray
+#define DEPTH_SAMPLER samplerCubeArrayShadow
+#define COORD params.coordinate
+#endif
+#ifdef SHADOW
+#define SAMPLER DEPTH_SAMPLER
+#define COMPONENT params.reference.x
+#else
+#define SAMPLER COLOR_SAMPLER
+#define COMPONENT 0
+#endif
+#ifdef SEPARATE
+layout(binding=0) uniform TEXTURE source;
+layout(binding=3) uniform sampler filtering;
+#define SOURCE SAMPLER(source,filtering)
+#else
+layout(binding=0) uniform SAMPLER source;
+#define SOURCE source
+#endif
+layout(binding=1,std430) buffer Result { vec4 value; } result;
+layout(binding=2,std140) uniform Parameters { vec4 coordinate,reference; } params;
+void main() {
+#if FORM == 0
+    result.value=textureGather(SOURCE,COORD,COMPONENT);
+#elif FORM == 1
+#ifdef SHADOW
+    result.value=textureGatherOffset(SOURCE,COORD,COMPONENT,ivec2(1,-1));
+#else
+    result.value=textureGatherOffset(SOURCE,COORD,ivec2(1,-1),COMPONENT);
+#endif
+#else
+    const ivec2 offsets[4]=ivec2[](ivec2(-1,0),ivec2(1,0),ivec2(0,-1),ivec2(0,1));
+#ifdef SHADOW
+    result.value=textureGatherOffsets(SOURCE,COORD,COMPONENT,offsets);
+#else
+    result.value=textureGatherOffsets(SOURCE,COORD,offsets,COMPONENT);
+#endif
+#endif
+}
