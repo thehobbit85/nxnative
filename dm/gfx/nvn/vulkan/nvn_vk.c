@@ -3169,9 +3169,9 @@ static int write_sampled_binding(VkDescriptorSet ds, const sbind *b, int stage, 
 }
 
 typedef struct {
-    VkDescriptorBufferInfo records, control;
+    VkDescriptorBufferInfo records, control, order, indirect;
     const dm_vk_feedback *layout;
-    uint32_t capacity, primitive;
+    uint32_t source_records, capacity, primitive;
 } capture_draw;
 static struct {
     int phase;

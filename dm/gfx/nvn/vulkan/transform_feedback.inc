@@ -9,30 +9,37 @@ static shader_t *feedback_capture_shader(shader_t *vs) {
     }
     return vs->capture_variant;
 }
+static uint32_t feedback_capacity(const dm_vk_feedback *layout, uint64_t count) {
+    if (!g_vertex_stores || !S.feedback) {
+        RED_ONCE(101, "transform feedback needs vertex storage and initialized controls"); return 0;
+    }
+    uint64_t capacity=count;
+    for (unsigned b=0; b<4; b++) if (layout->stride[b]) {
+        const p_tf_bind *range = &S.feedback_streams[b];
+        if (!range->addr || range->size > g_props.limits.maxStorageBufferRange ||
+            !mtl_addr(range->addr,range->size,NULL,NULL)) {
+            RED_ONCE(102, "transform feedback output is unbound or exceeds the device storage limit"); return 0;
+        }
+        uint64_t records = range->size / layout->stride[b];
+        if (records < capacity) capacity = records;
+    }
+    if (capacity>UINT32_MAX || (capacity+63)/64>g_props.limits.maxComputeWorkGroupCount[0]) {
+        RED_ONCE(102,"transform feedback gather exceeds the device dispatch limit"); return 0;
+    }
+    return (uint32_t)capacity;
+}
 static shader_t *feedback_vertex(shader_t *vs, const p_draw *draw, capture_draw *capture) {
     if (!draw || draw->instances < 0 || (draw->prim != NVN_DRAW_PRIMITIVE_POINTS &&
         draw->prim != NVN_DRAW_PRIMITIVE_LINES && draw->prim != NVN_DRAW_PRIMITIVE_TRIANGLES) ||
         S.bst[2] || S.bst[3] || S.bst[4]) {
         RED_ONCE(101, "transform feedback requires a vertex point, line or triangle list"); return vs;
     }
-    if (!g_vertex_stores || !S.feedback) {
-        RED_ONCE(101, "transform feedback needs vertex storage and initialized controls"); return vs;
-    }
     if (draw->count <= 0) return vs;
     unsigned instances = draw->instances ? (unsigned)draw->instances : 1;
-    uint64_t count = (uint64_t)draw->count * instances, capacity = count;
-    for (unsigned b=0; b<4; b++) if (vs->feedback_layout->stride[b]) {
-        const p_tf_bind *range = &S.feedback_streams[b];
-        if (!range->addr || range->size > g_props.limits.maxStorageBufferRange ||
-            !mtl_addr(range->addr,range->size,NULL,NULL)) {
-            RED_ONCE(102, "transform feedback output is unbound or exceeds the device storage limit"); return vs;
-        }
-        uint64_t records = range->size / vs->feedback_layout->stride[b];
-        if (records < capacity) capacity = records;
-    }
+    uint64_t count = (uint64_t)draw->count * instances;
+    uint32_t capacity=feedback_capacity(vs->feedback_layout,count);
     if (!capacity) return vs;
-    if (count > g_props.limits.maxStorageBufferRange / (144*4) ||
-        (capacity+63)/64 > g_props.limits.maxComputeWorkGroupCount[0]) {
+    if (count > g_props.limits.maxStorageBufferRange / (144*4)) {
         RED_ONCE(102, "transform feedback scratch exceeds the device capture range"); return vs;
     }
     shader_t *entry = feedback_capture_shader(vs);
@@ -49,6 +56,7 @@ static shader_t *feedback_vertex(shader_t *vs, const p_draw *draw, capture_draw 
     offset = ring_put(control,sizeof control,g_props.limits.minUniformBufferOffsetAlignment);
     capture->control = (VkDescriptorBufferInfo){C->ring,offset,sizeof control};
     capture->layout = vs->feedback_layout;
+    capture->source_records = (uint32_t)count;
     capture->capacity = (uint32_t)capacity;
     capture->primitive = draw->prim == NVN_DRAW_PRIMITIVE_POINTS ? 1 : draw->prim == NVN_DRAW_PRIMITIVE_LINES ? 2 : 3;
     return entry;
@@ -86,7 +94,8 @@ static void feedback_finish(const capture_draw *capture) {
     static const uint32_t gather_code[] =
 #include "feedback_gather.comp.inc"
     ;
-    static shader_t prepare = {.stage=5,.nb=2,.b={{.type=BT_SSBO,.count=1},{.binding=1,.type=BT_SSBO,.count=1}}};
+    static shader_t prepare = {.stage=5,.nb=3,.b={{.type=BT_SSBO,.count=1},{.binding=1,.type=BT_SSBO,.count=1},
+        {.binding=2,.type=BT_SSBO,.count=1}}};
     static shader_t gather = {.stage=5,.nb=4,.b={{.type=BT_SSBO,.count=1},{.binding=1,.type=BT_SSBO,.count=1},
         {.binding=2,.type=BT_SSBO,.count=1},{.binding=3,.type=BT_UBO,.count=1}}};
     pass_end();
@@ -96,24 +105,27 @@ static void feedback_finish(const capture_draw *capture) {
     VkDeviceSize stride=(sizeof(dm_vk_feedback_gather)+align-1)/align*align;
     VkDeviceSize offset=ring_alloc(4*stride,align);
     VkDescriptorBufferInfo jobs={C->ring,offset,4*stride};
-    uint32_t params[11]={0};
+    uint32_t params[12]={0};
     for (unsigned b=0;b<4;b++) if (capture->layout->stride[b]) {
         dm_vk_feedback_gather *job=(void *)(C->ringp+offset+b*stride);
         memset(job,0,sizeof *job);
         if (!dm_vk_feedback_gather_layout(capture->layout,b,job)) die("Vulkan: invalid feedback layout");
-        job->source_records=capture->capacity;
+        job->source_records=capture->source_records;
+        job->ordered=capture->order.buffer!=VK_NULL_HANDLE;
         params[b]=capture->layout->stride[b];
         params[b+4]=(uint32_t)S.feedback_streams[b].size;
     }
     params[8]=capture->capacity; params[9]=capture->primitive; params[10]=(uint32_t)(stride/4);
-    const VkDescriptorBufferInfo setup[]={{S.feedback->buffer,0,FEEDBACK_BYTES},jobs};
+    params[11]=capture->indirect.buffer!=VK_NULL_HANDLE;
+    VkDescriptorBufferInfo empty={g_zero_buf,0,4};
+    const VkDescriptorBufferInfo setup[]={{S.feedback->buffer,0,FEEDBACK_BYTES},jobs,params[11] ? capture->indirect : empty};
     barrier_all(C->cb);
     feedback_dispatch(&prepare,prepare_code,sizeof prepare_code,setup,params,sizeof params,1);
     barrier_all(C->cb);
     for (unsigned b=0;b<4;b++) if (capture->layout->stride[b]) {
         const p_tf_bind *dst=&S.feedback_streams[b];
         VkDeviceSize out=copy_in(dst->addr,dst->size,sa);
-        const VkDescriptorBufferInfo buffers[]={capture->records,{g_zero_buf,0,4},{C->ring,out,dst->size},
+        const VkDescriptorBufferInfo buffers[]={capture->records,capture->order.buffer ? capture->order : empty,{C->ring,out,dst->size},
             {jobs.buffer,jobs.offset+b*stride,sizeof(dm_vk_feedback_gather)}};
         feedback_dispatch(&gather,gather_code,sizeof gather_code,buffers,NULL,0,(capture->capacity+63u)/64u);
         barrier_all(C->cb);
