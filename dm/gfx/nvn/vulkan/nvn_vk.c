@@ -1133,7 +1133,9 @@ enum { VIEW_SAMPLED, VIEW_ATTACHMENT, VIEW_STORAGE };
 static fmt_t view_format(const vtex *v, const view_t *view, int has_view) {
     if (!has_view || !view->set_format) return v->f;
     fmt_t f = fmt_of(view->format);
-    if (!f.f || f.dec != v->f.dec || (f.dec && f.f != v->f.f)) return v->f;
+    // The decoder preserves encoded RGB bytes. Linear and sRGB registrations
+    // of the same BC encoding choose different views of that one allocation.
+    if (!f.f || f.dec != v->f.dec) return v->f;
     return f;
 }
 static int depth_red_view(const vtex *v, fmt_t requested) {
@@ -1158,6 +1160,13 @@ static int compatible_dimension(const vtex *v, int view) {
 }
 static VkImageView tex_view_format(vtex *v, const tex_t *t, const view_t *vw, int has_vw, int want_type, int purpose, fmt_t f) {
     int rt = purpose == VIEW_ATTACHMENT, storage = purpose == VIEW_STORAGE;
+    if (purpose == VIEW_SAMPLED && v->f.dec && has_vw && vw->set_format &&
+        (vw->format < NVN_FORMAT_RGB_DXT1 || vw->format > NVN_FORMAT_BPTC_UFLOAT)) {
+        // The decoded image has pixels, not the encoded block words. Match
+        // Metal's empty slot for a sampled raw-block alias.
+        RED_ONCE(120, "sampled raw-block view of BC format %#x as %#x uses an empty slot", v->nvn_fmt, vw->format);
+        return VK_NULL_HANDLE;
+    }
     int target = has_vw && vw->set_target ? vw->target : t->d.target;
     uint32_t bl = has_vw && vw->set_levels ? vw->base_level : 0;
     if (bl >= v->levels) return VK_NULL_HANDLE;

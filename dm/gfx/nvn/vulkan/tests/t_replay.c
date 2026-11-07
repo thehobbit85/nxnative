@@ -571,6 +571,7 @@ static void float_image_views(void) {
 #include "depth_views.inc"
 #include "cube_ranges.inc"
 #include "storage_views.inc"
+#include "bc_views.inc"
 
 static void custom_borders(void) {
     int native;
@@ -3205,6 +3206,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DEPTH_VIEWS")) { depth_image_views(); return 0; }
     if (getenv("DM_VK_TEST_CUBE_RANGES")) { cube_ranges(); return 0; }
     if (getenv("DM_VK_TEST_STORAGE_VIEWS")) { storage_image_views(); return 0; }
+    if (getenv("DM_VK_TEST_BC_VIEWS")) { compressed_color_views(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
     if (getenv("DM_VK_TEST_CUSTOM_BORDER")) { custom_borders(); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features(NULL,NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
@@ -3262,6 +3264,7 @@ int main(void) {
     depth_image_views();
     cube_ranges();
     storage_image_views();
+    compressed_color_views();
     custom_borders();
     compute_driver_constants();
     many_resource_bindings();
