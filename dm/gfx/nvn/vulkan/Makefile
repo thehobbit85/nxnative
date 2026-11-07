@@ -814,3 +814,9 @@ $(B)/shaders/00000000feed4002.spv: tests/c2_separate.comp Makefile
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	printf 'stage cs\ntg 32 1 1\nb 0 tex 301 tex_c2a -1 0 - -1 view=1 num=0\nb 1 samp 301 samp_c2a -1 0 - -1 c2_or=1392\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+$(B)/t_replay: tests/resource_pools.inc
+.PHONY: resource-pools-fixture
+resource-pools-fixture: fixture
+	PATH="$(dir $(GLSLC)):$$PATH" python3 ../../../android/tests/resource_pool_fixture.py $(B)/resource-pool-fixture
+	cp $(B)/resource-pool-fixture/export/*.spv $(B)/resource-pool-fixture/export/*.vk.txt $(B)/shaders/
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: resource_pools.inc
