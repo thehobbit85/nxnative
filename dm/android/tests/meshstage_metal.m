@@ -44,7 +44,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         switch (test) {
             case 1: ctl[3] = 0; break;
             case 2: ctl[2] = UINT32_MAX; break;
-            case 3: ctl[7] = 1; break;
+            case 3: ctl[2] = OUTPUT_WORDS - 1; break;
             case 4: ctl[5] = 0; break;
             case 5: ctl[4] = UINT32_MAX; break;
             case 6: ctl[6] = 0; break;
@@ -55,7 +55,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         }
         unsigned groups = 0;
         // Independently count whole records, with subtraction before addition.
-        while (groups < ctl[1] && groups < ctl[3] && !ctl[7]) {
+        while (groups < ctl[1] && groups < ctl[3]) {
             uint64_t out_at = (uint64_t)ctl[2] + (uint64_t)groups * words;
             if (out_at > out_bound || words > out_bound - out_at) break;
             if (variant == 3) {

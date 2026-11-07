@@ -28,3 +28,38 @@ static void mesh_replay(void) {
     mtl_tex_release(&target);mtl_queue_forget(target.serial);
     puts("Mesh replay passed direct/indirect group IDs, empty groups, multi-block compaction, per-primitive attributes and stage-four uniforms");
 }
+
+static void task_mesh_replay(void) {
+    tex_t target={.serial=0x17ab1,.d={.width=4,.height=4,.depth=1,.levels=1,
+        .format=NVN_FORMAT_RGBA8,.target=NVN_TEXTURE_TARGET_2D}};
+    nvn_tex_layout(&target.d,&target.L);mtl_queue_activate(target.serial);
+    const uint32_t children[]={0,1,2,31,1024,2048};
+    const uint32_t counts[]={1,3,65};
+    for (unsigned test=0;test<18;test++) {
+        uint32_t count=counts[test/6],launches=children[test%6],blue=63+test;
+        uint32_t arguments[]={count,7};
+        uint8_t pixels[64];
+        mtl_pool_add(arguments,sizeof arguments);
+        list_t list={0};
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
+        RECORD(OP_VIEWPORTS,p_viewports,.n=1,.v={{0,0,4,4}});
+        RECORD(OP_SCISSOR,p_scissor,.w=4,.h=4);
+        RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={0,0,0,1});
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&task_mesh_program,.stages=(1u<<1)|(1u<<3)|(1u<<4));
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=3,.index=0,.addr=(uintptr_t)&launches,.size=4);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=4,.index=0,.addr=(uintptr_t)&blue,.size=4);
+        RECORD(OP_DRAW,p_draw,.prim=DM_PRIM_MESH_TASKS,.first=7,.count=count,.ind=test&1 ? (uintptr_t)arguments : 0);
+        RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)pixels,.r={.width=4,.height=4,.depth=1});
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        unsigned last=7+count-1;
+        if (last%3==0) last--;
+        unsigned child_count=launches>1024 ? 1024 : launches;
+        uint8_t expected[]={child_count ? (child_count-1)%251 : 0,child_count ? last%251 : 0,child_count ? blue : 0,255};
+        for (unsigned pixel=0;pixel<16;pixel++) if (memcmp(pixels+pixel*4,expected,4))
+            die("task mesh test%u pixel%u got %u,%u,%u,%u expected %u,%u,%u,%u",test,pixel,
+                pixels[pixel*4],pixels[pixel*4+1],pixels[pixel*4+2],pixels[pixel*4+3],expected[0],expected[1],expected[2],expected[3]);
+        mtl_pool_del(arguments);
+    }
+    mtl_tex_release(&target);mtl_queue_forget(target.serial);
+    puts("Task-fed mesh replay passed empty and 1024-child launches, payloads, logical child IDs, stage-three/four bindings and bounded parent batches");
+}

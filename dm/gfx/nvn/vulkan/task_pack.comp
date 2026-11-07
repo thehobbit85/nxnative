@@ -1,0 +1,55 @@
+#version 450
+// Compact task launches in task order. Each child receives its local group ID
+// followed by the task payload, matching spv_meshstage's input record.
+layout(local_size_x=64) in;
+layout(binding=0,std430) readonly buffer Source { uint source[]; };
+layout(binding=1,std430) buffer Destination { uint destination[]; };
+layout(binding=2,std430) buffer Counts { uint counts[]; };
+layout(binding=3,std430) buffer Arguments { uint arguments[]; };
+layout(binding=4,std430) buffer Control { uint control[]; };
+layout(push_constant) uniform Parameters {
+    uint groups, task_words, payload_offset, payload_words, capacity;
+};
+shared uint sums[64];
+uint launches(uint group) { return min(source[group*task_words+payload_offset+1],1024u); }
+void scan(uint lane) {
+    barrier();
+    for (uint step=1;step<64;step*=2) {
+        uint addition=lane>=step ? sums[lane-step] : 0;
+        barrier();sums[lane]+=addition;barrier();
+    }
+}
+void main() {
+    uint lane=gl_LocalInvocationIndex;
+#if PASS == 0
+    uint group=gl_GlobalInvocationID.x;
+    uint count=group<groups ? launches(group) : 0;
+    sums[lane]=count;scan(lane);
+    if (group<groups) counts[group]=sums[lane]-count;
+    if (lane==63) counts[groups+gl_WorkGroupID.x]=sums[lane];
+#elif PASS == 1
+    uint blocks=(groups+63)/64,chunk=(blocks+63)/64;
+    uint first=lane*chunk,end=min(first+chunk,blocks),total=0;
+    for (uint block=first;block<end;block++) total+=counts[groups+block];
+    sums[lane]=total;scan(lane);
+    uint offset=sums[lane]-total;
+    for (uint block=first;block<end;block++) {
+        uint count=counts[groups+block];counts[groups+block]=offset;offset+=count;
+    }
+    if (lane==0) {
+        uint children=min(sums[63],capacity);
+        arguments[0]=children;arguments[1]=1;arguments[2]=1;
+        control[1]=children;
+    }
+#else
+    uint group=gl_WorkGroupID.x;
+    if (group>=groups) return;
+    uint first=counts[group]+counts[groups+group/64];
+    uint count=min(launches(group),capacity-min(first,capacity));
+    uint stride=payload_words+1;
+    for (uint word=lane;word<count*stride;word+=64) {
+        uint child=word/stride,component=word%stride;
+        destination[first*stride+word]=component==0 ? child : source[group*task_words+payload_offset+component-1];
+    }
+#endif
+}

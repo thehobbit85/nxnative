@@ -10,10 +10,14 @@ layout(push_constant) uniform Parameters { uint groups, stride, topology, capaci
     uint max_primitives;
 #endif
 };
+#if MESH
+layout(binding=4,std430) readonly buffer Control { uint control[]; };
+#endif
 shared uint sums[64];
 
 uint group_vertices(uint group, bool write_output, uint offset) {
 #if MESH
+    if (group>=control[1]) return 0;
     uint count=min(raw[group*stride+topology]>>24,max_primitives)*3;
     if (write_output && offset<=capacity && count<=capacity-offset)
         for (uint i=0;i<count;i++) packed[offset+i]=group*max_primitives*3+i;
