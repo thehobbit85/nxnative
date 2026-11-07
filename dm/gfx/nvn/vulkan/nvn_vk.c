@@ -406,7 +406,7 @@ static void *completion_thread(void *a) {
 
 // ---------- Device ----------
 static int g_vertex_stores, g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
-static int g_logic_op, g_non_solid_fill;
+static int g_logic_op, g_non_solid_fill, g_layer_output;
 static uint32_t g_custom_border_limit, g_custom_border_count;
 static int g_border_from_image, g_border_without_format;
 static float g_max_anisotropy;
@@ -478,13 +478,14 @@ static void vk_init_(void) {
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
     int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0, has_calibrated = 0;
     int divisor_ext = 0, divisor_khr = 0, descriptor_indexing = 0;
-    int border_ext = 0, border_swizzle_ext = 0, texel_ext=0;
+    int border_ext = 0, border_swizzle_ext = 0, texel_ext=0, layer_ext=0;
     for (uint32_t i = 0; i < ne; i++) {
         has_sc |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME); has_u8 |= !strcmp(ep[i].extensionName, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
         has_dr |= !strcmp(ep[i].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
         has_subgroup_sizes |= !strcmp(ep[i].extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
         has_calibrated |= !strcmp(ep[i].extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
         texel_ext |= !strcmp(ep[i].extensionName,VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME);
+        layer_ext |= !strcmp(ep[i].extensionName,VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
         descriptor_indexing |= !strcmp(ep[i].extensionName, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
         border_ext |= !strcmp(ep[i].extensionName, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
         border_swizzle_ext |= !strcmp(ep[i].extensionName, VK_EXT_BORDER_COLOR_SWIZZLE_EXTENSION_NAME);
@@ -539,6 +540,7 @@ static void vk_init_(void) {
     vkGetPhysicalDeviceFeatures2(g_pd, &f2);
     g_max_anisotropy = f2.features.samplerAnisotropy ? fminf(16, g_props.limits.maxSamplerAnisotropy) : 1;
     g_draw_parameters = dv >= VK_API_VERSION_1_2 ? f11.shaderDrawParameters : sdp.shaderDrawParameters;
+    g_layer_output = dv >= VK_API_VERSION_1_2 ? f12.shaderOutputLayer : layer_ext;
     g_vertex_stores = f2.features.vertexPipelineStoresAndAtomics;
     g_storage_ms = f2.features.shaderStorageImageMultisample;
     g_precise_visibility = f2.features.occlusionQueryPrecise;
@@ -550,7 +552,7 @@ static void vk_init_(void) {
     if (getenv("DM_VK_NO_WIREFRAME")) f2.features.fillModeNonSolid = VK_FALSE;
     g_non_solid_fill = f2.features.fillModeNonSolid;
     f13.robustImageAccess = VK_FALSE;
-    const char *ext[10]; uint32_t next = 0;
+    const char *ext[11]; uint32_t next = 0;
     if (dv<VK_API_VERSION_1_3) {
         if (texel_features.texelBufferAlignment) ext[next++]=VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME;
         else relaxed_texels=0;
@@ -584,6 +586,7 @@ static void vk_init_(void) {
     // Keep its original BaseInstance in the existing draw-parameter push block.
     if (g_vertex_divisor_limit<UINT32_MAX || getenv("DM_VK_NO_DRAW_PARAMETERS")) g_draw_parameters=0;
     if (!g_draw_parameters) LOG("vk: shader draw parameters supplied by host push constants");
+    if (dv < VK_API_VERSION_1_2 && layer_ext) ext[next++] = VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME;
     has_calibrated=has_calibrated && bits && !getenv("DM_VK_NO_CALIBRATED_TIMESTAMPS");
     if (g_segment_timestamps && has_calibrated) ext[next++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
     g_selectable_subgroup_stages = 0;
@@ -1239,7 +1242,7 @@ static VkImageView tex_view_format(vtex *v, const tex_t *t, const view_t *vw, in
     // from that face on, past the image's end for faces 1-5 (Super Mario Odyssey's environment probes, its first frame in a kingdom: the Mali-G57 lost the device). A 3D
     // texture's slice is a 2D view of the image made 2D-array compatible, its slice as the layer
     if (rt) {
-        if (v->target == NVN_TEXTURE_TARGET_3D) { nly = 1; vt = VK_IMAGE_VIEW_TYPE_2D; }
+        if (v->target == NVN_TEXTURE_TARGET_3D) vt = nly > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         else if (vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || vt == VK_IMAGE_VIEW_TYPE_2D_ARRAY) vt = nly > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     }
     if ((vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_2D) && nly > 1) nly = 1;
@@ -1455,7 +1458,7 @@ struct shader {
     texel_bias *texel_biases; size_t ntexel_biases; // sparse per-element prefixes of writable aliases
     sample_reduction *reductions; size_t nreductions;
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
-    vin_module *vertex_variants; int depth_zero, draw_push;
+    vin_module *vertex_variants; int depth_zero, draw_push, layer_output;
     shader_t *capture_variant;
     dm_vk_feedback *feedback_layout;
     int capture_entry;
@@ -1909,6 +1912,17 @@ static shader_t *shader_by_key(const char *key) {
         s->pack_locations=1;
     }
     if (s->stage==1) s->outputs=spv_fragment_outputs(spv,ns/4);
+    if (s->stage==0) for (size_t i=5; i<ns/4;) {
+        uint32_t op=spv[i]&0xffff, len=spv[i]>>16;
+        if (!len || len>ns/4-i) break;
+        // BuiltIn Layer may decorate a standalone output or a block member.
+        if ((op==71 && len==4 && spv[i+2]==11 && spv[i+3]==9) ||
+            (op==72 && len==5 && spv[i+3]==11 && spv[i+4]==9)) s->layer_output=1;
+        i+=len;
+    }
+    if (s->layer_output && !g_layer_output) {
+        LOG("[RED] vk: vertex shader %s needs shaderOutputLayer",key);free(spv);return s;
+    }
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
     if (!spv) return s;
@@ -2022,7 +2036,7 @@ static VkPipelineLayout layout_get(shader_t *vs, shader_t *fs) {
 
 // ---------- Render passes: dynamic rendering, or a render pass + framebuffer made for each pass ----------
 typedef struct { int n; VkImageView cv[8]; VkFormat cf[8]; VkAttachmentLoadOp cl[8]; VkClearColorValue cc[8];
-                 VkImageView dv; VkFormat df; int stencil; VkAttachmentLoadOp dl, sl; VkClearDepthStencilValue dc; uint32_t w, h; VkSampleCountFlagBits samples; VkImageLayout layout; } rp_desc;
+                 VkImageView dv; VkFormat df; int stencil; VkAttachmentLoadOp dl, sl; VkClearDepthStencilValue dc; uint32_t w, h, layers; VkSampleCountFlagBits samples; VkImageLayout layout; } rp_desc;
 static struct { uint64_t key; VkRenderPass rp; } g_rpc[512]; static int g_nrpc; static pthread_mutex_t g_rpmu = PTHREAD_MUTEX_INITIALIZER;
 // The render pass of these attachments (cached; also the "compatible" one pipelines are made against: load actions do not affect compatibility)
 static VkRenderPass rp_get(const VkFormat *cf, const VkAttachmentLoadOp *cl, int n, VkFormat df, int stencil, VkAttachmentLoadOp dl, VkAttachmentLoadOp sl, VkImageLayout layout, VkSampleCountFlagBits samples) {
@@ -2056,7 +2070,7 @@ static VkFramebuffer rp_begin(VkCommandBuffer cb, const rp_desc *d) {
                                                                           d->cv[i] ? d->cl[i] : VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE, {.color = d->cc[i]}};
         if (d->dv) { da.imageView = d->dv; da.imageLayout = d->layout; da.loadOp = d->dl; da.storeOp = VK_ATTACHMENT_STORE_OP_STORE; da.clearValue.depthStencil = d->dc;
                      if (d->stencil) { sa = da; sa.loadOp = d->sl; } }
-        VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, {d->w, d->h}}, 1, 0, (uint32_t)d->n, ca, d->dv ? &da : NULL, d->dv && d->stencil ? &sa : NULL};
+        VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, {d->w, d->h}}, d->layers ? d->layers : 1, 0, (uint32_t)d->n, ca, d->dv ? &da : NULL, d->dv && d->stencil ? &sa : NULL};
         p_begin_rendering(cb, &ri);
         return VK_NULL_HANDLE;
     }
@@ -2064,7 +2078,7 @@ static VkFramebuffer rp_begin(VkCommandBuffer cb, const rp_desc *d) {
     for (int i = 0; i < d->n; i++) { cf[i] = d->cv[i] ? d->cf[i] : VK_FORMAT_UNDEFINED; if (d->cv[i]) { cv[nv].color = d->cc[i]; views[nv++] = d->cv[i]; } }
     if (d->dv) { cv[nv].depthStencil = d->dc; views[nv++] = d->dv; }
     VkRenderPass rp = rp_get(cf, d->cl, d->n, d->dv ? d->df : VK_FORMAT_UNDEFINED, d->stencil, d->dl, d->sl, d->layout, d->samples);
-    VkFramebufferCreateInfo fi = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, rp, nv, views, d->w, d->h, 1};
+    VkFramebufferCreateInfo fi = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, rp, nv, views, d->w, d->h, d->layers ? d->layers : 1};
     VkFramebuffer fb; VKCHECK(vkCreateFramebuffer(g_dev, &fi, NULL, &fb));
     VkRenderPassBeginInfo bi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, NULL, rp, fb, {{0, 0}, {d->w, d->h}}, nv, cv};
     vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
@@ -2101,6 +2115,7 @@ static struct {   // the current render targets and the open dynamic rendering; 
     int n; vtex *ct[8]; VkImageView cv[8]; VkFormat cf[8]; vtex *dt; VkImageView dv; uint32_t w, h; VkSampleCountFlagBits samples; int incompatible_samples, open;
     uint32_t clv[8], cly[8]; uint8_t cwr[8], cdrawn[8];   // each colour attachment's level and layer, and whether a draw wrote it since its last same-pass snapshot (fb_prepare)
     uint8_t clr_c[8], clr_d, clr_s; VkClearColorValue cc[8]; float cd; uint32_t cs;
+    uint32_t max_layers, layers;
 } P;
 static int pass_begin(void);
 // A linear texture the GPU rendered into is read by the CPU from its storage: Super Mario Odyssey renders the scene's luminance into a 2x1 linear RG11B10F target and computes
@@ -2149,7 +2164,7 @@ static int pass_begin(void) {
         if (!S.rasterizer_discard && !S.feedback_active) return 0;
         P.w = P.h = 1; // Vertex-only work still needs a valid render area.
     }
-    rp_desc d = {.n = P.n, .w = P.w, .h = P.h, .samples = P.samples, .layout = VK_IMAGE_LAYOUT_GENERAL};
+    rp_desc d = {.n = P.n, .w = P.w, .h = P.h, .layers=P.layers, .samples = P.samples, .layout = VK_IMAGE_LAYOUT_GENERAL};
     for (int i = 0; i < P.n; i++) { d.cv[i] = P.cv[i]; d.cf[i] = P.cf[i]; d.cl[i] = P.clr_c[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; d.cc[i] = P.cc[i]; if (P.clr_c[i]) P.cdrawn[i] = 1; }
     if (P.dt) { d.dv = P.dv; d.df = P.dt->f.f; d.stencil = P.dt->f.stencil; d.dl = P.clr_d ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
                 d.sl = P.clr_s ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD; d.dc = (VkClearDepthStencilValue){P.cd, P.cs}; }
@@ -2171,6 +2186,10 @@ static void timestamp_cut(void) {
     post_add((post_t){.kind=POST_TIME_BOUNDARY,.samples=&page->samples[slot]});
     C->raster_draws=0; C->cut_copy=0;
 }
+static uint32_t attachment_layers(const vtex *v, VkImageView view) {
+    for (int i=0; i<v->nviews; i++) if (v->views[i].v==view) return v->views[i].key.range.layerCount;
+    return 1;
+}
 static void set_rt(const p_set_rt *r) {
     int timing=g_segment_timestamps && C->qp;
     VkImageView old_color[8], old_depth=P.dv;
@@ -2179,11 +2198,14 @@ static void set_rt(const p_set_rt *r) {
     pass_end();
     memset(&P, 0, sizeof P);
     P.n = r->n > 8 ? 8 : r->n; P.w = P.h = 0x7fffffff;
+    P.layers=1; P.max_layers=g_props.limits.maxFramebufferLayers;
     for (int i = 0; i < P.n; i++) {
         if (!r->color[i]) continue;
         vtex *v = tex_get(r->color[i], 1); if (!v) continue;
         P.ct[i] = v; P.cv[i] = tex_view(v, r->color[i], &r->cview[i], r->has_cview[i], -1, 1);
         if (!P.cv[i]) { P.ct[i] = NULL; continue; }
+        uint32_t layers=attachment_layers(v,P.cv[i]);
+        if (layers<P.max_layers) P.max_layers=layers;
         P.cf[i] = view_format(v, &r->cview[i], r->has_cview[i]).f;
         uint32_t lv = r->has_cview[i] && r->cview[i].set_levels ? r->cview[i].base_level : 0, w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
         P.clv[i] = lv; P.cly[i] = r->has_cview[i] && r->cview[i].set_layers ? r->cview[i].min_layer : 0; P.cwr[i] = 1;
@@ -2196,6 +2218,7 @@ static void set_rt(const p_set_rt *r) {
                                if ((v->w >> lv) < P.w) P.w = v->w >> lv ? v->w >> lv : 1; if ((v->h >> lv) < P.h) P.h = v->h >> lv ? v->h >> lv : 1; }
     }
     P.samples = P.dv ? P.dt->samples : 0;
+    if (P.dv) { uint32_t layers=attachment_layers(P.dt,P.dv); if (layers<P.max_layers) P.max_layers=layers; }
     for (int i = 0; i < P.n; i++) if (P.cv[i]) {
         if (P.samples && P.samples != P.ct[i]->samples) P.incompatible_samples = 1;
         P.samples = P.ct[i]->samples;
@@ -3370,6 +3393,8 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     if (S.bst[2] || S.bst[3] || S.bst[4]) RED_ONCE(32, "geometry / tessellation stages are bound: not drawn with them yet");
     if (vk_skip() & SK_DRAW) SKIP(4);
     if (!vs || !vs->mod || (fs && !fs->mod)) SKIP(1);
+    uint32_t layers=vs->layer_output ? P.max_layers : 1;
+    if (P.layers!=layers) { pass_end(); P.layers=layers; }
     if (di && di->count) cpu_ready(di->ibuf, (uint64_t)(uint32_t)di->count * (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4));
     shader_cpu_ready(vs, 0); shader_cpu_ready(fs, 1);
     capture_draw capture = {0};

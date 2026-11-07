@@ -3,6 +3,17 @@
 HOST = ../../../host
 NVN = ..
 B ?= build
+$(B)/t_replay: tests/layered_attachments.inc
+fixture: $(B)/shaders/00000000feed9b01.spv $(B)/shaders/00000000feed9b02.spv $(B)/shaders/00000000feed9b03.spv
+$(B)/shaders/00000000feed9b02.spv: LAYER_FLAGS = -DSINGLE_LAYER
+$(B)/shaders/00000000feed9b01.spv $(B)/shaders/00000000feed9b02.spv: tests/layered.vert
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $(LAYER_FLAGS) $< -o $@
+	printf 'stage vs\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/00000000feed9b03.spv: tests/layered.frag
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage ps\n' > $(@:.spv=.vk.txt)
 GAME_H = $(HOST)/gen/$(GAME)/game_profile.h
 GLSLC ?= glslc
 LIBS ?= -lvulkan -lpthread -lm
