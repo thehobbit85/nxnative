@@ -31,9 +31,12 @@ static int build_table(int stage, const sbind *b) {
     handle_table *table = *entry;
     if (!table) return 0;
     table_source texture = {0}, sampler = {0};
-    if (b->type != BT_SAMP) texture = table_words(stage,b->reg,b->off);
-    if (b->type != BT_TEX) sampler = table_words(stage,b->sreg,b->soff);
+    if (!b->logical_count) {
+        if (b->type != BT_SAMP) texture = table_words(stage,b->reg,b->off);
+        if (b->type != BT_TEX) sampler = table_words(stage,b->sreg,b->soff);
+    }
     uint32_t n = texture.length > sampler.length ? texture.length : sampler.length;
+    if (b->logical_count) n=b->logical_count;
     uint16_t slots[2*TABLE_ELEMENTS] = {0};
     table->handles[0] = 0; table->count = 1; table->map[0] = n; table->map[n+1] = 0;
     uint64_t fixed = b->driver_sampler < 0 ? 0 :
@@ -43,6 +46,11 @@ static int build_table(int stage, const sbind *b) {
         uint32_t tid = table_word(texture,i) & 0xfffff, sid = table_word(sampler,i) >> 20;
         uint64_t texture_id = tid ? (uint64_t)tid + S.tex_base : 0;
         uint64_t sampler_id = b->driver_sampler >= 0 ? (i < sampler.length ? fixed : 0) : (sid ? (uint64_t)sid + S.samp_base : 0);
+        if (b->logical_count) {
+            uint64_t handle=sampled_handle(stage,b,i);
+            texture_id=b->type==BT_SAMP ? 0 : handle&0xfffff;
+            sampler_id=b->type==BT_TEX || b->type==BT_UTB || b->type==BT_TBUF ? 0 : handle>>20;
+        }
         if (texture_id >= (uint32_t)g_ntreg || texture_id > 0xfffff || !g_treg[texture_id].ok) texture_id = 0;
         if (sampler_id >= (uint32_t)g_nsreg || !g_sreg_ok[sampler_id]) sampler_id = 0;
         uint64_t handle = texture_id | (sampler_id << 20);

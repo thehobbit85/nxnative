@@ -24,6 +24,7 @@
 #include "spv_buffer_bias.h"
 #include "spv_texel_bias.h"
 #include "spv_wrapped_buffer.h"
+#include "spv_descriptor_table.h"
 #include "spv_one_row.h"
 #include "spv_sample_reduction.h"
 #include "feedback_gather.h"
@@ -1466,12 +1467,13 @@ static VkSampler samp_get(int sid, border_view view, int reduce_in_shader) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
-enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU, S_SAMP_SLOTS };
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2 };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU, S_SAMP_SLOTS, S_SAMP_C2 };
 static int sampler_source(const char *kind) {
+    if (!strcmp(kind,"samp_c2a")) return S_SAMP_C2;
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:!strcmp(kind,"samp_slots")?S_SAMP_SLOTS:S_NONE;
 }
-typedef struct { uint32_t binding, count, storage_image; uint8_t type, kind, skind, read_only, table, texel_atomic, multisample, depth_image; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
+typedef struct { uint32_t binding, count, storage_image, logical_count; uint8_t type, kind, skind, read_only, table, texel_atomic, multisample, depth_image; int16_t slot; int16_t reg, sreg; int32_t off, soff, view, num, driver_sampler; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 #include "spv_sampler_pairs.inc"
 #include "spv_storage_texels.inc"
 typedef struct vin_module {
@@ -1731,7 +1733,10 @@ static int pack_vertex_locations(uint32_t *words, size_t count, const shader_t *
     }
     free(input);return 1;
 }
+#include "descriptor_tables.inc"
 static uint32_t *stage_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
+    spv=driver_table_spv(spv,bytes,s);
+    if (!spv) return NULL;
     if (s->stage==0) spv=vertex_spv(spv,bytes,s);
     else if (!g_draw_parameters) {
         size_t nn;int ok;uint32_t *w2=spv_draw_parameters(spv,*bytes/4,0,&nn,&ok);
@@ -1862,9 +1867,6 @@ static shader_t *shader_by_key(const char *key) {
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
         else if (sscanf(ln, "vin %d %d", &l, &t) == 2 && l >= 0 && l < 32) { s->vin[l] = (uint8_t)t; s->vin_mask |= 1u << l; }
         else if (sscanf(ln, "b %d %7s %d %15s %d %d %15s %d %3s", &b, ty, &cnt, kind, &reg, &off, sk, &sreg, access) >= 8 && s->nb < DM_VK_MAX_BINDINGS) {
-            if (!strcmp(kind, "tex_c2a") || !strcmp(kind, "samp_c2a") || !strcmp(sk, "samp_c2a")) {
-                LOG("[RED] vk: shader %s requires driver-table descriptor array replay", key); free(txt); free(spv); return s;
-            }
             if (!strcmp(kind, "gmem_map") || !strcmp(kind, "gmem_log")) {
                 LOG("[RED] vk: shader %s requires physical-address pool replay", key); free(txt); free(spv); return s;
             }
@@ -1889,6 +1891,7 @@ static shader_t *shader_by_key(const char *key) {
             if (!strcmp(kind,"geometry") && reg>=0 && reg<5) e->kind=K_GEOMETRY;
             if (!strcmp(kind,"geometry") && reg == 5 && e->type == BT_UBO) e->kind=K_CAPTURE_CONTROL;
             if (!strcmp(kind,"tex_slots")) e->kind=K_TEX_SLOTS;
+            if (!strcmp(kind,"tex_c2a")) e->kind=K_TEX_C2;
             e->skind = sampler_source(sk);
             if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
             if (e->kind==K_TEX_SLOTS || e->skind==S_SAMP_SLOTS) {
@@ -1897,6 +1900,17 @@ static shader_t *shader_by_key(const char *key) {
                 if (!DM_GAME_TEX_DYN_SLOTS || !(texel ? g_texel_indexing : g_sampled_indexing)) {
                     LOG("[RED] vk: shader %s logical slot arrays need tex_dyn_slots and nonuniform descriptor support",key);
                     free(txt);free(spv);return s;
+                }
+            }
+            if (e->kind==K_TEX_C2 || e->skind==S_SAMP_C2) {
+                if (cnt<1 || cnt>8192 || (e->type!=BT_SAMP && e->off<0) ||
+                    (e->type!=BT_TEX && e->type!=BT_UTB && e->type!=BT_TBUF && (e->skind!=S_SAMP_C2 || e->soff<0))) goto bad_table;
+                e->logical_count=(uint32_t)cnt;
+                e->driver_sampler=-1;
+                if ((field=strstr(ln," c2_or="))) {
+                    unsigned offset;
+                    if (sscanf(field+7,"%u",&offset)!=1 || offset>INT32_MAX) goto bad_table;
+                    e->driver_sampler=(int32_t)offset;
                 }
             }
             if (!strcmp(kind, "htab_map")) {
@@ -1923,6 +1937,7 @@ static shader_t *shader_by_key(const char *key) {
             if (e->kind == K_UNK) LOG("[RED] vk: shader %s binding %d has kind %s, not implemented (reads zero)", key, b, kind);
         }
     }
+    if (!prepare_driver_tables(s)) goto bad_table;
     if (s->capture_entry) {
         unsigned seen = 0;
         for (int i = 0; i < s->nb; ++i) {
@@ -2604,6 +2619,7 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
         handle=S.tex[stage][element];
         if (!handle) handle=S.tex[stage][DMSH_SEPTEX_SLOT0+element];
     }
+    else if (b->kind==K_TEX_C2) handle=dm_vk_c2_handle(S.tex[stage],S.img[stage],S.samp[stage],(uint64_t)b->off+8ull*element);
     else if (b->kind == K_TEXU && b->off >= 0) {
         uint32_t raw = uniform_handle(stage, b->reg, b->off + 8ll * element);
         if (b->count == 1) raw |= uniform_handle(stage, b->twin.texture.reg, b->twin.texture.off);
@@ -2620,6 +2636,11 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     else if (b->skind==S_SAMP_SLOTS && element<32) {
         sid=S.samp[stage][element]>>20;
         if (!sid) sid=S.tex[stage][element]>>20;
+    }
+    else if (b->skind==S_SAMP_C2) {
+        uint64_t raw=dm_vk_c2_handle(S.tex[stage],S.img[stage],S.samp[stage],(uint64_t)b->soff+8ull*element);
+        if (b->driver_sampler>0) raw|=dm_vk_c2_handle(S.tex[stage],S.img[stage],S.samp[stage],(uint32_t)b->driver_sampler);
+        sid=raw>>20;
     }
     else if (b->skind == S_SAMP_ID && b->sreg >= 0) sid = b->sreg + (b->type == BT_SAMP ? element : 0);
     else if (b->skind == S_SAMPU && b->soff >= 0) {

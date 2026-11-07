@@ -799,3 +799,18 @@ logical-slots-fixture: fixture
 	PATH="$(dir $(GLSLC)):$$PATH" python3 ../../../android/tests/resource_shapes_fixture.py $(B)/logical-slot-fixture slots
 	cp $(B)/logical-slot-fixture/export/00000000feed6100.spv $(B)/shaders/00000000feedaa01.spv
 	cp $(B)/logical-slot-fixture/export/00000000feed6100.vk.txt $(B)/shaders/00000000feedaa01.vk.txt
+
+$(B)/t_replay: tests/c2_arrays.inc ../../../android/tests/c2_array_cases.h
+.PHONY: c2-arrays-fixture
+c2-arrays-fixture: fixture
+	PATH="$(dir $(GLSLC)):$$PATH" python3 ../../../android/tests/c2_array_fixture.py $(B)/c2-array-fixture
+	cp $(B)/c2-array-fixture/export/*.spv $(B)/c2-array-fixture/export/*.vk.txt $(B)/shaders/
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: descriptor_tables.inc spv_descriptor_table.h
+$(B)/t_descriptor_table: tests/t_descriptor_table.c spv_descriptor_table.h spv_texel_bias.h
+	mkdir -p $(B)
+	$(CC) $(CFLAGS) $< -o $@
+fixture: $(B)/shaders/00000000feed4002.spv
+$(B)/shaders/00000000feed4002.spv: tests/c2_separate.comp Makefile
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage cs\ntg 32 1 1\nb 0 tex 301 tex_c2a -1 0 - -1 view=1 num=0\nb 1 samp 301 samp_c2a -1 0 - -1 c2_or=1392\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
