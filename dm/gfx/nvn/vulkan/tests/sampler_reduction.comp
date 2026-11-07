@@ -11,6 +11,23 @@ layout(local_size_x=1) in;
 #define SAMPLER sampler2D
 #define COORDINATE position
 #endif
+#ifdef PROJECTED
+#undef COORDINATE
+#define COORDINATE vec4(position * -2, 7, -2)
+#define SAMPLE textureProj
+#define SAMPLE_OFFSET textureProjOffset
+#define SAMPLE_LOD textureProjLod
+#define SAMPLE_LOD_OFFSET textureProjLodOffset
+#define SAMPLE_GRAD textureProjGrad
+#define SAMPLE_GRAD_OFFSET textureProjGradOffset
+#else
+#define SAMPLE texture
+#define SAMPLE_OFFSET textureOffset
+#define SAMPLE_LOD textureLod
+#define SAMPLE_LOD_OFFSET textureLodOffset
+#define SAMPLE_GRAD textureGrad
+#define SAMPLE_GRAD_OFFSET textureGradOffset
+#endif
 #ifdef SEPARATE
 layout(binding=0) uniform TEXTURE source;
 layout(binding=3) uniform sampler filtering;
@@ -34,32 +51,36 @@ void main() {
 #endif
     vec2 scale = exp2(coordinate.z - bias) / vec2(textureSize(sampled, 0).xy);
     position += (gl_FragCoord.xy - vec2(.5)) * scale;
+#ifdef QUERY
+    value = vec4(textureQueryLod(sampled, position), 0, 1);
+#else
 #ifdef OFFSET
 #ifdef BIAS
-    value = textureOffset(sampled, COORDINATE, ivec2(1,-1), bias);
+    value = SAMPLE_OFFSET(sampled, COORDINATE, ivec2(1,-1), bias);
 #else
-    value = textureOffset(sampled, COORDINATE, ivec2(1,-1));
+    value = SAMPLE_OFFSET(sampled, COORDINATE, ivec2(1,-1));
 #endif
 #else
 #ifdef BIAS
-    value = texture(sampled, COORDINATE, bias);
+    value = SAMPLE(sampled, COORDINATE, bias);
 #else
-    value = texture(sampled, COORDINATE);
+    value = SAMPLE(sampled, COORDINATE);
+#endif
 #endif
 #endif
 #else
 #ifdef GRADIENTS
     vec2 scale = exp2(coordinate.z) / vec2(textureSize(sampled, 0).xy);
 #ifdef OFFSET
-    value = textureGradOffset(sampled, COORDINATE, vec2(scale.x,0), vec2(0,scale.y), ivec2(1,-1));
+    value = SAMPLE_GRAD_OFFSET(sampled, COORDINATE, vec2(scale.x,0), vec2(0,scale.y), ivec2(1,-1));
 #else
-    value = textureGrad(sampled, COORDINATE, vec2(scale.x,0), vec2(0,scale.y));
+    value = SAMPLE_GRAD(sampled, COORDINATE, vec2(scale.x,0), vec2(0,scale.y));
 #endif
 #else
 #ifdef OFFSET
-    value = textureLodOffset(sampled, COORDINATE, coordinate.z, ivec2(1,-1));
+    value = SAMPLE_LOD_OFFSET(sampled, COORDINATE, coordinate.z, ivec2(1,-1));
 #else
-    value = textureLod(sampled, COORDINATE, coordinate.z);
+    value = SAMPLE_LOD(sampled, COORDINATE, coordinate.z);
 #endif
 #endif
 #endif

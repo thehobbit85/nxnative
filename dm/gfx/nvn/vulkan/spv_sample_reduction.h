@@ -118,7 +118,8 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     // Other sample forms are diagnosed before their sampler can become point
     // filtered. Offsets stay in texel units and use native sampler addressing.
     if (len < 5 || p[1] != m->float4 || p[3] >= m->bound || p[4] >= m->bound) return 0;
-    int implicit = (p[0] & 0xffff) == 87;
+    unsigned opcode = p[0] & 0xffff;
+    int implicit = opcode == 87 || opcode == 91, projected = opcode == 91 || opcode == 92;
     unsigned operands = len > 5 ? p[5] : 0, gradient = operands & 4, offset_mask = operands & (8 | 16);
     unsigned allowed = (implicit ? 1u : 6u) | 8u | 16u;
     if ((operands & ~allowed) || offset_mask == (8 | 16) ||
@@ -139,7 +140,16 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t image_type = m->ids[sampled_type].image;
     if (!image_type || m->ids[image_type].dimension != 1 || m->ids[image_type].array > 1) return 0;
     unsigned array = m->ids[image_type].array;
-    if (m->ids[p[4]].type != (array ? m->float3 : m->float2)) return 0;
+    uint32_t coordinate = p[4], coordinate_type = m->ids[coordinate].type;
+    if (projected) {
+        if (array || m->ids[coordinate_type].scalar != m->floating || m->ids[coordinate_type].lanes < 3) return 0;
+        uint32_t xy = REDUCTION_VALUE(m, 79, m->float2, coordinate, coordinate, 0, 1);
+        // SPIR-V places q immediately after the spatial components. Any
+        // extra components follow q and do not affect the projection.
+        uint32_t q = reduction_component(m, coordinate, 2);
+        uint32_t divisor = REDUCTION_VALUE(m, 80, m->float2, q, q);
+        coordinate = REDUCTION_VALUE(m, 136, m->float2, xy, divisor);
+    } else if (coordinate_type != (array ? m->float3 : m->float2)) return 0;
     uint32_t image = REDUCTION_VALUE(m, 100, image_type, p[3]);
     uint32_t levels = REDUCTION_VALUE(m, 106, m->sint, image);
     uint32_t last = REDUCTION_VALUE(m, 111, m->floating, levels);
@@ -148,7 +158,7 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t lower = reduction_float(m, filter->min_lod), upper = reduction_float(m, filter->max_lod);
     uint32_t lod = explicit_lod;
     if (implicit) {
-        uint32_t xy = array ? REDUCTION_VALUE(m, 79, m->float2, p[4], p[4], 0, 1) : p[4];
+        uint32_t xy = array ? REDUCTION_VALUE(m, 79, m->float2, coordinate, coordinate, 0, 1) : coordinate;
         uint32_t query = REDUCTION_VALUE(m, 105, m->float2, p[3], xy);
         // QueryLod.y gives the driver's unclamped derivative LOD. The point
         // sampler has zero bias, so the original sampler and instruction bias
@@ -168,11 +178,32 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t linear = REDUCTION_VALUE(m, 186, m->code.boolean, selected, zero);
     lod = REDUCTION_EXT(m, m->floating, 43, lod, zero, last);
     uint32_t first = REDUCTION_EXT(m, m->floating, 8, lod), second = REDUCTION_EXT(m, m->floating, 9, lod);
-    uint32_t a = reduction_level(m, p[3], image, p[4], first, linear, array, filter->minimum, offset_mask, offset);
-    uint32_t b = reduction_level(m, p[3], image, p[4], second, linear, array, filter->minimum, offset_mask, offset);
+    uint32_t a = reduction_level(m, p[3], image, coordinate, first, linear, array, filter->minimum, offset_mask, offset);
+    uint32_t b = reduction_level(m, p[3], image, coordinate, second, linear, array, filter->minimum, offset_mask, offset);
     uint32_t value = REDUCTION_EXT(m, m->float4, filter->minimum ? 37 : 40, a, b);
     uint32_t copy[] = {m->float4, p[2], value};
     reduction_append(m, &m->code.body, 83, copy, 3);
+    return !m->failed;
+}
+
+static int reduction_query(reduction_module *m, const uint32_t *p, unsigned len, const sample_reduction *filter) {
+    if (len != 5 || p[1] != m->float2 || p[3] >= m->bound || p[4] >= m->bound || m->ids[p[4]].type != m->float2) return 0;
+    uint32_t image_type = m->ids[m->ids[p[3]].type].image;
+    if (!image_type || m->ids[image_type].dimension != 1 || m->ids[image_type].array > 1) return 0;
+    uint32_t query = REDUCTION_VALUE(m, 105, m->float2, p[3], p[4]);
+    uint32_t raw = reduction_component(m, query, 1);
+    raw = REDUCTION_VALUE(m, 129, m->floating, raw, reduction_float(m, filter->bias));
+    uint32_t lod = REDUCTION_EXT(m, m->floating, 43, raw,
+        reduction_float(m, filter->min_lod), reduction_float(m, filter->max_lod));
+    uint32_t image = REDUCTION_VALUE(m, 100, image_type, p[3]);
+    uint32_t levels = REDUCTION_VALUE(m, 106, m->sint, image);
+    uint32_t last = REDUCTION_VALUE(m, 111, m->floating, levels);
+    last = REDUCTION_VALUE(m, 131, m->floating, last, reduction_float(m, 1));
+    lod = REDUCTION_EXT(m, m->floating, 43, lod, reduction_float(m, 0), last);
+    // Metal's reduction samplers select mips linearly, so the accessed mip
+    // retains its fraction. The second component is the unclamped LOD.
+    uint32_t result[] = {m->float2, p[2], lod, raw};
+    reduction_append(m, &m->code.body, 80, result, 4);
     return !m->failed;
 }
 
@@ -230,8 +261,10 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
         }
         uint32_t binding = len >= 4 && p[3] < m.bound ? m.ids[p[3]].binding : 0;
         if (binding && ((op >= 87 && op <= 94) || op == 96 || op == 97 || op == 105 || (op >= 305 && op <= 315))) {
-            *reason = "reduction currently needs a direct 2D float sample";
-            if ((op != 87 && op != 88) || !reduction_sample(&m, p, len, filters + binding - 1)) goto fail;
+            *reason = "reduction currently needs a direct 2D float sample or LOD query";
+            if (op == 105) {
+                if (!reduction_query(&m, p, len, filters + binding - 1)) goto fail;
+            } else if ((op != 87 && op != 88 && op != 91 && op != 92) || !reduction_sample(&m, p, len, filters + binding - 1)) goto fail;
         } else if (!texel_append(&m.code.body, p, len)) goto fail;
         i += len;
     }

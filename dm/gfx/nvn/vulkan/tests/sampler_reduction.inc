@@ -54,10 +54,12 @@ static void sampler_reduction(void) {
             put(&upload,OP_COPY_B2T,&copy,sizeof copy);
         }
         put(&upload,OP_END,NULL,0); mtl_sub_begin();mtl_exec(upload.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
-        for (int form=0;form<8;form++) for (int separate=0;separate<2;separate++) {
-          const sample_case *table = (form & 2) ? offset_cases : cases;
-          unsigned count = (form & 2) ? sizeof offset_cases/sizeof *offset_cases : sizeof cases/sizeof *cases;
-          int fragment = form >= 4, stage = fragment ? 1 : 5;
+        for (int form=0;form<13;form++) for (int separate=0;separate<2;separate++) {
+          if (form >= 8 && form < 12 && array) continue; // SPIR-V projected sampling has no array form.
+          int offset = form < 8 && (form & 2);
+          const sample_case *table = offset ? offset_cases : cases;
+          unsigned count = offset ? sizeof offset_cases/sizeof *offset_cases : sizeof cases/sizeof *cases;
+          int fragment = (form >= 4 && form < 8) || form >= 10, stage = fragment ? 1 : 5;
           prog_t *program = &sampler_reduction_program[form][array][separate]; program->nstage=fragment ? 2 : 1;
           for (unsigned test=0;test<count;test++) for (int mode=0;mode<3;mode++) {
             const sample_case *c=table+test;
@@ -88,9 +90,16 @@ static void sampler_reduction(void) {
             }
             put(&list,OP_END,NULL,0); mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
             float expected[]={c->expected[mode],0,0,1};
-            if (format == 1 || format == 2) { expected[1]=120-c->expected[mode ? 3-mode : 0]; expected[2]=2*expected[0]; }
-            if (format==2) for (int ch=0;ch<3;ch++) expected[ch]/=255;
-            if (format==3) expected[0]/=128;
+            if (form == 12) {
+                expected[1] = c->lod+c->bias;
+                expected[0] = c->filter >= 2 ? fminf(1,fmaxf(0,expected[1])) : 0;
+                if (!mode && c->filter < 4) expected[0] = floorf(expected[0]+.5f);
+                expected[2] = 0;
+            } else {
+                if (format == 1 || format == 2) { expected[1]=120-c->expected[mode ? 3-mode : 0]; expected[2]=2*expected[0]; }
+                if (format==2) for (int ch=0;ch<3;ch++) expected[ch]/=255;
+                if (format==3) expected[0]/=128;
+            }
             for (int ch=0;ch<4;ch++) if (!isfinite(result[ch]) || fabsf(result[ch]-expected[ch])>0.00001f)
                 die("sampler reduction form%d array%d format%d separate%d case%u mode%d channel%d: %g expected %g",form,array,format,separate,test,mode,ch,result[ch],expected[ch]);
             checks++;
