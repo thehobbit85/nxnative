@@ -6,9 +6,14 @@ static void geometry_replay(void) {
     float vertices[195][4];uint16_t indices[195];
     for (unsigned i=0;i<195;i++) { memcpy(vertices[i],triangle[i%3],16);indices[i]=i%3; }
     mtl_pool_add(indices,sizeof indices);
-    for (unsigned test=0;test<18;test++) {
+    const uint32_t sparse_indices[]={0,3,1u<<20};
+    size_t sparse_bytes=((1u<<20)+6u)*16u;
+    float (*sparse_vertices)[4]=malloc(sparse_bytes);assert(sparse_vertices);
+    for (unsigned i=0;i<3;i++) memcpy(sparse_vertices[sparse_indices[i]+5],triangle[i],16);
+    mtl_pool_add((void *)sparse_indices,sizeof sparse_indices);
+    for (unsigned test=0;test<24;test++) {
         unsigned mode=test%6;
-        int feedback=test>=6, discard=test>=12;
+        int feedback=test>=6, discard=test>=12 && test<18, sparse=test>=18;
         struct { float a[48], b[24];uint32_t control[8]; } output;
         memset(&output,0xa5,sizeof output);mtl_pool_add(&output,sizeof output);
         uint8_t pixels[4*4*4];
@@ -27,12 +32,14 @@ static void geometry_replay(void) {
         p_bind_vattr attributes={.n=1};va_st attribute={.fmt=NVN_FORMAT_RGBA32F};
         memcpy(attributes.st,&attribute,sizeof attribute);put(&list,OP_BIND_VATTR,&attributes,sizeof attributes);
         RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=1,.st={{.stride=16}});
-        RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sizeof vertices,.addr=(uintptr_t)vertices);
-        uint32_t arguments[]={mode<2 ? 3u : 195u,mode<4 ? 1u : 2u,0,0,7};
+        RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sparse ? sparse_bytes : sizeof vertices,
+            .addr=sparse ? (uintptr_t)sparse_vertices : (uintptr_t)vertices);
+        uint32_t arguments[]={sparse || mode<2 ? 3u : 195u,mode<4 ? 1u : 2u,0,sparse ? 5u : 0u,7};
         mtl_pool_add(arguments,sizeof arguments);
-        if (mode&1) {
-            RECORD(OP_DRAW_IDX,p_draw_idx,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=arguments[0],.itype=1,
-                .ibuf=(uintptr_t)indices,.instances=arguments[1],.base_instance=7,.ind=mode==5 ? (uintptr_t)arguments : 0);
+        if (mode&1 || sparse) {
+            RECORD(OP_DRAW_IDX,p_draw_idx,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=arguments[0],.itype=sparse ? 2 : 1,
+                .ibuf=sparse ? (uintptr_t)sparse_indices : (uintptr_t)indices,.base_vertex=sparse ? 5 : 0,
+                .instances=arguments[1],.base_instance=7,.ind=mode==5 ? (uintptr_t)arguments : 0);
         } else {
             arguments[3]=7;
             RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=arguments[0],.instances=arguments[1],
@@ -45,7 +52,7 @@ static void geometry_replay(void) {
         for (unsigned i=0;i<16;i++) if (memcmp(pixels+4*i,(uint8_t[]){discard?0:255,0,discard?255:0,255},4))
             die("geometry passthrough test%u pixel%u: %u,%u,%u,%u",test,i,pixels[4*i],pixels[4*i+1],pixels[4*i+2],pixels[4*i+3]);
         if (feedback) {
-            unsigned count=mode<2 ? 3 : 9;
+            unsigned count=sparse ? 3*arguments[1] : mode<2 ? 3 : 9;
             const uint32_t state[]={count*16,0,count*8,0,count,1,0,0};
             assert(!memcmp(output.control,state,sizeof state));
             for (unsigned i=0;i<count;i++) {
@@ -62,6 +69,7 @@ static void geometry_replay(void) {
         }
         mtl_pool_del(&output);
     }
+    mtl_pool_del((void *)sparse_indices);free(sparse_vertices);
     mtl_pool_del(indices);mtl_tex_release(&target);mtl_queue_forget(target.serial);
-    puts("Maxwell geometry replay passed direct/indexed/indirect instances, multi-block compaction and ordered two-stream feedback with raster discard and whole-primitive clipping");
+    puts("Maxwell geometry replay passed direct/indexed/indirect instances, multi-block compaction, sparse capture IDs and ordered two-stream feedback with raster discard and whole-primitive clipping");
 }
