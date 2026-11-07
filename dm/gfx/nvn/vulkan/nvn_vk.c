@@ -180,7 +180,7 @@ static void feedback_release(feedback_control *control) {
         free(control);
     }
 }
-enum { POST_VISIBILITY_ADD = 4, POST_VISIBILITY_RESET, POST_FEEDBACK_RELEASE, POST_TIME_BOUNDARY };
+enum { POST_VISIBILITY_ADD = 4, POST_VISIBILITY_RESET, POST_FEEDBACK_RELEASE, POST_TIME_BOUNDARY, POST_GMEM_COPY };
 typedef struct { int kind; void *dst; uint32_t mode, v; uint64_t addr; uint32_t type; const uint8_t *src; size_t n;
                  visibility_counter *visibility; const uint64_t *samples; } post_t;   // kind 1 event, 2 counter, 3 copy ring → guest
 typedef struct vtex vtex;
@@ -371,6 +371,10 @@ static void ctx_complete(ctx_t *c) {
         else if (p->kind == 3) {
             dm_guest_write_prepare(p->dst, p->n);
             memcpy(p->dst, p->src, p->n);
+        }
+        else if (p->kind==POST_GMEM_COPY && (((const uint32_t *)(uintptr_t)p->addr)[p->mode]&p->v)) {
+            dm_guest_write_prepare(p->dst,p->n);
+            memcpy(p->dst,p->src,p->n);
         }
         else if (p->kind == POST_VISIBILITY_ADD) p->visibility->samples += *p->samples;
         else if (p->kind == POST_VISIBILITY_RESET) p->visibility->samples = 0;
@@ -1487,7 +1491,7 @@ static VkSampler samp_get(int sid, border_view view, int reduce_in_shader) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2, K_TEX_POOL, K_POOL_BOUNDS, K_GMEM_MAP };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2, K_TEX_POOL, K_POOL_BOUNDS, K_GMEM_MAP, K_GMEM_LOG };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU, S_SAMP_SLOTS, S_SAMP_C2, S_SAMP_POOL };
 static int sampler_source(const char *kind) {
     if (!strcmp(kind,"samp_pool")) return S_SAMP_POOL;
@@ -1512,7 +1516,7 @@ struct shader {
     shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
     shader_t *wrapped_variants, *next_wrapped_variant;
     uint8_t wrapped[DM_VK_MAX_BINDINGS];
-    int has_tables,logical_slots;
+    int has_tables,logical_slots,raw_writes;
     sampler_pairs *sampler_images;
     texel_bias *texel_biases; size_t ntexel_biases; // sparse per-element prefixes of writable aliases
     sample_reduction *reductions; size_t nreductions;
@@ -1888,9 +1892,6 @@ static shader_t *shader_by_key(const char *key) {
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
         else if (sscanf(ln, "vin %d %d", &l, &t) == 2 && l >= 0 && l < 32) { s->vin[l] = (uint8_t)t; s->vin_mask |= 1u << l; }
         else if (sscanf(ln, "b %d %7s %d %15s %d %d %15s %d %3s", &b, ty, &cnt, kind, &reg, &off, sk, &sreg, access) >= 8 && s->nb < DM_VK_MAX_BINDINGS) {
-            if (!strcmp(kind,"gmem_log") || (!strcmp(kind,"gmem_map") && !strstr(ln," gmem_write=0"))) {
-                LOG("[RED] vk: shader %s requires raw-memory write-log replay",key);free(txt);free(spv);return s;
-            }
             if (!strcmp(kind,"gmem_map") && !g_buffer_address) {
                 LOG("[RED] vk: shader %s requires buffer device addresses",key);free(txt);free(spv);return s;
             }
@@ -1918,6 +1919,13 @@ static shader_t *shader_by_key(const char *key) {
             if (!strcmp(kind,"gmem_map")) {
                 if (e->type!=BT_SSBO || cnt!=1) goto bad_table;
                 e->kind=K_GMEM_MAP;
+                field=strstr(ln," gmem_write=");
+                if (!field || (field[12]!='0' && field[12]!='1') || (field[13] && field[13]!=' ')) goto bad_table;
+                s->raw_writes=field[12]=='1';
+            }
+            if (!strcmp(kind,"gmem_log")) {
+                if (e->type!=BT_SSBO || cnt!=1 || e->read_only) goto bad_table;
+                e->kind=K_GMEM_LOG;
             }
             e->skind = sampler_source(sk);
             if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
@@ -1973,6 +1981,11 @@ static shader_t *shader_by_key(const char *key) {
             }
             if (e->kind == K_UNK) LOG("[RED] vk: shader %s binding %d has kind %s, not implemented (reads zero)", key, b, kind);
         }
+    }
+    {
+        unsigned maps=0,logs=0;
+        for (int i=0;i<s->nb;i++) { maps+=s->b[i].kind==K_GMEM_MAP;logs+=s->b[i].kind==K_GMEM_LOG; }
+        if (maps>1 || logs!=(unsigned)s->raw_writes || (logs && maps!=1)) goto bad_table;
     }
     if (!prepare_driver_tables(s)) goto bad_table;
     if (s->capture_entry) {
@@ -2969,7 +2982,7 @@ static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t
     return 1;
 }
 #include "wrapped_buffer.inc"
-#include "global_memory_read.inc"
+#include "global_memory.inc"
 static int prepare_storage(shader_t **first, shader_t **second) {
     g_nstorage = 0;
     int needs_texel_variant=0;
@@ -3006,7 +3019,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             }
         }
     }
-    if (!collect_global_reads(stages,2)) return 0;
+    if (!collect_global_memory(stages,2)) return 0;
     qsort(g_storage, g_nstorage, sizeof *g_storage, storage_order);
     size_t n = 0;
     for (size_t i = 0; i < g_nstorage; i++) {
@@ -3407,6 +3420,8 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
                 *d = b->kind == K_CAPTURE_RECORDS ? capture->records : capture->control;
             } else if (b->kind==K_GMEM_MAP) {
                 if (!global_memory_map(d)) return VK_NULL_HANDLE;
+            } else if (b->kind==K_GMEM_LOG) {
+                if (!global_memory_log(d)) return VK_NULL_HANDLE;
             } else if (b->kind == K_TABLE_MAP) {
                 const handle_table *table = table_cache[stage][b->slot];
                 VkDeviceSize bytes = (table->map[0]+2u) * sizeof(uint32_t);
@@ -3776,6 +3791,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
         buffer_written(w->addr, w->size, w->buf, w->off, w->p);
     }
     g_pass_shader_writes |= g_nwb != 0;
+    g_pass_shader_writes |= global_memory_written();
     g_pass_shader_writes |= mark_image_writes(0);
     if (fs) g_pass_shader_writes |= mark_image_writes(1);
     if (capture.layout) feedback_finish(&capture);
@@ -3930,6 +3946,7 @@ static void dispatch(const p_dispatch *d) {
         gw_t *w = &g_wb[i];
         buffer_written(w->addr, w->size, w->buf, w->off, w->p);
     }
+    global_memory_written();
     g_stat_draws++;
 }
 static shader_t *clear_shader(shader_t *shader, const uint32_t *code, size_t bytes) {

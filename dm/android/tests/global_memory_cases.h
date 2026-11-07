@@ -9,7 +9,6 @@ enum { GM_UNIFORM,GM_POINTER,GM_MAP,GM_LOG,GM_OUTPUT,GM_POOL,GM_BUFFERS,GM_VARIA
 static const unsigned gm_sizes[]={65536,256,DMSH_GMEM_MAP_ENTRIES*DMSH_GMEM_MAP_ENTRY,4352,256,1024};
 static const unsigned gm_counts[]={0,1,17,4095};
 static uint64_t gm_start(unsigned index) { return UINT64_C(0x1fffff000)+(uint64_t)index*0x2000; }
-static unsigned gm_hash(uint32_t page) { return (page*UINT32_C(0x9e3779b1))>>22; }
 static uint64_t gm_address(unsigned pools,unsigned test) {
     const unsigned offsets[]={0,1,2,3,240,248,252,256};
     if(test<8)return gm_start(0)+offsets[test];
@@ -19,8 +18,7 @@ static uint64_t gm_address(unsigned pools,unsigned test) {
     if(test==11)return gm_start(0)-4;
     if(test==12)return 0;
     if(test==13)return UINT64_C(0xfffffffffc);
-    for(unsigned i=0;i<pools;i++)if(gm_hash((uint32_t)(gm_start(i)>>12))==1023)return gm_start(i);
-    return gm_start(0)+1024;
+    return pools>32 ? gm_start(31) : gm_start(0)+1024;
 }
 static unsigned gm_alignment(unsigned variant) {
     if(variant<2 || variant==7)return 1;
@@ -42,20 +40,17 @@ static void gm_prepare(void **buffers,uint64_t device_address,unsigned variant,u
     uint32_t *uniform=buffers[GM_UNIFORM];
     for(unsigned i=0;i<4;i++)uniform[4+i]=(test&1?0xfedcba98u:0x12345678u)+i;
     uint8_t *data=buffers[GM_POOL];for(unsigned i=0;i<256;i++)data[256+i]=(uint8_t)(0x81+i*29);
-    // Each log contains 1025 words followed by untouched guard bytes.
-    uint32_t *log=buffers[GM_LOG];memset(log,0,4100);
-    uint32_t page=(uint32_t)(address>>12);unsigned hash=gm_hash(page);
-    if(log_mode==1)log[hash+1]=page;
-    if(log_mode==2)for(unsigned i=0;i<8;i++)log[((hash+i)&1023)+1]=0x7f000001u+i;
+    // Current DMSH logs one bit per sorted map entry, followed by guard bytes.
+    uint32_t *log=buffers[GM_LOG];memset(log,0,DMSH_GMEM_MAP_ENTRIES/8);
+    int offset=gm_pool_offset(address,pools);
+    unsigned entry=offset>=0 ? (unsigned)((address-gm_start(0))/0x2000)+1 : 0;
+    if(log_mode==1 && entry)log[entry/32]|=1u<<(entry%32);
+    if(log_mode==2)for(unsigned i=0;i<DMSH_GMEM_MAP_ENTRIES/32;i++)log[i]=0xaaaaaaaau;
     (void)variant;
 }
-static void gm_log_page(uint32_t *log,uint64_t address) {
-    uint32_t page=(uint32_t)(address>>12);unsigned hash=gm_hash(page);
-    for(unsigned i=0;i<8;i++) {
-        unsigned slot=((hash+i)&1023)+1;
-        if(!log[slot] || log[slot]==page) { log[slot]=page;return; }
-    }
-    log[0]=1;
+static void gm_log_entry(uint32_t *log,uint64_t address) {
+    unsigned entry=(unsigned)((address-gm_start(0))/0x2000)+1;
+    log[entry/32]|=1u<<(entry%32);
 }
 static void gm_expected(void **buffers,unsigned variant,unsigned pools,unsigned test,uint8_t *pool,uint32_t *log,uint32_t *output) {
     memcpy(pool,buffers[GM_POOL],1024);memcpy(log,buffers[GM_LOG],4352);memcpy(output,buffers[GM_OUTPUT],256);
@@ -70,7 +65,7 @@ static void gm_expected(void **buffers,unsigned variant,unsigned pools,unsigned 
             if(variant==3)old=(uint32_t)(int32_t)(int16_t)old;
             output[word]=old;
         } else if(variant<12) {
-            if(offset>=0) { memcpy(pool+256+offset,&values[word],width);gm_log_page(log,at); }
+            if(offset>=0) { memcpy(pool+256+offset,&values[word],width);gm_log_entry(log,at); }
         } else {
             output[0]=old;
             if(offset<0)continue;
@@ -86,7 +81,7 @@ static void gm_expected(void **buffers,unsigned variant,unsigned pools,unsigned 
                 case 19:next=(int32_t)old<(int32_t)value?old:value;break;
                 case 20:next=(int32_t)old>(int32_t)value?old:value;break;
             }
-            memcpy(pool+256+offset,&next,4);gm_log_page(log,at);
+            memcpy(pool+256+offset,&next,4);gm_log_entry(log,at);
         }
     }
 }
