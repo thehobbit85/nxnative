@@ -175,6 +175,12 @@ $(B)/shaders/0000000000000052.spv: tests/depth_range.vert
 fixture: $(B)/shaders/000000000000006d.spv
 fixture: $(B)/shaders/000000000000006e.spv $(B)/shaders/000000000000006f.spv
 $(B)/t_replay: tests/storage_views.inc tests/bc_views.inc
+$(B)/t_replay: tests/empty_images.inc
+fixture: $(B)/shaders/0000000000000070.spv
+$(B)/shaders/0000000000000070.spv: tests/empty_images.comp tests/empty_images.vk.txt
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/empty_images.vk.txt $(@:.spv=.vk.txt)
 $(B)/shaders/000000000000006e.spv: tests/storage_views.comp tests/storage_views.vk.txt
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@

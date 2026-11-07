@@ -23,7 +23,7 @@ static void reflect_storage_texels(const uint32_t *w, size_t count, sbind *bindi
     int has_storage=0;
     for (int i=0;i<nb;i++) has_storage |= bindings[i].type == BT_STB || bindings[i].type == BT_SIMG;
     if (!has_storage || count<5 || !w[3] || w[3]>0x3fffff) return;
-    typedef struct { unsigned binding; uint32_t image; int view, num; } storage_id;
+    typedef struct { unsigned binding; uint32_t image; int view, num, multisample; } storage_id;
     uint32_t bound=w[3];
     storage_id *ids=calloc(bound,sizeof *ids);
     if (!ids) return;
@@ -37,6 +37,7 @@ static void reflect_storage_texels(const uint32_t *w, size_t count, sbind *bindi
         } else if (op==25 && len>=9 && p[1]<bound && p[2]<bound && p[7]==2 && p[8]<UINT32_MAX) {
             ids[p[1]].image=p[8]+1; // OpTypeImage, storage; plus one distinguishes Unknown
             ids[p[1]].num = ids[p[2]].num;
+            ids[p[1]].multisample = p[6] != 0;
             static const int dimensions[][2] = {{VK_IMAGE_VIEW_TYPE_1D, VK_IMAGE_VIEW_TYPE_1D_ARRAY},
                 {VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY}, {VK_IMAGE_VIEW_TYPE_3D, -1},
                 {VK_IMAGE_VIEW_TYPE_CUBE, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY}};
@@ -48,7 +49,10 @@ static void reflect_storage_texels(const uint32_t *w, size_t count, sbind *bindi
         } else if (op==59 && len>=4 && p[1]<bound && p[2]<bound && ids[p[2]].binding) {
             sbind *b = &bindings[ids[p[2]].binding-1];
             b->storage_image=ids[p[1]].image;
-            if (b->type == BT_SIMG && b->storage_image) { b->view = ids[p[1]].view; b->num = ids[p[1]].num; }
+            if (b->type == BT_SIMG && b->storage_image) {
+                b->view = ids[p[1]].view; b->num = ids[p[1]].num;
+                b->storage_ms = ids[p[1]].multisample;
+            }
         } else if ((op==61 || op==65 || op==66 || op==83) && len>=4 && p[2]<bound && p[3]<bound) {
             ids[p[2]].binding=ids[p[3]].binding; // load, access chain, copy
         } else if (op==60 && len==6 && p[3]<bound && ids[p[3]].binding) {
