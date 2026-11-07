@@ -16,4 +16,7 @@ void main() {
                       textureLod(cubes, vec4(direction, min(i / 6, count - 1)), 0.0).r,
                       texelFetch(layers, ivec3(0, 0, layer), 0).r, textureQueryLevels(layers));
     if (i == 0) values[18] = ivec4(textureSize(cube, 0).x, count, faces, textureSize(layers, 0).x);
+    if (i == 0) values[19] = ivec4(textureLod(cube, direction, 0.0).a,
+                                   textureLod(cubes, vec4(direction, 0), 0.0).a,
+                                   texelFetch(layers, ivec3(0), 0).a, 0);
 }

@@ -685,13 +685,14 @@ static void dummies(void) {
     g_support_buf = buf_new(4096, ALL_BUF_USAGE, &g_support_mem, &sp); memset(sp, 0, 4096);
     for (int i = 0; i < 73; i++) *(float *)((uint8_t *)sp + 192 + 16 * i) = 1.0f;
     VkCommandBuffer cb = once_begin(); to_general(cb, g_dummy_img, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkClearColorValue black = {{0, 0, 0, 1}}; VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkClearColorValue black = {0}; VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdClearColorImage(cb, g_dummy_img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &rr); once_end(cb);
 }
 // Unselected elements of a bindless array often contain no handle, or a handle
 // of another texture kind. Their descriptors still need the shader's view type.
 static VkFormat dummy_format(int num) {
-    return num == 1 ? VK_FORMAT_R32_SINT : num == 2 ? VK_FORMAT_R32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
+    // An R32 dummy would synthesize alpha one even when cleared to zero.
+    return num == 1 ? VK_FORMAT_R32G32B32A32_SINT : num == 2 ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
 }
 static VkImageView sampled_dummy(int view, int num) {
     static VkImageView views[7][3];
@@ -716,8 +717,7 @@ static VkImageView sampled_dummy(int view, int num) {
         (VkImageViewType)view, format, {0}, range};
     VKCHECK(vkCreateImageView(g_dev, &vi, NULL, &views[view][num]));
     VkCommandBuffer cb = once_begin(); to_general(cb, image, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkClearColorValue black = {{0, 0, 0, 1}};
-    if (num) black.uint32[3] = 1;
+    VkClearColorValue black = {0};
     vkCmdClearColorImage(cb, image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
     VkImageMemoryBarrier ready = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,

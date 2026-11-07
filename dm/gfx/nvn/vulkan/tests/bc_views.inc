@@ -34,7 +34,7 @@ static void compressed_color_views(void) {
             for (int j=0; j<4; j++) {
                 float f = c->rgba[j] / 255.f;
                 if (pass == 1 && j < 3) f = f <= .04045f ? f/12.92f : powf((f+.055f)/1.055f, 2.4f);
-                if (pass == 2) f = j == 3;
+                if (pass == 2) f = 0; // Metal's empty sampled descriptor, including alpha.
                 if (!(fabsf(result.rgba[j]-f) < .002f))
                     die("BC base %#x view %#x channel %d: got %g expected %g", tex.d.format, view.format, j, result.rgba[j], f);
             }

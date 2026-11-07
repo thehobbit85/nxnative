@@ -32,7 +32,7 @@ static void cube_ranges(void) {
         view_t view = {.set_target=1, .target=c->target, .set_layers=1, .min_layer=c->base, .nlayers=c->count,
                        .set_levels=1, .base_level=c->mip, .nlevels=c->levels};
         mtl_reg_tex(slot, &tex, &view);
-        int32_t result[layers+1][4]; memset(result, 0xcc, sizeof result);
+        int32_t result[layers+2][4]; memset(result, 0xcc, sizeof result);
         list_t list = {0};
         RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&cube_ranges_program, .stages=0x20);
         for (int i = 0; i < 3; i++)
@@ -46,6 +46,10 @@ static void cube_ranges(void) {
         if (memcmp(result[layers], dims, sizeof dims))
             die("cube ranges case %u dimensions %d/%d/%d/%d expected %d/%d/%d/%d", row, result[layers][0],
                 result[layers][1], result[layers][2], result[layers][3], dims[0], dims[1], dims[2], dims[3]);
+        int alpha[] = {!!cubes, !!cubes, !!c->faces, 0}; // R32 has implicit one; an empty descriptor has zero.
+        if (memcmp(result[layers+1], alpha, sizeof alpha))
+            die("cube ranges case %u alpha %d/%d/%d expected %d/%d/%d", row, result[layers+1][0],
+                result[layers+1][1], result[layers+1][2], alpha[0], alpha[1], alpha[2]);
         int base = 100 + 32 * c->mip + c->first;
         for (int i = 0; i < layers; i++) {
             int face = i % 6, group = i / 6 < cubes ? i / 6 : cubes - 1;

@@ -407,8 +407,8 @@ static void uniform_texture_array(int table, int custom_border) {
     mtl_pool_add(handles, sizeof handles); mtl_pool_add(samplers, sizeof samplers);
     handles[44 + index] = 5; samplers[16 + index] = 1u << 20;
     float positions[] = {-1,-1, 3,-1, -1,3}, white[] = {1,1,1,1};
-    uint8_t expected[][4] = {{0,255,0,255}, {0,0,255,255}, {0,0,0,255},
-                                   {255,255,255,255}, {0,0,0,255}, {0,0,0,255}, {0,0,255,255}, {255,255,255,255}};
+    uint8_t expected[][4] = {{0,255,0,255}, {0,0,255,255}, {0,0,0,0},
+                                   {255,255,255,255}, {0,0,0,0}, {0,0,0,0}, {0,0,255,255}, {255,255,255,255}};
     if (custom_border) {
         // Slot 258 samples halfway between blue and the guest border.
         if (custom_border==STOCK_FALLBACK) {
@@ -572,6 +572,42 @@ static void float_image_views(void) {
 #include "cube_ranges.inc"
 #include "storage_views.inc"
 #include "bc_views.inc"
+static void empty_sampled_slots(void) {
+    enum { slot=1462 };
+    tex_t textures[3];
+    const NVNformat formats[] = {NVN_FORMAT_R32I, NVN_FORMAT_R32UI, NVN_FORMAT_R32F};
+    mtl_queue_activate(slot);
+    mtl_reg_samp(slot,&(samp_par){.ws=NVN_WRAP_MODE_CLAMP_TO_EDGE,.wt=NVN_WRAP_MODE_CLAMP_TO_EDGE});
+    for (int j=0; j<3; j++) {
+        textures[j]=(tex_t){.serial=0x17310+j,.d={.width=1,.height=1,.depth=1,.levels=1,
+                             .target=NVN_TEXTURE_TARGET_2D,.format=formats[j]}};
+        nvn_tex_layout(&textures[j].d,&textures[j].L);
+        mtl_reg_tex(slot+j,&textures[j],NULL);
+    }
+    // The single-channel real views must still supply implicit alpha one.
+    for (int pass=0; pass<4; pass++) {
+        list_t list={0};
+        struct { int32_t s[4]; uint32_t u[4]; float f[4]; } result;
+        memset(&result,0xcc,sizeof result);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&typed_border_program[0],.stages=0x20);
+        for (int j=0; j<3; j++) {
+            RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&textures[j],.r={.width=1,.height=1,.depth=1},.mask=15);
+            unsigned tid=pass==1 ? slot+j : pass==2 ? 0xffff0+j : 0;
+            RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=j,.h=((uint64_t)slot<<20)|tid);
+        }
+        RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)&result,.size=sizeof result);
+        RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+        put(&list,OP_END,NULL,0); mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (int j=0;j<4;j++) {
+            int expected=pass==1 && j==3;
+            if (result.s[j]!=expected || result.u[j]!=(uint32_t)expected || result.f[j]!=expected)
+                die("sampled slot pass %d channel %d: int %d, uint %u, float %g; expected %d",pass,j,result.s[j],result.u[j],result.f[j],expected);
+        }
+    }
+    for (int j=0;j<3;j++) { mtl_reg_tex(slot+j,NULL,NULL); mtl_tex_release(&textures[j]); }
+    mtl_queue_forget(slot);
+    puts("Float and integer empty texture slots read zero in all channels across descriptor reuse");
+}
 
 static void custom_borders(void) {
     int native;
@@ -2720,7 +2756,7 @@ static void separate_descriptors(int mixed_formats) {
             if (exact) memcpy(want,(uint8_t[]){96,32,159,127},4);
             else memset(want,0,4);
         }
-        if(pass==8) want[1]=0;
+        if(pass==8) memset(want,0,sizeof want);
         for(int i=0;i<16;i++) if(memcmp(pixels+4*i,want,4)) {
             fprintf(stderr,"separate descriptors mode%d pass%d pixel%d: %u,%u,%u,%u\n",mode,pass,i,pixels[4*i],pixels[4*i+1],pixels[4*i+2],pixels[4*i+3]);abort();
         }
@@ -3213,6 +3249,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_CUBE_RANGES")) { cube_ranges(); return 0; }
     if (getenv("DM_VK_TEST_STORAGE_VIEWS")) { storage_image_views(); return 0; }
     if (getenv("DM_VK_TEST_BC_VIEWS")) { compressed_color_views(); return 0; }
+    if (getenv("DM_VK_TEST_EMPTY_SAMPLED")) { empty_sampled_slots(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
     if (getenv("DM_VK_TEST_CUSTOM_BORDER")) { custom_borders(); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features(NULL,NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
@@ -3271,6 +3308,7 @@ int main(void) {
     cube_ranges();
     storage_image_views();
     compressed_color_views();
+    empty_sampled_slots();
     custom_borders();
     compute_driver_constants();
     many_resource_bindings();
