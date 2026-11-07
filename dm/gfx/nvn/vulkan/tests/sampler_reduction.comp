@@ -2,7 +2,23 @@
 #ifndef FRAGMENT
 layout(local_size_x=1) in;
 #endif
-#ifdef VOLUME
+#ifdef ONE_ROW
+#ifdef ARRAY
+#define TEXTURE texture1DArray
+#define SAMPLER sampler1DArray
+#define COORDINATE vec2(position, coordinate.w)
+#define EXTENT textureSize(sampled, 0).x
+#else
+#define TEXTURE texture1D
+#define SAMPLER sampler1D
+#define COORDINATE position
+#define EXTENT textureSize(sampled, 0)
+#endif
+#define SPATIAL float
+#define TEXEL_OFFSET 1
+#define DX scale
+#define DY 0.0
+#elif defined(VOLUME)
 #define TEXTURE texture3D
 #define SAMPLER sampler3D
 #define COORDINATE position
@@ -20,7 +36,7 @@ layout(local_size_x=1) in;
 #define SAMPLER sampler2D
 #define COORDINATE position
 #endif
-#ifndef VOLUME
+#if !defined(VOLUME) && !defined(ONE_ROW)
 #define SPATIAL vec2
 #define EXTENT textureSize(sampled, 0).xy
 #define TEXEL_OFFSET ivec2(1,-1)
@@ -29,7 +45,9 @@ layout(local_size_x=1) in;
 #endif
 #ifdef PROJECTED
 #undef COORDINATE
-#ifdef VOLUME
+#ifdef ONE_ROW
+#define COORDINATE vec2(position * -2, -2)
+#elif defined(VOLUME)
 #define COORDINATE vec4(position * -2, -2)
 #else
 #define COORDINATE vec4(position * -2, 7, -2)
@@ -62,7 +80,9 @@ layout(location=0) out vec4 value;
 layout(binding=2, std430) buffer Results { vec4 value; };
 #endif
 void main() {
-#ifdef VOLUME
+#ifdef ONE_ROW
+    float position = coordinate.x;
+#elif defined(VOLUME)
     vec3 position = vec3(coordinate.xy, coordinate.w);
 #else
     vec2 position = coordinate.xy;
@@ -74,7 +94,9 @@ void main() {
     const float bias = 0;
 #endif
     SPATIAL scale = exp2(coordinate.z - bias) / SPATIAL(EXTENT);
-#ifdef VOLUME
+#ifdef ONE_ROW
+    position += (gl_FragCoord.x - .5) * scale;
+#elif defined(VOLUME)
     position.zy += (gl_FragCoord.xy - vec2(.5)) * scale.zy;
 #else
     position += (gl_FragCoord.xy - vec2(.5)) * scale;

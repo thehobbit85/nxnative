@@ -1,4 +1,5 @@
 #include "../spv_sample_reduction.h"
+#include "../spv_one_row.h"
 #include <assert.h>
 #include <stdio.h>
 
@@ -24,6 +25,9 @@ int main(int argc, char **argv) {
     sample_reduction filter = {.binding=(uint32_t)strtoul(argv[3],NULL,10), .minimum=1, .min_linear=1, .mag_linear=1, .max_lod=10, .max_bias=16};
     size_t count = 0; const char *reason;
     assert(!spv_sample_reduction(input, 4, &filter, 1, &count, &reason) && reason);
+    uint32_t *adapted = spv_one_row(input, bytes / 4, &count, &reason);
+    if (reason) { fprintf(stderr, "%s: %s\n", argv[1], reason); free(input); return 1; }
+    if (adapted) { free(input); input=adapted; bytes=(long)(count*4); }
     uint32_t *output = spv_sample_reduction(input, bytes / 4, &filter, 1, &count, &reason);
     if (!output) { fprintf(stderr, "%s\n", reason); free(input); return 1; }
     file = fopen(argv[2], "wb"); assert(file);

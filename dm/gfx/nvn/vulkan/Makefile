@@ -261,6 +261,51 @@ $(B)/shaders/00000000feed97c8.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED -DSEPA
 $(B)/shaders/00000000feed97c9.spv: REDUCTION_FLAGS = -DVOLUME -DQUERY -DFRAGMENT -fshader-stage=fragment
 $(B)/shaders/00000000feed97ca.spv: REDUCTION_FLAGS = -DVOLUME -DQUERY -DFRAGMENT -fshader-stage=fragment -DSEPARATE
 REDUCTION_SHADERS += $(B)/shaders/00000000feed97b1.spv $(B)/shaders/00000000feed97b2.spv $(B)/shaders/00000000feed97b3.spv $(B)/shaders/00000000feed97b4.spv $(B)/shaders/00000000feed97b5.spv $(B)/shaders/00000000feed97b6.spv $(B)/shaders/00000000feed97b7.spv $(B)/shaders/00000000feed97b8.spv $(B)/shaders/00000000feed97b9.spv $(B)/shaders/00000000feed97ba.spv $(B)/shaders/00000000feed97bb.spv $(B)/shaders/00000000feed97bc.spv $(B)/shaders/00000000feed97bd.spv $(B)/shaders/00000000feed97be.spv $(B)/shaders/00000000feed97bf.spv $(B)/shaders/00000000feed97c0.spv $(B)/shaders/00000000feed97c1.spv $(B)/shaders/00000000feed97c2.spv $(B)/shaders/00000000feed97c3.spv $(B)/shaders/00000000feed97c4.spv $(B)/shaders/00000000feed97c5.spv $(B)/shaders/00000000feed97c6.spv $(B)/shaders/00000000feed97c7.spv $(B)/shaders/00000000feed97c8.spv $(B)/shaders/00000000feed97c9.spv $(B)/shaders/00000000feed97ca.spv
+$(B)/shaders/00000000feed9875.spv: REDUCTION_FLAGS = -DONE_ROW
+$(B)/shaders/00000000feed9876.spv: REDUCTION_FLAGS = -DONE_ROW -DSEPARATE
+$(B)/shaders/00000000feed9877.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY
+$(B)/shaders/00000000feed9878.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DSEPARATE
+$(B)/shaders/00000000feed9879.spv: REDUCTION_FLAGS = -DONE_ROW -DGRADIENTS
+$(B)/shaders/00000000feed987a.spv: REDUCTION_FLAGS = -DONE_ROW -DSEPARATE -DGRADIENTS
+$(B)/shaders/00000000feed987b.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DGRADIENTS
+$(B)/shaders/00000000feed987c.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DSEPARATE -DGRADIENTS
+$(B)/shaders/00000000feed987d.spv: REDUCTION_FLAGS = -DONE_ROW -DOFFSET
+$(B)/shaders/00000000feed987e.spv: REDUCTION_FLAGS = -DONE_ROW -DSEPARATE -DOFFSET
+$(B)/shaders/00000000feed987f.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DOFFSET
+$(B)/shaders/00000000feed9880.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DSEPARATE -DOFFSET
+$(B)/shaders/00000000feed9881.spv: REDUCTION_FLAGS = -DONE_ROW -DGRADIENTS -DOFFSET
+$(B)/shaders/00000000feed9882.spv: REDUCTION_FLAGS = -DONE_ROW -DSEPARATE -DGRADIENTS -DOFFSET
+$(B)/shaders/00000000feed9883.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DGRADIENTS -DOFFSET
+$(B)/shaders/00000000feed9884.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DSEPARATE -DGRADIENTS -DOFFSET
+$(B)/shaders/00000000feed9885.spv: REDUCTION_FLAGS = -DONE_ROW -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed9886.spv: REDUCTION_FLAGS = -DONE_ROW -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed9887.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed9888.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed9889.spv: REDUCTION_FLAGS = -DONE_ROW -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed988a.spv: REDUCTION_FLAGS = -DONE_ROW -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed988b.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed988c.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed988d.spv: REDUCTION_FLAGS = -DONE_ROW -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/00000000feed988e.spv: REDUCTION_FLAGS = -DONE_ROW -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/00000000feed988f.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/00000000feed9890.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/00000000feed9891.spv: REDUCTION_FLAGS = -DONE_ROW -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/00000000feed9892.spv: REDUCTION_FLAGS = -DONE_ROW -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/00000000feed9893.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/00000000feed9894.spv: REDUCTION_FLAGS = -DONE_ROW -DARRAY -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/00000000feed9895.spv: REDUCTION_FLAGS = -DONE_ROW -DPROJECTED
+$(B)/shaders/00000000feed9896.spv: REDUCTION_FLAGS = -DONE_ROW -DPROJECTED -DSEPARATE
+$(B)/shaders/00000000feed9899.spv: REDUCTION_FLAGS = -DONE_ROW -DPROJECTED -DGRADIENTS
+$(B)/shaders/00000000feed989a.spv: REDUCTION_FLAGS = -DONE_ROW -DPROJECTED -DSEPARATE -DGRADIENTS
+$(B)/shaders/00000000feed989d.spv: REDUCTION_FLAGS = -DONE_ROW -DPROJECTED -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed989e.spv: REDUCTION_FLAGS = -DONE_ROW -DPROJECTED -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed98a1.spv: REDUCTION_FLAGS = -DONE_ROW -DPROJECTED -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed98a2.spv: REDUCTION_FLAGS = -DONE_ROW -DPROJECTED -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed98a5.spv: REDUCTION_FLAGS = -DONE_ROW -DQUERY -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed98a6.spv: REDUCTION_FLAGS = -DONE_ROW -DQUERY -DFRAGMENT -fshader-stage=fragment -DSEPARATE
+$(B)/shaders/00000000feed98a7.spv: REDUCTION_FLAGS = -DONE_ROW -DQUERY -DFRAGMENT -fshader-stage=fragment -DARRAY
+$(B)/shaders/00000000feed98a8.spv: REDUCTION_FLAGS = -DONE_ROW -DQUERY -DFRAGMENT -fshader-stage=fragment -DARRAY -DSEPARATE
+REDUCTION_SHADERS += $(B)/shaders/00000000feed9875.spv $(B)/shaders/00000000feed9876.spv $(B)/shaders/00000000feed9877.spv $(B)/shaders/00000000feed9878.spv $(B)/shaders/00000000feed9879.spv $(B)/shaders/00000000feed987a.spv $(B)/shaders/00000000feed987b.spv $(B)/shaders/00000000feed987c.spv $(B)/shaders/00000000feed987d.spv $(B)/shaders/00000000feed987e.spv $(B)/shaders/00000000feed987f.spv $(B)/shaders/00000000feed9880.spv $(B)/shaders/00000000feed9881.spv $(B)/shaders/00000000feed9882.spv $(B)/shaders/00000000feed9883.spv $(B)/shaders/00000000feed9884.spv $(B)/shaders/00000000feed9885.spv $(B)/shaders/00000000feed9886.spv $(B)/shaders/00000000feed9887.spv $(B)/shaders/00000000feed9888.spv $(B)/shaders/00000000feed9889.spv $(B)/shaders/00000000feed988a.spv $(B)/shaders/00000000feed988b.spv $(B)/shaders/00000000feed988c.spv $(B)/shaders/00000000feed988d.spv $(B)/shaders/00000000feed988e.spv $(B)/shaders/00000000feed988f.spv $(B)/shaders/00000000feed9890.spv $(B)/shaders/00000000feed9891.spv $(B)/shaders/00000000feed9892.spv $(B)/shaders/00000000feed9893.spv $(B)/shaders/00000000feed9894.spv $(B)/shaders/00000000feed9895.spv $(B)/shaders/00000000feed9896.spv $(B)/shaders/00000000feed9899.spv $(B)/shaders/00000000feed989a.spv $(B)/shaders/00000000feed989d.spv $(B)/shaders/00000000feed989e.spv $(B)/shaders/00000000feed98a1.spv $(B)/shaders/00000000feed98a2.spv $(B)/shaders/00000000feed98a5.spv $(B)/shaders/00000000feed98a6.spv $(B)/shaders/00000000feed98a7.spv $(B)/shaders/00000000feed98a8.spv
 fixture: $(REDUCTION_SHADERS)
 $(REDUCTION_SHADERS): tests/sampler_reduction.comp
 	mkdir -p $(@D)
@@ -625,7 +670,7 @@ one-row-guest-fixture: fixture
 	cp $(B)/one-row-samples/export/*.spv $(B)/one-row-samples/export/*.vk.txt $(B)/shaders/
 	cp $(B)/one-row-queries/export/*.spv $(B)/one-row-queries/export/*.vk.txt $(B)/shaders/
 
-$(B)/t_sample_reduction: tests/t_sample_reduction.c spv_sample_reduction.h spv_texel_bias.h spv_texel_wide.inc
+$(B)/t_sample_reduction: tests/t_sample_reduction.c spv_sample_reduction.h spv_one_row.h spv_texel_bias.h spv_texel_wide.inc
 	mkdir -p $(B)
 	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror -Wno-unused-function $(BUILD_CFLAGS) $< -o $@
 .PHONY: sampler-reduction-check

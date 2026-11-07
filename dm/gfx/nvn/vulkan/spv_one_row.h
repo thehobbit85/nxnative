@@ -248,7 +248,10 @@ static uint32_t *spv_one_row(const uint32_t *words, size_t count, size_t *out_co
                 int normalized = (basic >= 87 && basic <= 94) || basic == 105;
                 if (len <= image_at + 1 || (projected && image == 2) || basic == 96 || basic == 97) ok = 0;
                 if (ok) {
-                    p[image_at + 1] = row_coordinate(&m, p[image_at + 1], image + projected, normalized, projected, 0);
+                    // LOD queries use spatial coordinates only, even on an
+                    // array image. Its layer never contributes derivatives.
+                    unsigned lanes = basic == 105 ? 1 : image + projected;
+                    p[image_at + 1] = row_coordinate(&m, p[image_at + 1], lanes, normalized, projected, 0);
                     ok = p[image_at + 1] != 0;
                 }
                 unsigned mask_at = basic == 99 ? 4 :
