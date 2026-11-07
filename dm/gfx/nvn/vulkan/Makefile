@@ -4,7 +4,7 @@ HOST = ../../../host
 NVN = ..
 B ?= build
 $(B)/t_replay: tests/wrapped_buffer.inc
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: wrapped_buffer.inc spv_wrapped_buffer.h block_targets.inc block_targets_finish.inc native_reduction.inc diagnostics.inc ../../../third_party/flip/tool/stb_image_write.h
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: wrapped_buffer.inc spv_wrapped_buffer.h block_targets.inc block_targets_finish.inc native_reduction.inc diagnostics.inc diagnostic_targets.inc ../../../third_party/flip/tool/stb_image_write.h
 $(B)/t_wrapped_buffer: tests/t_wrapped_buffer.c spv_wrapped_buffer.h spv_texel_bias.h
 	mkdir -p $(B)
 	$(CC) $(CFLAGS) $< -o $@
