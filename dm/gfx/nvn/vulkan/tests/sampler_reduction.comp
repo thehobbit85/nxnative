@@ -2,7 +2,16 @@
 #ifndef FRAGMENT
 layout(local_size_x=1) in;
 #endif
-#ifdef ARRAY
+#ifdef VOLUME
+#define TEXTURE texture3D
+#define SAMPLER sampler3D
+#define COORDINATE position
+#define SPATIAL vec3
+#define EXTENT textureSize(sampled, 0)
+#define TEXEL_OFFSET ivec3(1,-1,1)
+#define DX vec3(0,0,scale.z)
+#define DY vec3(0,scale.y,0)
+#elif defined(ARRAY)
 #define TEXTURE texture2DArray
 #define SAMPLER sampler2DArray
 #define COORDINATE vec3(position, coordinate.w)
@@ -11,9 +20,20 @@ layout(local_size_x=1) in;
 #define SAMPLER sampler2D
 #define COORDINATE position
 #endif
+#ifndef VOLUME
+#define SPATIAL vec2
+#define EXTENT textureSize(sampled, 0).xy
+#define TEXEL_OFFSET ivec2(1,-1)
+#define DX vec2(scale.x,0)
+#define DY vec2(0,scale.y)
+#endif
 #ifdef PROJECTED
 #undef COORDINATE
+#ifdef VOLUME
+#define COORDINATE vec4(position * -2, -2)
+#else
 #define COORDINATE vec4(position * -2, 7, -2)
+#endif
 #define SAMPLE textureProj
 #define SAMPLE_OFFSET textureProjOffset
 #define SAMPLE_LOD textureProjLod
@@ -42,23 +62,31 @@ layout(location=0) out vec4 value;
 layout(binding=2, std430) buffer Results { vec4 value; };
 #endif
 void main() {
+#ifdef VOLUME
+    vec3 position = vec3(coordinate.xy, coordinate.w);
+#else
     vec2 position = coordinate.xy;
+#endif
 #ifdef FRAGMENT
 #ifdef BIAS
     const float bias = 1;
 #else
     const float bias = 0;
 #endif
-    vec2 scale = exp2(coordinate.z - bias) / vec2(textureSize(sampled, 0).xy);
+    SPATIAL scale = exp2(coordinate.z - bias) / SPATIAL(EXTENT);
+#ifdef VOLUME
+    position.zy += (gl_FragCoord.xy - vec2(.5)) * scale.zy;
+#else
     position += (gl_FragCoord.xy - vec2(.5)) * scale;
+#endif
 #ifdef QUERY
     value = vec4(textureQueryLod(sampled, position), 0, 1);
 #else
 #ifdef OFFSET
 #ifdef BIAS
-    value = SAMPLE_OFFSET(sampled, COORDINATE, ivec2(1,-1), bias);
+    value = SAMPLE_OFFSET(sampled, COORDINATE, TEXEL_OFFSET, bias);
 #else
-    value = SAMPLE_OFFSET(sampled, COORDINATE, ivec2(1,-1));
+    value = SAMPLE_OFFSET(sampled, COORDINATE, TEXEL_OFFSET);
 #endif
 #else
 #ifdef BIAS
@@ -70,15 +98,15 @@ void main() {
 #endif
 #else
 #ifdef GRADIENTS
-    vec2 scale = exp2(coordinate.z) / vec2(textureSize(sampled, 0).xy);
+    SPATIAL scale = exp2(coordinate.z) / SPATIAL(EXTENT);
 #ifdef OFFSET
-    value = SAMPLE_GRAD_OFFSET(sampled, COORDINATE, vec2(scale.x,0), vec2(0,scale.y), ivec2(1,-1));
+    value = SAMPLE_GRAD_OFFSET(sampled, COORDINATE, DX, DY, TEXEL_OFFSET);
 #else
-    value = SAMPLE_GRAD(sampled, COORDINATE, vec2(scale.x,0), vec2(0,scale.y));
+    value = SAMPLE_GRAD(sampled, COORDINATE, DX, DY);
 #endif
 #else
 #ifdef OFFSET
-    value = SAMPLE_LOD_OFFSET(sampled, COORDINATE, coordinate.z, ivec2(1,-1));
+    value = SAMPLE_LOD_OFFSET(sampled, COORDINATE, coordinate.z, TEXEL_OFFSET);
 #else
     value = SAMPLE_LOD(sampled, COORDINATE, coordinate.z);
 #endif

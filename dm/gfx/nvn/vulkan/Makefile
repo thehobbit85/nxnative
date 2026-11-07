@@ -234,6 +234,33 @@ REDUCTION_SHADERS = $(B)/shaders/0000000000000075.spv $(B)/shaders/0000000000000
     $(B)/shaders/0000000000000091.spv $(B)/shaders/0000000000000092.spv $(B)/shaders/0000000000000093.spv $(B)/shaders/0000000000000094.spv
 REDUCTION_SHADERS += $(B)/shaders/0000000000000095.spv $(B)/shaders/0000000000000096.spv $(B)/shaders/0000000000000099.spv $(B)/shaders/000000000000009a.spv $(B)/shaders/000000000000009d.spv $(B)/shaders/000000000000009e.spv $(B)/shaders/00000000000000a1.spv $(B)/shaders/00000000000000a2.spv
 REDUCTION_SHADERS += $(B)/shaders/00000000000000a5.spv $(B)/shaders/00000000000000a6.spv $(B)/shaders/00000000000000a7.spv $(B)/shaders/00000000000000a8.spv
+$(B)/shaders/00000000feed97b1.spv: REDUCTION_FLAGS = -DVOLUME
+$(B)/shaders/00000000feed97b2.spv: REDUCTION_FLAGS = -DVOLUME -DSEPARATE
+$(B)/shaders/00000000feed97b3.spv: REDUCTION_FLAGS = -DVOLUME -DGRADIENTS
+$(B)/shaders/00000000feed97b4.spv: REDUCTION_FLAGS = -DVOLUME -DSEPARATE -DGRADIENTS
+$(B)/shaders/00000000feed97b5.spv: REDUCTION_FLAGS = -DVOLUME -DOFFSET
+$(B)/shaders/00000000feed97b6.spv: REDUCTION_FLAGS = -DVOLUME -DSEPARATE -DOFFSET
+$(B)/shaders/00000000feed97b7.spv: REDUCTION_FLAGS = -DVOLUME -DGRADIENTS -DOFFSET
+$(B)/shaders/00000000feed97b8.spv: REDUCTION_FLAGS = -DVOLUME -DSEPARATE -DGRADIENTS -DOFFSET
+$(B)/shaders/00000000feed97b9.spv: REDUCTION_FLAGS = -DVOLUME -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed97ba.spv: REDUCTION_FLAGS = -DVOLUME -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed97bb.spv: REDUCTION_FLAGS = -DVOLUME -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed97bc.spv: REDUCTION_FLAGS = -DVOLUME -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed97bd.spv: REDUCTION_FLAGS = -DVOLUME -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/00000000feed97be.spv: REDUCTION_FLAGS = -DVOLUME -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/00000000feed97bf.spv: REDUCTION_FLAGS = -DVOLUME -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/00000000feed97c0.spv: REDUCTION_FLAGS = -DVOLUME -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/00000000feed97c1.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED
+$(B)/shaders/00000000feed97c2.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED -DSEPARATE
+$(B)/shaders/00000000feed97c3.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED -DGRADIENTS
+$(B)/shaders/00000000feed97c4.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED -DSEPARATE -DGRADIENTS
+$(B)/shaders/00000000feed97c5.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed97c6.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed97c7.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed97c8.spv: REDUCTION_FLAGS = -DVOLUME -DPROJECTED -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed97c9.spv: REDUCTION_FLAGS = -DVOLUME -DQUERY -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed97ca.spv: REDUCTION_FLAGS = -DVOLUME -DQUERY -DFRAGMENT -fshader-stage=fragment -DSEPARATE
+REDUCTION_SHADERS += $(B)/shaders/00000000feed97b1.spv $(B)/shaders/00000000feed97b2.spv $(B)/shaders/00000000feed97b3.spv $(B)/shaders/00000000feed97b4.spv $(B)/shaders/00000000feed97b5.spv $(B)/shaders/00000000feed97b6.spv $(B)/shaders/00000000feed97b7.spv $(B)/shaders/00000000feed97b8.spv $(B)/shaders/00000000feed97b9.spv $(B)/shaders/00000000feed97ba.spv $(B)/shaders/00000000feed97bb.spv $(B)/shaders/00000000feed97bc.spv $(B)/shaders/00000000feed97bd.spv $(B)/shaders/00000000feed97be.spv $(B)/shaders/00000000feed97bf.spv $(B)/shaders/00000000feed97c0.spv $(B)/shaders/00000000feed97c1.spv $(B)/shaders/00000000feed97c2.spv $(B)/shaders/00000000feed97c3.spv $(B)/shaders/00000000feed97c4.spv $(B)/shaders/00000000feed97c5.spv $(B)/shaders/00000000feed97c6.spv $(B)/shaders/00000000feed97c7.spv $(B)/shaders/00000000feed97c8.spv $(B)/shaders/00000000feed97c9.spv $(B)/shaders/00000000feed97ca.spv
 fixture: $(REDUCTION_SHADERS)
 $(REDUCTION_SHADERS): tests/sampler_reduction.comp
 	mkdir -p $(@D)
