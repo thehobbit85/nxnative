@@ -346,6 +346,8 @@ $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/t_recorde
 SURFACE_WRAPS = vkGetSwapchainImagesKHR vkAcquireNextImageKHR vkQueuePresentKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkCreateSwapchainKHR
 $(B)/t_present_surface_android: $(B)/t_replay tests/present_surface.inc
 	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) -DDM_VK_TEST_ANDROID_SURFACE $(SRC) -o $@ $(LIBS) -lmediandk $(foreach f,$(SURFACE_WRAPS),-Wl,--wrap=$(f))
+$(B)/t_sampler_limits: $(B)/t_replay tests/sampler_limits.inc
+	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) -DDM_VK_TEST_SAMPLER_LIMITS $(SRC) -o $@ $(LIBS) $(foreach f,vkGetPhysicalDeviceProperties vkGetPhysicalDeviceFeatures2 vkCreateSampler,-Wl,--wrap=$(f))
 .PHONY: android-recorder
 android-recorder: RECORDER_CPPFLAGS = -I../../../android/compat
 android-recorder: RECORDER_EXTRA = ../../../android/compat/sha256.c
