@@ -948,6 +948,7 @@ typedef struct {
     VkComponentMapping components; VkImageSubresourceRange range;
 } image_view_key;
 typedef struct { image_view_key key; VkImageView v; } vview;
+typedef struct block_view block_view;
 struct vtex {
     uint64_t serial; VkImage img; VkSampleCountFlagBits samples; VkImageUsageFlags usage; VkDeviceMemory m; int blk; VkDeviceSize moff, msize; fmt_t f; int nvn_fmt, target;
     uint32_t w, h, d, levels, layers; VkImageAspectFlags aspect; int uploaded; _Atomic int gpu;
@@ -957,6 +958,7 @@ struct vtex {
     int sparse; uint64_t sparse_submission, uploaded_mappings, seen_mappings, seen_writes;
     vview *views; int nviews;
     VkImageView window_view; _Atomic unsigned present_refs;  // Window submissions have their own fences.
+    block_view *block_views;
     struct vtex *next;
     uint64_t dead;   // released by the game: freed once the GPU has finished the submission that was being recorded then (fence dead)
     uint32_t linrow, linbpb;   // a linear 2D texture (LINEAR / LINEAR_RENDER_TARGET) the CPU can read: its row pitch and bytes per texel; what passes render into it goes back to its storage (lin_writeback)
@@ -1140,7 +1142,9 @@ static void tex_upload(vtex *v, const tex_t *t) {
     // made, as Super Mario Odyssey's normal maps do; noise until then) brings a new upload at the texture's next use (tex_get)
     if (t->mem && !v->sparse && !v->gpu && nvn_dirty_tracked(t->mem, t->L.size)) { nvn_dirty_protect(t->mem, t->L.size); v->stamp = nvn_dirty_now(); v->span = nvn_dirty_span(t->mem, t->L.size); }
 }
+static void block_views_release(vtex *v);
 static void tex_free(vtex *v) {   // released by the game: draws already recorded (and the one being recorded) may still use it
+    block_views_release(v);
     pthread_mutex_lock(&g_gbmu);
     v->dead = g_fence + 1;
     if (g_ngb == g_cgb) { g_cgb = g_cgb ? 2 * g_cgb : 64; g_gb = realloc(g_gb, g_cgb * sizeof *g_gb); }
@@ -2135,8 +2139,16 @@ static uint32_t g_dispatch_dim[3];
 static uint32_t g_draw_base_instance;
 static VkBuffer g_dispatch_args;
 static VkDeviceSize g_dispatch_offset;
+typedef struct {
+    vtex *base;
+    tex_t texture;
+    texel_extent extent;
+    VkBufferImageCopy region;
+    size_t bytes;
+} block_target;
 static struct {   // the current render targets and the open dynamic rendering; clears that come before the pass's first draw become its load actions (a tiler then never reads the old contents)
     int n; vtex *ct[8]; VkImageView cv[8]; VkFormat cf[8]; vtex *dt; VkImageView dv; uint32_t w, h; VkSampleCountFlagBits samples; int incompatible_samples, open;
+    block_target blocks[8];
     uint32_t clv[8], cly[8]; uint8_t cwr[8], cdrawn[8];   // each colour attachment's level and layer, and whether a draw wrote it since its last same-pass snapshot (fb_prepare)
     uint8_t clr_c[8], clr_d, clr_s; VkClearColorValue cc[8]; float cd; uint32_t cs;
     uint32_t max_layers, layers;
@@ -2214,6 +2226,9 @@ static image_view_key attachment_key(const vtex *v, VkImageView view) {
     for (int i=0; i<v->nviews; i++) if (v->views[i].v==view) return v->views[i].key;
     return (image_view_key){.range={.layerCount=1}};
 }
+static void cpu_ready(uint64_t addr, uint64_t size);
+static vtex *sampled_scratch(fmt_t format, VkSampleCountFlagBits samples, uint32_t w, uint32_t h, uint32_t levels, VkImageUsageFlags usage);
+#include "block_targets.inc"
 static void set_rt(const p_set_rt *r) {
     int timing=g_segment_timestamps && C->qp;
     VkImageView old_color[8], old_depth=P.dv;
@@ -2225,14 +2240,23 @@ static void set_rt(const p_set_rt *r) {
     P.layers=1; P.max_layers=g_props.limits.maxFramebufferLayers;
     for (int i = 0; i < P.n; i++) {
         if (!r->color[i]) continue;
-        vtex *v = tex_get(r->color[i], 1); if (!v) continue;
-        P.ct[i] = v; P.cv[i] = tex_view(v, r->color[i], &r->cview[i], r->has_cview[i], -1, 1);
+        const tex_t *attachment=r->color[i];
+        const view_t *view=&r->cview[i];
+        int has_view=r->has_cview[i];
+        tex_t shadow={.d={.target=NVN_TEXTURE_TARGET_2D}};
+        vtex *v;
+        if (fmt_of(attachment->d.format).dec) {
+            v=block_target_prepare(i,attachment,view,has_view);
+            attachment=&shadow;has_view=0;
+        } else v=tex_get(attachment,1);
+        if (!v) continue;
+        P.ct[i] = v; P.cv[i] = tex_view(v,attachment,view,has_view,-1,VIEW_ATTACHMENT);
         if (!P.cv[i]) { P.ct[i] = NULL; continue; }
         uint32_t layers=attachment_key(v,P.cv[i]).range.layerCount;
         if (layers<P.max_layers) P.max_layers=layers;
-        P.cf[i] = view_format(v, &r->cview[i], r->has_cview[i]).f;
-        uint32_t lv = r->has_cview[i] && r->cview[i].set_levels ? r->cview[i].base_level : 0, w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
-        P.clv[i] = lv; P.cly[i] = r->has_cview[i] && r->cview[i].set_layers ? r->cview[i].min_layer : 0; P.cwr[i] = 1;
+        P.cf[i] = view_format(v,view,has_view).f;
+        uint32_t lv = has_view && view->set_levels ? view->base_level : 0, w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
+        P.clv[i] = lv; P.cly[i] = has_view && view->set_layers ? view->min_layer : 0; P.cwr[i] = 1;
         if (w < P.w) P.w = w; if (h < P.h) P.h = h;
     }
     if (r->depth) {
@@ -4018,6 +4042,7 @@ static int texture_copy_region(const vtex *v, const view_t *view, const NVNcopyR
     return lvl_fits(v,mip,sub->baseArrayLayer,sub->layerCount,off->x,off->y,off->z,extent->width,extent->height,extent->depth);
 }
 #include "buffer_image_transfer.inc"
+#include "block_targets_finish.inc"
 // LAS Recomp's transfer-only depth scaling: depth -> buffer -> integer colour
 // image -> nearest blit -> buffer -> depth. Preserve stencil through the same
 // path with R8_UINT. Integer images keep the depth bits exactly, including D24.
@@ -4432,6 +4457,8 @@ static void mtl_exec_(const uint8_t *p) {
     for (;;) {
         op_hdr h; memcpy(&h, p, sizeof h);
         const uint8_t *a = p + 8;
+        int block_command=h.op==OP_DRAW || h.op==OP_DRAW_IDX || h.op==OP_DRAW_TEX || h.op==OP_CLEAR_COLOR;
+        if (block_command) block_targets_reload();
         switch (h.op) {
             case OP_END: return;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
@@ -4563,6 +4590,7 @@ static void mtl_exec_(const uint8_t *p) {
                 break;
             }
         }
+        if (block_command) block_targets_finish();
         if (h.size < sizeof h || h.size % 8) die("Vulkan: invalid NVN command size %u", h.size);
         p += h.size;
     }

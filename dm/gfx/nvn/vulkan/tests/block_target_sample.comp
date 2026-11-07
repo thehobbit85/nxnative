@@ -1,0 +1,5 @@
+#version 450
+layout(local_size_x=1) in;
+layout(binding=0) uniform sampler2D image;
+layout(binding=1,std430) buffer Result { vec4 value; } result;
+void main() { result.value=texelFetch(image,ivec2(0),0); }
