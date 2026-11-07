@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x=1) in;
+layout(binding=0) uniform usampler2D source;
+layout(binding=1,std430) buffer Result { uvec4 values[]; } result;
+layout(binding=2,std430) coherent buffer Raw { uint words[]; } raw;
+layout(binding=3) uniform usampler2D ordinary;
+void main() {
+    const uint positions[4]=uint[](0,16383,16384,16388);
+    uint lane=gl_GlobalInvocationID.x, index=positions[lane];
+    ivec2 coordinate=ivec2(index%16384,index/16384);
+    uint before=texelFetch(source,coordinate,0).x;
+    raw.words[index]=before+100+lane;
+    result.values[lane]=uvec4(before,textureSize(source,0),
+        textureQueryLevels(source)+texelFetch(ordinary,ivec2(0),0).x);
+}

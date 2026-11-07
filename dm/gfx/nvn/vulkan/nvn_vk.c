@@ -23,6 +23,7 @@
 #include "spv_draw_parameters.h"
 #include "spv_buffer_bias.h"
 #include "spv_texel_bias.h"
+#include "spv_wrapped_buffer.h"
 #include "spv_one_row.h"
 #include "spv_sample_reduction.h"
 #include "feedback_gather.h"
@@ -1454,6 +1455,8 @@ typedef struct fragment_variant {
 typedef struct shader shader_t;
 struct shader {
     shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
+    shader_t *wrapped_variants, *next_wrapped_variant;
+    uint8_t wrapped[DM_VK_MAX_BINDINGS];
     int has_tables;
     sampler_pairs *sampler_images;
     texel_bias *texel_biases; size_t ntexel_biases; // sparse per-element prefixes of writable aliases
@@ -1641,6 +1644,15 @@ static uint32_t *image_shape_spv(uint32_t *spv, size_t *bytes, const shader_t *s
     return spv;
 }
 static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
+    uint32_t wrapped[DM_VK_MAX_BINDINGS];size_t wrapped_count=0;
+    for (int i=0;i<s->nb;i++) if (s->wrapped[i]) wrapped[wrapped_count++]=s->b[i].binding;
+    if (spv && wrapped_count) {
+        size_t count;const char *reason;
+        uint32_t *adjusted=spv_wrapped_buffer(spv,*bytes/4,wrapped,wrapped_count,&count,&reason);
+        free(spv);spv=adjusted;
+        if (!spv) LOG("[RED] vk: shader %s wrapped buffer lowering failed: %s",s->key,reason);
+        else *bytes=count*4;
+    }
     if (spv) spv = image_shape_spv(spv, bytes, s);
     if (!spv) return NULL;
     uint32_t bindings[DM_VK_MAX_BINDINGS]; int any=0;
@@ -2820,10 +2832,12 @@ static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t
     }
     return 1;
 }
+#include "wrapped_buffer.inc"
 static int prepare_storage(shader_t **first, shader_t **second) {
     g_nstorage = 0;
     int needs_texel_variant=0;
     if (!prepare_tables(first) || (second && !prepare_tables(second))) return 0;
+    if (!prepare_wrapped_buffers(first) || (second && !prepare_wrapped_buffers(second))) return 0;
     shader_t *stages[] = {*first, second ? *second : NULL};
     for (int st = 0; st < 2; st++) {
         shader_t *s = stages[st]; if (!s) continue;
