@@ -34,6 +34,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix** — reuse sampled-image and typed-buffer descriptor population for all array elements. A texture element takes the combined slot, then the separate slot. A sampler element takes the separate sampler, then the sampler in the combined handle. The affected shader receives logical indices in C2's texture/sampler tables while overlapping image entries retain their image handles. The shared `tex_dyn_slots` profile opt-in remains required. Nonuniform capabilities and descriptor limits are checked before creating the layout.
 - **Found on** — the existing Maxwell export fixture executes 1,792 divergent buffer reads through all 32 slots, with separate-slot fallback, mismatched image shapes and output guards. A sampled-array fixture verifies independent samplers, combined-handle fallback and logical C2 words in both render modes.
 
+### Vulkan dynamic C2 descriptor arrays
+
+- **Symptom** — a translated shader requires `tex_c2a` or `samp_c2a` replay.
+- **Cause** — the shared shader chain exports an array spanning the logical driver table. Allocating every logical element also exceeds the ordinary sampler limits of many Android drivers.
+- **Fix** — at module load, replace the fixed array with a runtime array and a companion logical-index map. Populate the existing compact table cache with distinct live C2 handles. Resolve texture, image-priority and separate-sampler words through the shared driver-table ABI, including the fixed sampler word OR. C2 handles already contain global registration IDs. Preserve the exported shader's bounds and map missing entries to the existing typed placeholders. Reapply this lowering when creating shader variants, and check the compact layout against the device limits.
+- **Found on** — the existing Maxwell C2 fixture executes 2,432 guarded cases per render mode, including all 301 entries, out-of-range indices and fixed sampler OR. A divergent separate-image/sampler fixture covers table shrinking and regrowth. The three transformed modules pass `spirv-val`, and the normal Android host builds.
+- **Open** — physical-driver and game qualification remains scheduled for the later validation pass. Runtime nonuniform descriptor indexing is required.
+
 ### Vulkan descriptor exhaustion within one submission
 
 - **Symptom:** later draws or dispatches disappear after `descriptor pool exhausted in one submission: draws are dropped`.
