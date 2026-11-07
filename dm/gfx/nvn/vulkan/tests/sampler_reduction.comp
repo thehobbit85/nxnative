@@ -1,0 +1,21 @@
+#version 450
+layout(local_size_x=1) in;
+#ifdef ARRAY
+#define TEXTURE texture2DArray
+#define SAMPLER sampler2DArray
+#define COORDINATE vec3(coordinate.xy, coordinate.w)
+#else
+#define TEXTURE texture2D
+#define SAMPLER sampler2D
+#define COORDINATE coordinate.xy
+#endif
+#ifdef SEPARATE
+layout(binding=0) uniform TEXTURE source;
+layout(binding=3) uniform sampler filtering;
+#define sampled SAMPLER(source, filtering)
+#else
+layout(binding=0) uniform SAMPLER sampled;
+#endif
+layout(binding=1, std140) uniform Coordinates { vec4 coordinate; };
+layout(binding=2, std430) buffer Results { vec4 value; };
+void main() { value = textureLod(sampled, COORDINATE, coordinate.z); }

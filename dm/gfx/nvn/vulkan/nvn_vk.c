@@ -24,6 +24,7 @@
 #include "spv_buffer_bias.h"
 #include "spv_texel_bias.h"
 #include "spv_one_row.h"
+#include "spv_sample_reduction.h"
 #include "feedback_gather.h"
 #include "uniform_address.h"
 #include "present_rect.h"
@@ -1280,6 +1281,7 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
 typedef struct { tex_t t; view_t v; uint8_t ok, has_v; } treg_t;
 static treg_t *g_treg; static int g_ntreg;
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static int g_nsreg;
+static _Atomic int g_has_reduction_samplers;
 static vtex *registered_texture(int id, treg_t *registration) {
     pthread_mutex_lock(&g_rmu);
     *registration = id > 0 && id < g_ntreg ? g_treg[id] : (treg_t){0};
@@ -1304,6 +1306,7 @@ void mtl_reg_samp(int id, const samp_par *p) {
     pthread_mutex_lock(&g_rmu);
     if (id >= g_nsreg) { int n = id + 256; g_sreg = realloc(g_sreg, n * sizeof *g_sreg); g_sreg_ok = realloc(g_sreg_ok, n); memset(g_sreg_ok + g_nsreg, 0, n - g_nsreg); g_nsreg = n; }
     g_sreg[id] = *p; g_sreg_ok[id] = 1;
+    if (p->reduction == NVN_SAMPLER_REDUCTION_MIN || p->reduction == NVN_SAMPLER_REDUCTION_MAX) g_has_reduction_samplers = 1;
     pthread_mutex_unlock(&g_rmu);
 }
 void mtl_set_tex_pool_n(int n) { (void)n; }
@@ -1411,8 +1414,15 @@ static VkSampler sampler_for(samp_par p, border_view view) {
     return s;
 }
 
-static VkSampler samp_get(int sid, border_view view) {
-    return sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? sampler_for(g_sreg[sid],view) : g_dummy_samp;
+static VkSampler samp_get(int sid, border_view view, int reduce_in_shader) {
+    if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid]) return g_dummy_samp;
+    samp_par p = g_sreg[sid];
+    if (reduce_in_shader && (p.reduction == NVN_SAMPLER_REDUCTION_MIN || p.reduction == NVN_SAMPLER_REDUCTION_MAX)) {
+        p.minf = NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST; p.magf = NVN_MAG_FILTER_NEAREST;
+        p.lod_min = p.lod_bias = 0; p.lod_max = VK_LOD_CLAMP_NONE; p.aniso = 1;
+        p.reduction = NVN_SAMPLER_REDUCTION_AVERAGE;
+    }
+    return sampler_for(p,view);
 }
 
 // ---------- Shaders and pipelines ----------
@@ -1443,6 +1453,7 @@ struct shader {
     int has_tables;
     sampler_pairs *sampler_images;
     texel_bias *texel_biases; size_t ntexel_biases; // sparse per-element prefixes of writable aliases
+    sample_reduction *reductions; size_t nreductions;
     uint32_t buffer_bias[DM_VK_MAX_BINDINGS]; // byte prefix before each reflected storage binding
     vin_module *vertex_variants; int depth_zero, draw_push;
     shader_t *capture_variant;
@@ -1630,6 +1641,12 @@ static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s
     uint32_t bindings[DM_VK_MAX_BINDINGS]; int any=0;
     for (int i=0;i<s->nb;i++) { bindings[i]=s->b[i].binding;any|=s->buffer_bias[i]!=0; }
     size_t words; const char *reason;
+    if (s->nreductions) {
+        uint32_t *adjusted = spv_sample_reduction(spv, *bytes / 4, s->reductions, s->nreductions, &words, &reason);
+        free(spv); spv = adjusted;
+        if (!spv) { LOG("[RED] vk: shader %s sampler reduction failed: %s", s->key, reason); return NULL; }
+        *bytes = words * 4;
+    }
     if (spv && s->ntexel_biases) {
         uint32_t *adjusted=spv_texel_bias(spv,*bytes/4,s->texel_biases,s->ntexel_biases,&words,&reason);
         free(spv); spv=adjusted;
@@ -1916,21 +1933,28 @@ static shader_t *shader_get(const uint8_t md[8]) {
     return shader_by_key(key);
 }
 static shader_t *buffer_variant(shader_t *base, const uint32_t bias[DM_VK_MAX_BINDINGS],
-                                const texel_bias *texels, size_t nt) {
+                                const texel_bias *texels, size_t nt, const sample_reduction *reductions, size_t nr) {
     int any=0;for(int i=0;i<base->nb;i++) any|=bias[i]!=0;
-    if (!any && !nt) return base;
+    if (!any && !nt && !nr) return base;
     for(shader_t *s=base->buffer_variants;s;s=s->next_buffer_variant)
-        if (s->ntexel_biases==nt && !memcmp(s->buffer_bias,bias,sizeof s->buffer_bias) &&
+        if (s->ntexel_biases==nt && s->nreductions==nr && (!nr || !memcmp(s->reductions,reductions,nr*sizeof *reductions)) &&
+            !memcmp(s->buffer_bias,bias,sizeof s->buffer_bias) &&
             (!nt || !memcmp(s->texel_biases,texels,nt*sizeof *texels))) return s->mod?s:NULL;
     shader_t *s=malloc(sizeof *s);
     if(!s) return NULL;
     *s=*base;s->buffer_variants=NULL;s->vertex_variants=NULL;s->cpp=VK_NULL_HANDLE;s->cpl=VK_NULL_HANDLE;s->mod=VK_NULL_HANDLE;
     s->fragment_variants=NULL;
     s->texel_biases=NULL; s->ntexel_biases=nt;
+    s->reductions=NULL; s->nreductions=nr;
     if (nt) {
         s->texel_biases=malloc(nt*sizeof *texels);
         if (!s->texel_biases) { free(s); return NULL; }
         memcpy(s->texel_biases,texels,nt*sizeof *texels);
+    }
+    if (nr) {
+        s->reductions=malloc(nr*sizeof *reductions);
+        if (!s->reductions) { free(s->texel_biases); free(s); return NULL; }
+        memcpy(s->reductions,reductions,nr*sizeof *reductions);
     }
     memcpy(s->buffer_bias,bias,sizeof s->buffer_bias);
     s->next_buffer_variant=base->buffer_variants;base->buffer_variants=s;
@@ -2727,6 +2751,34 @@ static int shader_texel_biases(const shader_t *s, texel_bias *edits, size_t *cou
     }
     return 1;
 }
+static int shader_reductions(const shader_t *s, sample_reduction *edits, size_t *count) {
+    *count = 0;
+    if (!g_has_reduction_samplers) return 1;
+    for (int i=0; i<s->nb; i++) {
+        const sbind *b = &s->b[i];
+        if (b->type != BT_CIS && b->type != BT_SAMP) continue;
+        for (uint32_t element=0; element<b->count; element++) {
+            uint64_t handle = descriptor_handle(s->stage, b, element);
+            int sid = (int)(handle >> 20);
+            pthread_mutex_lock(&g_rmu);
+            samp_par p = sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? g_sreg[sid] : (samp_par){0};
+            pthread_mutex_unlock(&g_rmu);
+            if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) continue;
+            float anisotropy = fminf(g_max_anisotropy, fmaxf(1, floorf(p.aniso)));
+            if (b->count != 1 || p.cmp_mode || anisotropy > 1) {
+                RED_ONCE(121, "shader sampler reduction arrays, depth comparison and anisotropy remain unsupported");
+                return 0;
+            }
+            float lo = p.minf >= 2 ? fmaxf(0, p.lod_min) : 0;
+            float hi = p.minf >= 2 ? fmaxf(lo, p.lod_max) : 0;
+            float limit = g_props.limits.maxSamplerLodBias;
+            float lod_bias = fminf(fminf(15.99f, limit), fmaxf(fmaxf(-16, -limit), p.lod_bias));
+            edits[(*count)++] = (sample_reduction){b->binding, p.reduction == NVN_SAMPLER_REDUCTION_MIN,
+                p.minf == 1 || p.minf == 3 || p.minf == 5, p.magf != 0, lo, hi, lod_bias};
+        }
+    }
+    return 1;
+}
 static int prepare_storage(shader_t **first, shader_t **second) {
     g_nstorage = 0;
     int needs_texel_variant=0;
@@ -2803,7 +2855,9 @@ static int prepare_storage(shader_t **first, shader_t **second) {
         static texel_bias texels[DM_VK_MAX_BINDINGS*32];
         size_t nt=0;
         if (needs_texel_variant && !shader_texel_biases(s,texels,&nt)) return 0;
-        shader_t *variant=buffer_variant(s,bias,texels,nt);
+        sample_reduction reductions[DM_VK_MAX_BINDINGS]; size_t nr;
+        if (!shader_reductions(s, reductions, &nr)) return 0;
+        shader_t *variant=buffer_variant(s,bias,texels,nt,reductions,nr);
         if(!variant) return 0;
         if(st) *second=variant;else *first=variant;
     }
@@ -3033,7 +3087,7 @@ static void include_border_view(border_view *common, border_view view) {
     if ((first == CLEAR_FLOAT) != (next == CLEAR_FLOAT)) common->flags |= BORDER_FLOAT_AND_INT;
 }
 
-static int write_sampled_binding(VkDescriptorSet ds, const sbind *b, int stage, border_view *possible_views) {
+static int write_sampled_binding(VkDescriptorSet ds, const sbind *b, int stage, border_view *possible_views, int reduce_in_shader) {
     VkDescriptorImageInfo images[32] = {0};
     // The driver consumes descriptor writes immediately. Stream large
     // tables in bounded chunks; no scratch allocation scales with the layout.
@@ -3054,7 +3108,7 @@ static int write_sampled_binding(VkDescriptorSet ds, const sbind *b, int stage, 
             }
             if (b->type == BT_SAMP) sampled = *possible_views;
             if (b->type != BT_TEX) {
-                pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20),sampled); pthread_mutex_unlock(&g_rmu);
+                pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20),sampled,reduce_in_shader); pthread_mutex_unlock(&g_rmu);
             }
             if (b->type == BT_CIS && sampled.format == VK_FORMAT_UNDEFINED && b->num) {
                 static VkSampler nearest;
@@ -3173,7 +3227,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
             if (b->type == BT_SSBO && d->range > g_props.limits.maxStorageBufferRange) { RED_ONCE(1, "biased storage range exceeds the device descriptor limit"); return VK_NULL_HANDLE; }
             x->descriptorType = b->type == BT_UBO ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; x->pBufferInfo = d;
         } else if (b->type == BT_TEX || b->type == BT_CIS) {
-            if (!write_sampled_binding(ds,b,stage,has_separate ? &binding_views[i] : NULL)) return VK_NULL_HANDLE;
+            if (!write_sampled_binding(ds,b,stage,has_separate ? &binding_views[i] : NULL,s->nreductions != 0)) return VK_NULL_HANDLE;
             continue;
         }
         nw++;
@@ -3186,7 +3240,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
             if (!binding_views[j].format || (pairs && !(pairs->mask[j/64] & (UINT64_C(1)<<(j%64))))) continue;
             include_border_view(&possible,binding_views[j]);
         }
-        if (!write_sampled_binding(ds,&s->b[slot],stage,&possible)) return VK_NULL_HANDLE;
+        if (!write_sampled_binding(ds,&s->b[slot],stage,&possible,s->nreductions != 0)) return VK_NULL_HANDLE;
     }
     vkUpdateDescriptorSets(g_dev, (uint32_t)nw, w, 0, NULL);
     return ds;
