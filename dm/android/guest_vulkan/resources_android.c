@@ -130,20 +130,6 @@ GVK(vkFreeDescriptorSets, GVK_DEVICE, VkResult, VkDevice device, VkDescriptorPoo
 GVK(vkUpdateDescriptorSets, GVK_DEVICE, void, VkDevice device, uint32_t descriptorWriteCount, const VkWriteDescriptorSet* pDescriptorWrites, uint32_t descriptorCopyCount, const VkCopyDescriptorSet* pDescriptorCopies) {
     vkUpdateDescriptorSets(device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies);
 }
-GVK(vkCreateDescriptorUpdateTemplate, GVK_DEVICE, VkResult, VkDevice device, const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate) {
-    (void)pAllocator; // Same host-allocation policy as the Apple frontend.
-    return vkCreateDescriptorUpdateTemplate(device, pCreateInfo, NULL, pDescriptorUpdateTemplate);
-}
-GVK_ALIAS(vkCreateDescriptorUpdateTemplateKHR, vkCreateDescriptorUpdateTemplate, GVK_DEVICE);
-GVK(vkDestroyDescriptorUpdateTemplate, GVK_DEVICE, void, VkDevice device, VkDescriptorUpdateTemplate descriptorUpdateTemplate, const VkAllocationCallbacks* pAllocator) {
-    (void)pAllocator; // Same host-allocation policy as the Apple frontend.
-    vkDestroyDescriptorUpdateTemplate(device, descriptorUpdateTemplate, NULL);
-}
-GVK_ALIAS(vkDestroyDescriptorUpdateTemplateKHR, vkDestroyDescriptorUpdateTemplate, GVK_DEVICE);
-GVK(vkUpdateDescriptorSetWithTemplate, GVK_DEVICE, void, VkDevice device, VkDescriptorSet descriptorSet, VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void* pData) {
-    vkUpdateDescriptorSetWithTemplate(device, descriptorSet, descriptorUpdateTemplate, pData);
-}
-GVK_ALIAS(vkUpdateDescriptorSetWithTemplateKHR, vkUpdateDescriptorSetWithTemplate, GVK_DEVICE);
 GVK(vkCreatePipelineLayout, GVK_DEVICE, VkResult, VkDevice device, const VkPipelineLayoutCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkPipelineLayout* pPipelineLayout) {
     (void)pAllocator; // Same host-allocation policy as the Apple frontend.
     return vkCreatePipelineLayout(device, pCreateInfo, NULL, pPipelineLayout);

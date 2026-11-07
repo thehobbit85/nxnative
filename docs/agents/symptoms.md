@@ -807,6 +807,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - shader assets could be read successfully while their neighboring pipeline-cache file was unwritable; compute-only workloads did not mark that file dirty. A truncated or foreign cache was passed directly to the driver. → [Android Vulkan pipeline-cache persistence](../reference/rendering.md#android-vulkan-pipeline-cache-persistence)
 - LLVM reports an uninitialized window-generation value when the Android CLI presents without a NativeActivity window. → [Android presentation without a window](../reference/rendering.md#android-presentation-without-a-window)
 - an Android Vulkan scene is black, sampled depth is zero, or the renderer reports `scaled texture copy between formats ... that cannot be blitted: skipped`. → [Vulkan depth formats and nearest scaled depth copies](../reference/rendering.md#vulkan-depth-formats-and-nearest-scaled-depth-copies)
+- the public guest Vulkan fixture draws zero-valued pixels after a descriptor-template update, while the same uniform buffer copied back from the GPU contains the expected values. Ordinary descriptor writes render the expected color. → [Android guest Vulkan descriptor templates](../reference/rendering.md#android-guest-vulkan-descriptor-templates)
 
 ## Shaders
 

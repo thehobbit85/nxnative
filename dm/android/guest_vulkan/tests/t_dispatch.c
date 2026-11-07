@@ -1,12 +1,17 @@
 // Calls only registered guest entry points; the native loader is not the test's API.
 #define VK_NO_PROTOTYPES
 #include "hle.h"
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 #include <assert.h>
 #include <sys/mman.h>
 
 static uintptr_t guest_low, guest_high;
 static unsigned stack_switches;
+static unsigned wait_entries, wait_depth;
+void dm_thread_native_wait(int entering) {
+    if (entering) { ++wait_entries; ++wait_depth; }
+    else { assert(wait_depth); --wait_depth; }
+}
 int dm_guest_as_contains(uintptr_t p) {
     int guest = p >= guest_low && p < guest_high;
     stack_switches += guest;
@@ -105,7 +110,7 @@ static void dispatch_test(void) {
         PFN_vkGetDeviceQueue queue = (void *)gdpa(devices[i], "vkGetDeviceQueue");
         VkQueue handle; assert(queue); queue(devices[i], family, 0, &handle); assert(handle);
 #ifdef TEST_RESOURCES
-        resource_checks(instance, pd, devices[i], gdpa);
+        resource_checks(instance, pd, devices[i], gdpa, family, handle);
 #endif
     }
     for (int i = 1; i >= 0; --i) {
@@ -122,11 +127,17 @@ int main(void) {
     gipa = (void *)import("vkGetInstanceProcAddr");
     assert(gipa && "Android guest Vulkan loader must be registered");
     dispatch_test();
+#ifdef TEST_NATIVE_CONTROL
+    return 0; // Native pointers bypass the guarded guest-stack adapter.
+#endif
     size_t page = 16384, stack = 8192;
     uint8_t *memory = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(memory != MAP_FAILED && !mprotect(memory, page, PROT_NONE));
     guest_low = (uintptr_t)memory + page; guest_high = guest_low + stack;
     on_stack(guest_high, dispatch_test);
     assert(stack_switches > 20); munmap(memory, page * 2);
+#ifdef TEST_COMMANDS
+    assert(wait_entries >= 16 && !wait_depth);
+#endif
     puts("guest Vulkan dispatch: scopes, extension filtering, two independent devices and guarded 8 KiB guest stack passed");
 }

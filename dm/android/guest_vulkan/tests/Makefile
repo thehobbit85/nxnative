@@ -21,3 +21,12 @@ $(B)/t_resources: t_dispatch.c resource_checks.h $(SOURCES) $(wildcard ../*.h) $
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DTEST_RESOURCES -I$(B) $< $(SOURCES) -lvulkan -o $@
 .PHONY: resources
 resources: $(B)/t_resources
+$(B)/t_commands: t_dispatch.c resource_checks.h command_checks.h $(SOURCES) $(wildcard ../*.h) $(B)/triangle.vert.h $(B)/triangle.frag.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DTEST_RESOURCES -DTEST_COMMANDS -I$(B) $< $(SOURCES) -lvulkan -o $@
+.PHONY: commands
+commands: $(B)/t_commands
+$(B)/t_template_layout: t_template_layout.c ../descriptor_templates.c ../guest_vk.h $(HOST)/hle_bigstack.c
+	@mkdir -p $(B)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(HOST)/hle_bigstack.c -o $@
+.PHONY: templates
+templates: $(B)/t_template_layout

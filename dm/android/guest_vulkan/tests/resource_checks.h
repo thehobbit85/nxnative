@@ -12,7 +12,14 @@ static uint32_t memory_type(VkPhysicalDeviceMemoryProperties *p, uint32_t bits, 
         if ((bits & (1u << i)) && (p->memoryTypes[i].propertyFlags & flags) == flags) return i;
     assert(!"missing required memory type"); return 0;
 }
-static void resource_checks(VkInstance instance, VkPhysicalDevice pd, VkDevice device, PFN_vkGetDeviceProcAddr gdpa) {
+#ifdef TEST_COMMANDS
+#include "command_checks.h"
+#endif
+static void resource_checks(VkInstance instance, VkPhysicalDevice pd, VkDevice device, PFN_vkGetDeviceProcAddr gdpa, uint32_t family, VkQueue queue) {
+#ifdef TEST_NATIVE_CONTROL
+    extern PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice, const char *);
+    gdpa = vkGetDeviceProcAddr;
+#endif
     LOAD(vkCreateBuffer); LOAD(vkDestroyBuffer); LOAD(vkGetBufferMemoryRequirements2); LOAD(vkBindBufferMemory2);
     LOAD(vkAllocateMemory); LOAD(vkFreeMemory); LOAD(vkMapMemory); LOAD(vkUnmapMemory);
     LOAD(vkFlushMappedMemoryRanges); LOAD(vkInvalidateMappedMemoryRanges);
@@ -25,9 +32,11 @@ static void resource_checks(VkInstance instance, VkPhysicalDevice pd, VkDevice d
     LOAD(vkCreatePipelineLayout); LOAD(vkDestroyPipelineLayout); LOAD(vkCreateShaderModule); LOAD(vkDestroyShaderModule);
     LOAD(vkCreatePipelineCache); LOAD(vkDestroyPipelineCache); LOAD(vkGetPipelineCacheData); LOAD(vkMergePipelineCaches);
     LOAD(vkCreateGraphicsPipelines); LOAD(vkDestroyPipeline);
+#ifndef TEST_NATIVE_CONTROL
     assert(gdpa(device, "vkGetBufferMemoryRequirements2KHR") == (PFN_vkVoidFunction)vkGetBufferMemoryRequirements2);
     assert(gdpa(device, "vkBindImageMemory2KHR") == (PFN_vkVoidFunction)vkBindImageMemory2);
     assert(gdpa(device, "vkCreateDescriptorUpdateTemplateKHR") == (PFN_vkVoidFunction)vkCreateDescriptorUpdateTemplate);
+#endif
     PFN_vkGetPhysicalDeviceMemoryProperties properties = (void *)gipa(instance, "vkGetPhysicalDeviceMemoryProperties");
     VkPhysicalDeviceMemoryProperties memory; properties(pd, &memory);
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4096,
@@ -53,7 +62,7 @@ static void resource_checks(VkInstance instance, VkPhysicalDevice pd, VkDevice d
 
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
         .extent = {16, 16, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
-        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
     VkImage image; OK(vkCreateImage(device, &ii, NULL, &image));
     VkImageMemoryRequirementsInfo2 ir = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, .image = image};
     vkGetImageMemoryRequirements2(device, &ir, &mr);
@@ -66,7 +75,7 @@ static void resource_checks(VkInstance instance, VkPhysicalDevice pd, VkDevice d
     VkImageView view; OK(vkCreateImageView(device, &vi, NULL, &view));
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .maxLod = 1};
     VkSampler sampler; OK(vkCreateSampler(device, &si, NULL, &sampler));
-    VkDescriptorSetLayoutBinding binding = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT};
+    VkDescriptorSetLayoutBinding binding = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
     VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &binding};
     VkDescriptorSetLayout layout; OK(vkCreateDescriptorSetLayout(device, &li, NULL, &layout));
     VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2};
@@ -83,7 +92,7 @@ static void resource_checks(VkInstance instance, VkPhysicalDevice pd, VkDevice d
     VkDescriptorUpdateTemplateCreateInfo ti = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO, .descriptorUpdateEntryCount = 1,
         .pDescriptorUpdateEntries = &entry, .templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET, .descriptorSetLayout = layout};
     VkDescriptorUpdateTemplate update; OK(vkCreateDescriptorUpdateTemplate(device, &ti, NULL, &update));
-    vkUpdateDescriptorSetWithTemplate(device, set, update, &db);
+    if (!getenv("TEST_DIRECT_DESCRIPTOR")) vkUpdateDescriptorSetWithTemplate(device, set, update, &db);
 
     VkPipelineLayoutCreateInfo pl = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &layout};
     VkPipelineLayout pipeline_layout; OK(vkCreatePipelineLayout(device, &pl, NULL, &pipeline_layout));
@@ -120,6 +129,9 @@ static void resource_checks(VkInstance instance, VkPhysicalDevice pd, VkDevice d
     cache_info.initialDataSize = cache_size; cache_info.pInitialData = cache_data;
     OK(vkCreatePipelineCache(device, &cache_info, NULL, &cache2)); OK(vkMergePipelineCaches(device, cache2, 1, &cache));
     free(cache_data);
+#ifdef TEST_COMMANDS
+    command_checks(device, gdpa, family, queue, buffer, bm, image, framebuffer, pass, pipeline, pipeline_layout, set, &memory);
+#endif
     vkDestroyPipeline(device, pipeline, NULL); vkDestroyPipelineCache(device, cache2, NULL); vkDestroyPipelineCache(device, cache, NULL);
     vkDestroyShaderModule(device, fragment, NULL); vkDestroyShaderModule(device, vertex, NULL);
     vkDestroyFramebuffer(device, framebuffer, NULL); vkDestroyRenderPass(device, pass, NULL); vkDestroyPipelineLayout(device, pipeline_layout, NULL);

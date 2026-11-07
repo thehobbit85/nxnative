@@ -9,6 +9,7 @@ static const char *const instance_extensions[] = {VK_KHR_GET_PHYSICAL_DEVICE_PRO
 static const char *const device_extensions[] = {
     VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME, VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
     VK_KHR_BIND_MEMORY_2_EXTENSION_NAME, VK_KHR_DESCRIPTOR_UPDATE_TEMPLATE_EXTENSION_NAME,
+    VK_KHR_MAINTENANCE_1_EXTENSION_NAME,
 };
 static const unsigned device_extension_count = sizeof device_extensions / sizeof *device_extensions;
 
