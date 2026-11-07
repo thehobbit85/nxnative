@@ -11,7 +11,8 @@ int main(int argc, char **argv) {
     rewind(file);
     uint32_t *input = malloc(bytes); assert(input);
     assert(fread(input, 1, bytes, file) == (size_t)bytes); fclose(file);
-    if (argc == 5) {
+    int array = argc == 5 && !strcmp(argv[4], "array");
+    if (argc == 5 && !array) {
         assert(!strcmp(argv[4], "no-import"));
         for (size_t i=5; i<(size_t)bytes/4;) {
             unsigned len=input[i]>>16, op=input[i]&0xffff;
@@ -22,13 +23,18 @@ int main(int argc, char **argv) {
             } else i += len;
         }
     }
-    sample_reduction filter = {.binding=(uint32_t)strtoul(argv[3],NULL,10), .minimum=1, .min_linear=1, .mag_linear=1, .max_lod=10, .max_bias=16};
+    sample_reduction filters[2] = {{.binding=(uint32_t)strtoul(argv[3],NULL,10), .minimum=1,
+        .min_linear=1, .mag_linear=1, .max_lod=10, .max_bias=16}};
+    if (array) {
+        filters[1]=filters[0]; filters[1].element=2; filters[1].minimum=0; filters[1].min_lod=1;
+        filters[0].element=1; filters[0].bias=.5f; filters[0].min_linear=0;
+    }
     size_t count = 0; const char *reason;
-    assert(!spv_sample_reduction(input, 4, &filter, 1, &count, &reason) && reason);
+    assert(!spv_sample_reduction(input, 4, filters, array ? 2 : 1, &count, &reason) && reason);
     uint32_t *adapted = spv_one_row(input, bytes / 4, &count, &reason);
     if (reason) { fprintf(stderr, "%s: %s\n", argv[1], reason); free(input); return 1; }
     if (adapted) { free(input); input=adapted; bytes=(long)(count*4); }
-    uint32_t *output = spv_sample_reduction(input, bytes / 4, &filter, 1, &count, &reason);
+    uint32_t *output = spv_sample_reduction(input, bytes / 4, filters, array ? 2 : 1, &count, &reason);
     if (!output) { fprintf(stderr, "%s\n", reason); free(input); return 1; }
     file = fopen(argv[2], "wb"); assert(file);
     assert(fwrite(output, sizeof *output, count, file) == count); assert(!fclose(file));

@@ -4,10 +4,16 @@
 #include "spv_texel_bias.h"
 
 typedef struct {
-    uint32_t binding, minimum, min_linear, mag_linear;
+    uint32_t binding, minimum, min_linear, mag_linear, element;
     float min_lod, max_lod, bias, max_bias;
 } sample_reduction;
-typedef struct { uint32_t type, scalar, lanes, image, binding, dimension, array; unsigned is_type:1; } reduction_id;
+typedef struct {
+    uint32_t type, scalar, lanes, image, binding, dimension, array, index;
+    unsigned is_type:1, integer:1;
+} reduction_id;
+typedef struct {
+    uint32_t minimum, min_linear, mag_linear, min_lod, max_lod, bias, max_bias, active;
+} reduction_filter;
 typedef struct {
     texel_module code;
     reduction_id *ids;
@@ -59,8 +65,63 @@ static uint32_t reduction_component(reduction_module *m, uint32_t value, unsigne
     return REDUCTION_VALUE(m, 81, m->floating, value, lane);
 }
 
+static int reduction_filter_for(reduction_module *m, reduction_id sampled, const sample_reduction *filters,
+                                size_t count, reduction_filter *out) {
+    const sample_reduction *first = filters + sampled.binding - 1;
+    uint32_t index_type = sampled.index < m->bound ? m->ids[sampled.index].type : 0;
+    if (sampled.index && (!index_type || index_type >= m->bound || !m->ids[index_type].integer)) return 0;
+    uint32_t *fields[] = {&out->minimum, &out->min_linear, &out->mag_linear, &out->min_lod,
+                         &out->max_lod, &out->bias, &out->max_bias};
+    memset(out, 0, sizeof *out);
+    if (sampled.index) {
+        out->active = m->code.next++;
+        REDUCTION_GLOBAL(m, 42, m->code.boolean, out->active); // OpConstantFalse
+    }
+    for (size_t i = sampled.binding - 1; i < count; i++) {
+        const sample_reduction *f = filters + i;
+        if (f->binding != first->binding) continue;
+        uint32_t match = 0;
+        if (sampled.index) {
+            uint32_t element = texel_constant(&m->code, index_type, f->element);
+            if (!element) return 0;
+            match = REDUCTION_VALUE(m, 170, m->code.boolean, sampled.index, element);
+            out->active = REDUCTION_VALUE(m, 166, m->code.boolean, out->active, match); // OpLogicalOr
+        }
+        const float values[] = {f->minimum, f->min_linear, f->mag_linear, f->min_lod, f->max_lod, f->bias, f->max_bias};
+        for (unsigned field = 0; field < sizeof fields / sizeof *fields; field++) {
+            uint32_t value = reduction_float(m, values[field]);
+            *fields[field] = match && *fields[field] ? REDUCTION_VALUE(m, 169, m->floating, match, value, *fields[field]) : value;
+        }
+        if (!sampled.index) break;
+    }
+    return !m->failed;
+}
+
+static uint32_t reduction_combine(reduction_module *m, uint32_t a, uint32_t b, uint32_t minimum) {
+    uint32_t low = REDUCTION_EXT(m, m->float4, 37, a, b);
+    uint32_t high = REDUCTION_EXT(m, m->float4, 40, a, b);
+    return REDUCTION_VALUE(m, 169, m->float4, minimum, low, high);
+}
+
+static int reduction_finish(reduction_module *m, const uint32_t *p, unsigned len, uint32_t reduced, uint32_t active) {
+    if (active) {
+        // Weighted-average elements keep their original instruction and native
+        // sampler. Only a selected min/max element consumes the reduced value.
+        uint32_t original[16];
+        if (len > sizeof original / sizeof *original) return 0;
+        memcpy(original, p, len * sizeof *p);
+        original[2] = m->code.next++;
+        if (!texel_append(&m->code.body, original, len)) return 0;
+        uint32_t mask = reduction_mask(m, active, p[1] == m->float4 ? 4 : 2);
+        reduced = REDUCTION_VALUE(m, 169, p[1], mask, reduced, original[2]);
+    }
+    uint32_t copy[] = {p[1], p[2], reduced};
+    reduction_append(m, &m->code.body, 83, copy, 3);
+    return !m->failed;
+}
+
 static uint32_t reduction_level(reduction_module *m, uint32_t sampled, uint32_t image, uint32_t coordinate,
-                                uint32_t level, uint32_t linear, unsigned dimensions, unsigned array, unsigned minimum,
+                                uint32_t level, uint32_t linear, unsigned dimensions, unsigned array, uint32_t minimum,
                                 uint32_t offset_mask, uint32_t offset) {
     uint32_t spatial = dimensions == 3 ? m->float3 : m->float2;
     uint32_t integer_level = REDUCTION_VALUE(m, 110, m->sint, level); // OpConvertFToS
@@ -102,7 +163,7 @@ static uint32_t reduction_level(reduction_module *m, uint32_t sampled, uint32_t 
         uint32_t weight = 0;
         for (unsigned axis = 0; axis < dimensions; axis++) if (tap & (1u << axis))
             weight = weight ? REDUCTION_VALUE(m, 167, m->code.boolean, weight, weights[axis]) : weights[axis];
-        uint32_t reduced = REDUCTION_EXT(m, m->float4, minimum ? 37 : 40, result, value);
+        uint32_t reduced = reduction_combine(m, result, value, minimum);
         result = REDUCTION_VALUE(m, 169, m->float4, reduction_mask(m, weight, 4), reduced, result);
     }
     return result;
@@ -125,7 +186,7 @@ static uint32_t reduction_gradient_lod(reduction_module *m, uint32_t image, uint
     return REDUCTION_VALUE(m, 133, m->floating, logarithm, reduction_float(m, .5f));
 }
 
-static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len, const sample_reduction *filter) {
+static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len, const reduction_filter *filter) {
     // Other sample forms are diagnosed before their sampler can become point
     // filtered. Offsets stay in texel units and use native sampler addressing.
     if (len < 5 || p[1] != m->float4 || p[3] >= m->bound || p[4] >= m->bound) return 0;
@@ -170,7 +231,7 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t last = REDUCTION_VALUE(m, 111, m->floating, levels);
     uint32_t zero = reduction_float(m, 0), one = reduction_float(m, 1);
     last = REDUCTION_VALUE(m, 131, m->floating, last, one);
-    uint32_t lower = reduction_float(m, filter->min_lod), upper = reduction_float(m, filter->max_lod);
+    uint32_t lower = filter->min_lod, upper = filter->max_lod;
     uint32_t lod = explicit_lod;
     if (implicit) {
         uint32_t xy = array ? REDUCTION_VALUE(m, 79, m->float2, coordinate, coordinate, 0, 1) : coordinate;
@@ -180,37 +241,37 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
         // can be applied exactly once before selecting the contributing mips.
         lod = reduction_component(m, query, 1);
     } else if (gradient) lod = reduction_gradient_lod(m, image, explicit_lod, dy, dimensions, array);
-    uint32_t bias = reduction_float(m, filter->bias);
+    uint32_t bias = filter->bias;
     if (shader_bias) {
         bias = REDUCTION_VALUE(m, 129, m->floating, bias, shader_bias);
-        bias = REDUCTION_EXT(m, m->floating, 43, bias, reduction_float(m, -filter->max_bias), reduction_float(m, filter->max_bias));
+        uint32_t negative_limit = REDUCTION_VALUE(m, 127, m->floating, filter->max_bias); // OpFNegate
+        bias = REDUCTION_EXT(m, m->floating, 43, bias, negative_limit, filter->max_bias);
     }
     lod = REDUCTION_VALUE(m, 129, m->floating, lod, bias);
     lod = REDUCTION_EXT(m, m->floating, 43, lod, lower, upper);
     uint32_t minify = REDUCTION_VALUE(m, 186, m->code.boolean, lod, zero);
-    uint32_t min_filter = reduction_float(m, filter->min_linear), mag_filter = reduction_float(m, filter->mag_linear);
+    uint32_t min_filter = filter->min_linear, mag_filter = filter->mag_linear;
     uint32_t selected = REDUCTION_VALUE(m, 169, m->floating, minify, min_filter, mag_filter);
     uint32_t linear = REDUCTION_VALUE(m, 186, m->code.boolean, selected, zero);
     lod = REDUCTION_EXT(m, m->floating, 43, lod, zero, last);
     uint32_t first = REDUCTION_EXT(m, m->floating, 8, lod), second = REDUCTION_EXT(m, m->floating, 9, lod);
-    uint32_t a = reduction_level(m, p[3], image, coordinate, first, linear, dimensions, array, filter->minimum, offset_mask, offset);
-    uint32_t b = reduction_level(m, p[3], image, coordinate, second, linear, dimensions, array, filter->minimum, offset_mask, offset);
-    uint32_t value = REDUCTION_EXT(m, m->float4, filter->minimum ? 37 : 40, a, b);
-    uint32_t copy[] = {m->float4, p[2], value};
-    reduction_append(m, &m->code.body, 83, copy, 3);
-    return !m->failed;
+    uint32_t minimum = REDUCTION_VALUE(m, 186, m->code.boolean, filter->minimum, zero);
+    minimum = reduction_mask(m, minimum, 4);
+    uint32_t a = reduction_level(m, p[3], image, coordinate, first, linear, dimensions, array, minimum, offset_mask, offset);
+    uint32_t b = reduction_level(m, p[3], image, coordinate, second, linear, dimensions, array, minimum, offset_mask, offset);
+    uint32_t value = reduction_combine(m, a, b, minimum);
+    return reduction_finish(m, p, len, value, filter->active);
 }
 
-static int reduction_query(reduction_module *m, const uint32_t *p, unsigned len, const sample_reduction *filter) {
+static int reduction_query(reduction_module *m, const uint32_t *p, unsigned len, const reduction_filter *filter) {
     if (len != 5 || p[1] != m->float2 || p[3] >= m->bound || p[4] >= m->bound) return 0;
     uint32_t image_type = m->ids[m->ids[p[3]].type].image;
     if (!image_type || m->ids[image_type].dimension < 1 || m->ids[image_type].dimension > 2 || m->ids[image_type].array > 1) return 0;
     if (m->ids[p[4]].type != (m->ids[image_type].dimension == 2 ? m->float3 : m->float2)) return 0;
     uint32_t query = REDUCTION_VALUE(m, 105, m->float2, p[3], p[4]);
     uint32_t raw = reduction_component(m, query, 1);
-    raw = REDUCTION_VALUE(m, 129, m->floating, raw, reduction_float(m, filter->bias));
-    uint32_t lod = REDUCTION_EXT(m, m->floating, 43, raw,
-        reduction_float(m, filter->min_lod), reduction_float(m, filter->max_lod));
+    raw = REDUCTION_VALUE(m, 129, m->floating, raw, filter->bias);
+    uint32_t lod = REDUCTION_EXT(m, m->floating, 43, raw, filter->min_lod, filter->max_lod);
     uint32_t image = REDUCTION_VALUE(m, 100, image_type, p[3]);
     uint32_t levels = REDUCTION_VALUE(m, 106, m->sint, image);
     uint32_t last = REDUCTION_VALUE(m, 111, m->floating, levels);
@@ -218,9 +279,8 @@ static int reduction_query(reduction_module *m, const uint32_t *p, unsigned len,
     lod = REDUCTION_EXT(m, m->floating, 43, lod, reduction_float(m, 0), last);
     // Metal's reduction samplers select mips linearly, so the accessed mip
     // retains its fraction. The second component is the unclamped LOD.
-    uint32_t result[] = {m->float2, p[2], lod, raw};
-    reduction_append(m, &m->code.body, 80, result, 4);
-    return !m->failed;
+    uint32_t result = REDUCTION_VALUE(m, 80, m->float2, lod, raw);
+    return reduction_finish(m, p, len, result, filter->active);
 }
 
 static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const sample_reduction *filters,
@@ -238,20 +298,31 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
         if (op == 17 && len == 2 && p[1] == 50) has_queries = 1;
         if (op == 11 && len == 6 && !memcmp(p + 2, "GLSL.std.450", 12)) m.glsl = p[1];
         if (op == 71 && len == 4 && p[1] < m.bound && p[2] == 33)
-            for (size_t f = 0; f < nf; f++) if (filters[f].binding == p[3]) m.ids[p[1]].binding = (uint32_t)f + 1;
+            for (size_t f = 0; f < nf; f++) if (filters[f].binding == p[3] && !m.ids[p[1]].binding)
+                m.ids[p[1]].binding = (uint32_t)f + 1;
         if (op >= 19 && op <= 33 && len >= 2 && p[1] < m.bound) {
             reduction_id *id = m.ids + p[1]; id->is_type = 1;
             if (op == 20) m.code.boolean = p[1];
-            if (op == 21 && len == 4 && p[2] == 32 && p[3] == 1) m.sint = p[1];
+            if (op == 21 && len == 4 && p[2] == 32) { id->integer = 1; if (p[3] == 1) m.sint = p[1]; }
             if (op == 22 && len == 3 && p[2] == 32) m.floating = p[1];
             if (op == 23 && len == 4) { id->scalar = p[2]; id->lanes = p[3]; }
             if (op == 25 && len >= 9) { id->dimension = p[3]; id->array = p[5]; }
             if (op == 27 && len == 3 && p[2] < m.bound) id->image = p[2];
         } else if (len >= 3 && p[1] < m.bound && m.ids[p[1]].is_type && p[2] < m.bound) m.ids[p[2]].type = p[1];
         if (op == 54 && functions == count) functions = i;
-        if ((op == 61 || op == 83 || op == 100) && len >= 4 && p[2] < m.bound && p[3] < m.bound)
+        if ((op == 61 || op == 83 || op == 100) && len >= 4 && p[2] < m.bound && p[3] < m.bound) {
             m.ids[p[2]].binding = m.ids[p[3]].binding;
-        if (op == 86 && len == 5 && p[2] < m.bound && p[4] < m.bound) m.ids[p[2]].binding = m.ids[p[4]].binding;
+            m.ids[p[2]].index = m.ids[p[3]].index;
+        }
+        if (op == 86 && len == 5 && p[2] < m.bound && p[4] < m.bound) {
+            m.ids[p[2]].binding = m.ids[p[4]].binding;
+            m.ids[p[2]].index = m.ids[p[4]].index;
+        }
+        if ((op == 65 || op == 66) && len == 5 && p[2] < m.bound && p[3] < m.bound && p[4] < m.bound &&
+            m.ids[p[3]].binding && !m.ids[p[3]].index) {
+            m.ids[p[2]].binding = m.ids[p[3]].binding;
+            m.ids[p[2]].index = p[4];
+        }
         i += len;
     }
     if (!m.floating || functions == count) goto fail;
@@ -272,6 +343,7 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
             case 65: case 66: case 67: case 70: from = 3; end = 4; break;
             case 254: from = 1; break;
         }
+        if ((op == 65 || op == 66) && len == 5 && p[2] < m.bound && m.ids[p[2]].binding) from = end;
         if (end > len) goto fail;
         for (unsigned arg = from; arg < end; arg++) if (p[arg] < m.bound && m.ids[p[arg]].binding) {
             *reason = "reduction sampler escapes its direct binding"; goto fail;
@@ -279,9 +351,11 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
         uint32_t binding = len >= 4 && p[3] < m.bound ? m.ids[p[3]].binding : 0;
         if (binding && ((op >= 87 && op <= 94) || op == 96 || op == 97 || op == 105 || (op >= 305 && op <= 315))) {
             *reason = "reduction currently needs a direct 2D/3D float sample or LOD query";
+            reduction_filter selected;
+            if (!reduction_filter_for(&m, m.ids[p[3]], filters, nf, &selected)) goto fail;
             if (op == 105) {
-                if (!reduction_query(&m, p, len, filters + binding - 1)) goto fail;
-            } else if ((op != 87 && op != 88 && op != 91 && op != 92) || !reduction_sample(&m, p, len, filters + binding - 1)) goto fail;
+                if (!reduction_query(&m, p, len, &selected)) goto fail;
+            } else if ((op != 87 && op != 88 && op != 91 && op != 92) || !reduction_sample(&m, p, len, &selected)) goto fail;
         } else if (!texel_append(&m.code.body, p, len)) goto fail;
         i += len;
     }

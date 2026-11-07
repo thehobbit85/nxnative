@@ -2751,7 +2751,7 @@ static int shader_texel_biases(const shader_t *s, texel_bias *edits, size_t *cou
     }
     return 1;
 }
-static int shader_reductions(const shader_t *s, sample_reduction *edits, size_t *count) {
+static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t *capacity, size_t *count) {
     *count = 0;
     if (!g_has_reduction_samplers) return 1;
     for (int i=0; i<s->nb; i++) {
@@ -2765,16 +2765,25 @@ static int shader_reductions(const shader_t *s, sample_reduction *edits, size_t 
             pthread_mutex_unlock(&g_rmu);
             if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) continue;
             float anisotropy = fminf(g_max_anisotropy, fmaxf(1, floorf(p.aniso)));
-            if (b->count != 1 || p.cmp_mode || anisotropy > 1) {
-                RED_ONCE(121, "shader sampler reduction arrays, depth comparison and anisotropy remain unsupported");
+            if (p.cmp_mode || anisotropy > 1) {
+                RED_ONCE(121, "shader sampler reduction depth comparison and anisotropy remain unsupported");
                 return 0;
             }
             float lo = p.minf >= 2 ? fmaxf(0, p.lod_min) : 0;
             float hi = p.minf >= 2 ? fmaxf(lo, p.lod_max) : 0;
             float limit = g_props.limits.maxSamplerLodBias;
             float lod_bias = fminf(fminf(15.99f, limit), fmaxf(fmaxf(-16, -limit), p.lod_bias));
-            edits[(*count)++] = (sample_reduction){b->binding, p.reduction == NVN_SAMPLER_REDUCTION_MIN,
-                p.minf == 1 || p.minf == 3 || p.minf == 5, p.magf != 0, lo, hi, lod_bias, limit};
+            if (*count == *capacity) {
+                if (*capacity > SIZE_MAX / (2 * sizeof **edits)) return 0;
+                size_t next = *capacity ? 2 * *capacity : 16;
+                void *grown = realloc(*edits, next * sizeof **edits);
+                if (!grown) return 0;
+                *edits = grown; *capacity = next;
+            }
+            (*edits)[(*count)++] = (sample_reduction){.binding=b->binding, .element=element,
+                .minimum=p.reduction == NVN_SAMPLER_REDUCTION_MIN,
+                .min_linear=p.minf == 1 || p.minf == 3 || p.minf == 5, .mag_linear=p.magf != 0,
+                .min_lod=lo, .max_lod=hi, .bias=lod_bias, .max_bias=limit};
         }
     }
     return 1;
@@ -2855,8 +2864,10 @@ static int prepare_storage(shader_t **first, shader_t **second) {
         static texel_bias texels[DM_VK_MAX_BINDINGS*32];
         size_t nt=0;
         if (needs_texel_variant && !shader_texel_biases(s,texels,&nt)) return 0;
-        sample_reduction reductions[DM_VK_MAX_BINDINGS]; size_t nr;
-        if (!shader_reductions(s, reductions, &nr)) return 0;
+        static sample_reduction *reductions;
+        static size_t reduction_capacity;
+        size_t nr;
+        if (!shader_reductions(s, &reductions, &reduction_capacity, &nr)) return 0;
         shader_t *variant=buffer_variant(s,bias,texels,nt,reductions,nr);
         if(!variant) return 0;
         if(st) *second=variant;else *first=variant;
