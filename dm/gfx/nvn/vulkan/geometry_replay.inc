@@ -92,13 +92,32 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
     }
     size_t map_words=nvn_geo_assemble(primitive,order,count,restart,restart_index,NULL,0);
     if (lo==UINT32_MAX || map_words==SIZE_MAX || !map_words) { free(order); return; }
+    uint32_t *topology_map=malloc(map_words*sizeof *topology_map);
+    if (!topology_map) die("Vulkan: geometry topology allocation");
+    nvn_geo_assemble(primitive,order,count,restart,restart_index,topology_map,map_words);
+    unsigned unique=0;
+    if (indexed) {
+        qsort(order,count,sizeof *order,geometry_index_order);
+        for (int i=0;i<count;i++) if ((!restart || order[i]!=restart_index) && (!unique || order[i]!=order[unique-1])) order[unique++]=order[i];
+    }
     uint64_t span=(uint64_t)hi-lo+1;
+    size_t runs=indexed ? nvn_geo_capture_runs(order,unique) : 1;
+    // The shared Metal path captures sparse IDs in contiguous runs. Preserve
+    // their real vertex IDs, while the GS map names compact record positions.
+    const uint64_t compact_threshold=((1u<<20)+GEO_CAPTURE_WORDS*4-1)/(GEO_CAPTURE_WORDS*4);
+    int compact=indexed && span>unique && (span-unique)*(uint64_t)instances>=compact_threshold && runs<=64;
+    if (!compact) runs=1;
+    uint64_t capture_span=compact ? unique : span;
+    if (compact) {
+        if (!nvn_geo_compact_map(topology_map,map_words,0,order,unique,topology_map))
+            die("Vulkan: geometry topology refers to an uncaptured vertex");
+    } else for (size_t i=0;i<map_words;i++) topology_map[i]-=lo;
     int64_t first=indexed ? (int64_t)lo+indexed->base_vertex : draw->first;
     uint64_t primitives=map_words/nvn_geo_width(topology);
     uint64_t groups=primitives*(uint64_t)instances*geometry.invocations;
-    uint64_t records=span*(uint64_t)instances;
+    uint64_t records=capture_span*(uint64_t)instances;
     if (groups>UINT32_MAX || records>g_props.limits.maxStorageBufferRange/(GEO_CAPTURE_WORDS*4)) {
-        free(order);RED_ONCE(122,"geometry capture exceeds the device's storage-buffer range");return;
+        free(topology_map);free(order);RED_ONCE(122,"geometry capture exceeds the device's storage-buffer range");return;
     }
     uint64_t emitted=groups*geometry.vertices;
     uint64_t output_width=geometry.output==1 ? 1 : geometry.output==6 ? 2 : 3;
@@ -110,12 +129,14 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
         if (!feedback_entry || !feedback_entry->mod || !feedback_entry->capture_entry ||
             !feedback_entry->feedback_layout ||
             memcmp(feedback_entry->feedback_layout,reader->feedback_layout,sizeof *reader->feedback_layout)) {
-            free(order);RED_ONCE(123,"geometry feedback needs its exported reader capture entry");return;
+            free(topology_map);free(order);RED_ONCE(123,"geometry feedback needs its exported reader capture entry");return;
         }
     }
+    VkDeviceSize uniform_alignment=g_props.limits.minUniformBufferOffsetAlignment;
+    VkDeviceSize control_stride=(24+uniform_alignment-1)/uniform_alignment*uniform_alignment;
     VkDeviceSize sizes[]={records*GEO_CAPTURE_WORDS*4,emitted*geometry.stride*4,
         groups*geometry.index_stride*4,32,map_words*4,emitted*output_width*4,
-        sizeof(VkDrawIndexedIndirectCommand),(groups+(groups+63)/64)*4,24,
+        sizeof(VkDrawIndexedIndirectCommand),(groups+(groups+63)/64)*4,control_stride*runs,
         feedback_count ? emitted*GEO_CAPTURE_WORDS*4 : 0,feedback_count ? 24 : 0};
     VkDeviceSize alignment=g_props.limits.minStorageBufferOffsetAlignment;
     if (alignment<g_props.limits.minUniformBufferOffsetAlignment) alignment=g_props.limits.minUniformBufferOffsetAlignment;
@@ -130,7 +151,7 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
         if (total>(256u<<20) || sizes[i]>g_props.limits.maxStorageBufferRange || sizes[i]>(256u<<20)-total) { bounded=0; break; }
         total+=sizes[i];
     }
-    if (!bounded) { free(order); RED_ONCE(122,"geometry draw exceeds the current scratch/dispatch bounds"); return; }
+    if (!bounded) { free(topology_map);free(order); RED_ONCE(122,"geometry draw exceeds the current scratch/dispatch bounds"); return; }
 
     // This buffer survives any guest/host synchronization inside the three
     // stages. Retire it with the last submission that references the draw.
@@ -147,24 +168,38 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
     G.phase=1;G.vertex=capture;
     memcpy(G.buffers,ranges,sizeof G.buffers);G.indices=ranges[5];G.arguments=ranges[6];
     G.capture=(capture_draw){.records=ranges[0],.control=ranges[8]};
-    uint32_t *map=(void *)(mapped+ranges[4].offset);
-    nvn_geo_assemble(primitive,order,count,restart,restart_index,map,map_words);
-    for (size_t i=0;i<map_words;i++) map[i]-=lo;
-    uint32_t info[]={span,(uint32_t)instances,0,0,(uint32_t)primitives,0,0,0};
+    G.capture.control.range=24;
+    memcpy(mapped+ranges[4].offset,topology_map,map_words*4);free(topology_map);
+    uint32_t info[]={capture_span,(uint32_t)instances,0,0,(uint32_t)primitives,0,0,0};
     memcpy(mapped+ranges[3].offset,info,sizeof info);
-    uint32_t control[]={(uint32_t)first,(uint32_t)span,first_instance,(uint32_t)instances,0,(uint32_t)records};
-    memcpy(mapped+ranges[8].offset,control,sizeof control);
+    uint32_t control[]={(uint32_t)first,(uint32_t)capture_span,first_instance,(uint32_t)instances,0,(uint32_t)records};
+    unsigned begin=0;
+    for (size_t run=0;run<runs;run++) {
+        if (compact) control[0]=(uint32_t)(first+order[begin]-lo-begin);
+        memcpy(mapped+ranges[8].offset+run*control_stride,control,sizeof control);
+        if (compact) {
+            unsigned end=begin+1;
+            while (end<unique && order[end]==order[end-1]+1) end++;
+            begin=end;
+        }
+    }
     int discard=S.rasterizer_discard;
     p_prim_restart saved_restart=S.restart;
     S.rasterizer_discard=1;S.restart.on=0;
     uint64_t draws_before=g_stat_draws;
     if (indexed) {
-        qsort(order,count,sizeof *order,geometry_index_order);
-        unsigned unique=0;
-        for (int i=0;i<count;i++) if ((!restart || order[i]!=restart_index) && (!unique || order[i]!=order[unique-1])) order[unique++]=order[i];
-        p_draw_idx points={.prim=NVN_DRAW_PRIMITIVE_POINTS,.count=unique,.itype=2,.ibuf=(uintptr_t)order,
-            .base_vertex=indexed->base_vertex,.instances=instances,.base_instance=first_instance};
-        draw_direct(NULL,&points,draw_index);
+        begin=0;
+        for (size_t run=0;run<runs;run++) {
+            unsigned end=unique;
+            if (compact) {
+                end=begin+1;
+                while (end<unique && order[end]==order[end-1]+1) end++;
+            }
+            G.capture.control.offset=ranges[8].offset+run*control_stride;
+            p_draw_idx points={.prim=NVN_DRAW_PRIMITIVE_POINTS,.count=end-begin,.itype=2,.ibuf=(uintptr_t)(order+begin),
+                .base_vertex=indexed->base_vertex,.instances=instances,.base_instance=first_instance};
+            draw_direct(NULL,&points,draw_index);begin=end;
+        }
     } else {
         p_draw points={.prim=NVN_DRAW_PRIMITIVE_POINTS,.first=draw->first,.count=count,.instances=instances,.base_instance=first_instance};
         draw_direct(&points,NULL,draw_index);
@@ -172,7 +207,7 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
     free(order);
     pass_end();barrier_all(C->cb);
     S.rasterizer_discard=discard;
-    if (g_stat_draws==draws_before) goto retire;
+    if (g_stat_draws-draws_before!=runs) goto retire;
     G.phase=3;
     vkCmdFillBuffer(C->cb,ranges[2].buffer,ranges[2].offset,ranges[2].range,UINT32_MAX);
     barrier_all(C->cb);
