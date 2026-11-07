@@ -247,6 +247,7 @@ static void boot_env(const char *files, const char *ext, const char *assets, int
     if (g_program < 0) die("preparing Android program resources");
     snprintf(p, sizeof p, "%s/save", files); mkdir(p, 0755); setenv("DM_SAVE", p, 0);
     snprintf(p, sizeof p, "%s/temp", files); mkdir(p, 0755); setenv("DM_TEMP", p, 0);
+    snprintf(p, sizeof p, "%s/vk-cache", files); mkdir(p, 0700); setenv("DM_VK_CACHE_DIR", p, 0);
     snprintf(p, sizeof p, "%s/cheats", files); mkdir(p, 0755); setenv("DM_CHEATS", p, 0);
     chdir(files);
     g_argv[0] = strdup("dmhost");

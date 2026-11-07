@@ -75,6 +75,7 @@ static void feedback_dispatch(shader_t *shader, const uint32_t *code, size_t byt
         VkComputePipelineCreateInfo pipeline={VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,NULL,0,
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,NULL,0,VK_SHADER_STAGE_COMPUTE_BIT,shader->mod,"main",NULL},shader->cpl};
         VKCHECK(vkCreateComputePipelines(g_dev,g_pcache,1,&pipeline,NULL,&shader->cpp));
+        pcache_created();
     }
     VkDescriptorSet set=allocate_shader_set(shader);
     VkWriteDescriptorSet writes[DM_VK_MAX_BINDINGS];

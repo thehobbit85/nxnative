@@ -21,6 +21,7 @@ static void packed_dispatch(VkDescriptorBufferInfo guest, VkDescriptorBufferInfo
         VkComputePipelineCreateInfo pipeline = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,NULL,0,
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,NULL,0,VK_SHADER_STAGE_COMPUTE_BIT,shader.mod,"main",NULL},shader.cpl};
         VKCHECK(vkCreateComputePipelines(g_dev,g_pcache,1,&pipeline,NULL,&shader.cpp));
+        pcache_created();
     }
     int guest_float = v->nvn_fmt == NVN_FORMAT_DEPTH32F_STENCIL8, has_stencil = v->nvn_fmt != NVN_FORMAT_DEPTH24;
     unsigned bpp = guest_float ? 8 : 4;

@@ -866,3 +866,12 @@ android-capture-replay: $(B)/nvn_replay
 $(B)/capture-mutate: tests/capture_mutate.c capture_format.h ../nvn_capture.c ../nvn_capture.h ../nvn_obj.h $(wildcard $(LZFSE)/*.[ch]) | profile
 	mkdir -p $(B)
 	$(CC) $(CPPFLAGS) -O2 -o $@ $< ../nvn_capture.c $(wildcard $(LZFSE)/*.c)
+
+$(B)/t_pipeline_cache: tests/t_pipeline_cache.c pipeline_cache.inc ../dmsh_chain.h ../../../android/compat/sha256.c ../../../android/compat/CommonCrypto/CommonDigest.h
+	mkdir -p $(B)
+	$(CC) $(CFLAGS) $(RECORDER_CPPFLAGS) -UNDEBUG $< ../../../android/compat/sha256.c -pthread -o $@
+.PHONY: pipeline-cache-test
+pipeline-cache-test: $(B)/t_pipeline_cache
+	$(B)/t_pipeline_cache
+
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: pipeline_cache.inc ../dmsh_chain.h

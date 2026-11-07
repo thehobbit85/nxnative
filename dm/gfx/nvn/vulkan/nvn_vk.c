@@ -437,30 +437,7 @@ static _Atomic uint64_t g_vbuf_copies, g_vbuf_copy_bytes;
 // barrier at each start should do; the Mali-G57 (Unisoc T820) did not keep it for a present's blit, whose batch also waits on the swapchain acquire: two thirds of Metroid Dread's menu
 // frames showed black. GPUs without timeline semaphores (Vulkan 1.1 without 1.2) wait for the GPU on the CPU before each present instead
 static VkSemaphore g_tl; static uint64_t g_tlv;
-// Pipelines compiled on earlier runs: the driver's pipeline cache, kept in <DM_VK_DIR>/../pipeline_cache.bin (written every 1800 frames when pipelines were added). A Mali-G57
-// compiles one in about 40 ms, and a scene meeting a dozen new effects stalled its frame for 150-240 ms (Super Mario Odyssey); data from another GPU or driver is ignored by it
-static VkPipelineCache g_pcache; static char g_pcache_path[1024]; static int g_pcache_saved;
-static void pcache_load(void) {
-    const char *d = getenv("DM_VK_DIR"); size_t n = 0; void *data = NULL;
-    if (d) { snprintf(g_pcache_path, sizeof g_pcache_path, "%s/../pipeline_cache.bin", d); FILE *f = fopen(g_pcache_path, "rb");
-             if (f) { fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); if (sz > 0 && (data = malloc((size_t)sz)) && fread(data, 1, (size_t)sz, f) == (size_t)sz) n = (size_t)sz; fclose(f); } }
-    VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, NULL, 0, n, data};
-    if (vkCreatePipelineCache(g_dev, &ci, NULL, &g_pcache) != VK_SUCCESS) { ci.initialDataSize = 0; ci.pInitialData = NULL; if (vkCreatePipelineCache(g_dev, &ci, NULL, &g_pcache) != VK_SUCCESS) g_pcache = VK_NULL_HANDLE; }
-    if (n) LOG("vk: pipeline cache of %zu KB loaded from an earlier run", n >> 10);
-    free(data);
-}
-static int g_npso;
-static void pcache_save(void) {
-    if (!g_pcache || !g_pcache_path[0] || g_npso == g_pcache_saved) return;
-    size_t n = 0; if (vkGetPipelineCacheData(g_dev, g_pcache, &n, NULL) != VK_SUCCESS || !n) return;
-    void *data = malloc(n); if (!data) return;
-    if (vkGetPipelineCacheData(g_dev, g_pcache, &n, data) == VK_SUCCESS) {
-        char tmp[1100]; snprintf(tmp, sizeof tmp, "%s.tmp", g_pcache_path); FILE *f = fopen(tmp, "wb");
-        if (f) { int ok = fwrite(data, 1, n, f) == n; ok &= fclose(f) == 0; if (ok) rename(tmp, g_pcache_path); }
-        g_pcache_saved = g_npso;
-    }
-    free(data);
-}
+#include "pipeline_cache.inc"
 static int g_dynrend; static PFN_vkCmdBeginRenderingKHR p_begin_rendering; static PFN_vkCmdEndRenderingKHR p_end_rendering;
 static void vk_init_(void) {
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "nxnative", 1, "dmhost", 1, VK_API_VERSION_1_3};
@@ -533,7 +510,9 @@ static void vk_init_(void) {
         g_texel_limits=(VkPhysicalDeviceTexelBufferAlignmentProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_PROPERTIES,props2.pNext};
         props2.pNext=&g_texel_limits;
     }
+    g_pcache_ids.pNext=props2.pNext;props2.pNext=&g_pcache_ids;
     vkGetPhysicalDeviceProperties2(g_pd, &props2);
+    g_pcache_ids.pNext=NULL;
     g_texel_limits.pNext=NULL;
     VkPhysicalDeviceSubgroupSizeControlFeatures size_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT u8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT};
@@ -2544,6 +2523,7 @@ static VkPipeline pso_create(const pso_key *k, VkPipelineLayout pl) {
     VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, g_dynrend ? &rinfo : NULL, 0, k->fs ? 2 : 1, st, &vi, &ia, NULL, &vp, &rs, &ms, &ds, &cb, &dy, pl, crp, 0, VK_NULL_HANDLE, -1};
     VkPipeline p; VkResult r = vkCreateGraphicsPipelines(g_dev, g_pcache, 1, &gi, NULL, &p);
     if (r != VK_SUCCESS) { LOG("[RED] vk: pipeline for %s / %s not created (%d)", k->vs->key, k->fs ? k->fs->key : "-", (int)r); p = VK_NULL_HANDLE; }
+    if (p) pcache_created();
     return p;
 }
 static VkPipeline pso_get(const pso_key *k, VkPipelineLayout pl) {
@@ -3937,6 +3917,7 @@ static int compute_pipeline(shader_t *cs) {
         VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs->mod, "main", NULL}, cs->cpl, VK_NULL_HANDLE, -1};
         if (cs->subgroup.requiredSubgroupSize) ci.stage.pNext = &cs->subgroup;
         if (vkCreateComputePipelines(g_dev, g_pcache, 1, &ci, NULL, &cs->cpp) != VK_SUCCESS) { LOG("[RED] vk: compute pipeline for %s not created", cs->key); cs->mod = VK_NULL_HANDLE; return 0; }
+        pcache_created();
     }
     return 1;
 }
@@ -4804,7 +4785,7 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
     int ok = g_done >= fence; pthread_mutex_unlock(&g_mu); return ok;
 }
 void mtl_finish(void) { mtl_wait(g_fence, UINT64_MAX); }
-void mtl_drain(void) { mtl_finish(); }
+void mtl_drain(void) { mtl_finish(); pcache_save(); }
 
 // ---------- Presentation: counted; DM_VK_SHOTS writes chosen frames as BMP files ----------
 static void shot(const tex_t *t, uint64_t n) {

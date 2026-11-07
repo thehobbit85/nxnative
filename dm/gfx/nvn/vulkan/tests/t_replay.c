@@ -3324,6 +3324,11 @@ int main(void) {
     if (getenv("DM_VK_TEST_GLOBAL_LOADS")) { global_loads();return 0; }
     if (getenv("DM_VK_TEST_RESOURCE_POOLS")) { resource_pools();return 0; }
     if (getenv("DM_VK_TEST_C2_ARRAYS")) { c2_arrays();return 0; }
+    const char *cache_test=getenv("DM_VK_TEST_PIPELINE_CACHE");
+    if (cache_test) {
+        if (!strcmp(cache_test,"compute")) compute_driver_constants();else vertex_output_defaults();
+        mtl_drain();puts("Pipeline-cache workload completed and drained");return 0;
+    }
     if (getenv("DM_VK_TEST_LIVE_CAPTURE")) { live_capture();return 0; }
     if (getenv("DM_VK_TEST_DIAGNOSTICS")) { graphics_diagnostics(); return 0; }
     if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
