@@ -7,12 +7,20 @@ static nvn_hmap g_texture_aliases={.klen=sizeof(texture_alias_key)};
 static nvn_hmap g_texture_serials={.klen=sizeof(uint64_t)};
 static nvn_hmap g_texture_keys={.klen=sizeof(uint64_t)};
 static void tex_free(vtex *v);
+// Keep a storage-capable linear allocation for this mutable-format pair.
+// Individual texture objects still select their own linear/sRGB image view.
+static NVNformat texture_backing_format(NVNformat format) {
+    return format==NVN_FORMAT_RGBA8_SRGB ? NVN_FORMAT_RGBA8 : format;
+}
 static int texture_key(const tex_t *t,texture_alias_key *key) {
     if (!t->pool || !t->mem || t->has_layout || (t->pool->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) ||
         t->d.target==NVN_TEXTURE_TARGET_BUFFER) return 0;
     memset(key,0,sizeof *key);key->pool=(uintptr_t)t->pool;key->offset=t->off;key->description=t->d;
     // IMAGE permits shader writes but does not change the storage layout.
-    key->description.flags&=~NVN_TEXTURE_FLAGS_IMAGE;return 1;
+    key->description.flags&=~NVN_TEXTURE_FLAGS_IMAGE;
+    if (t->d.samples<=1 && (t->d.target==NVN_TEXTURE_TARGET_2D || t->d.target==NVN_TEXTURE_TARGET_2D_ARRAY))
+        key->description.format=texture_backing_format(t->d.format);
+    return 1;
 }
 static void texture_bind_serial(uint64_t serial,vtex *v) {
     vtex *old=nvn_hm_put(&g_texture_serials,&serial,v);

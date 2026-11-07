@@ -71,7 +71,7 @@ static VkSampler draw_texture_average_sampler(samp_par p,border_view sampled,con
 // once and let the shader combine the actual texels before any averaging.
 static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *tr, draw_texture_params *params,VkSampler *twin) {
     border_view sampled = sampler_view(v,tr);
-    uint8_t map[]={2,3,4,5};sampled_swizzle(map,view_format(v,&tr->v,tr->has_v),&tr->t,&tr->v,tr->has_v);
+    uint8_t map[]={2,3,4,5};sampled_swizzle(map,view_format(v,&tr->t,&tr->v,tr->has_v),&tr->t,&tr->v,tr->has_v);
     if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX)
         return draw_texture_average_sampler(p,sampled,map,params,twin);
     float anisotropy=fminf(16,fmaxf(1,floorf(p.aniso)));
@@ -131,7 +131,7 @@ static void draw_texture(const p_draw_tex *c) {
     pthread_mutex_unlock(&g_rmu);
     if (!v || !sampler) { RED_ONCE(102, "DrawTexture handle has no texture or sampler"); return; }
     int type = tr.has_v && tr.v.set_target ? tr.v.target : tr.t.d.target;
-    fmt_t format = view_format(v,&tr.v,tr.has_v);
+    fmt_t format = view_format(v,&tr.t,&tr.v,tr.has_v);
     if ((type != NVN_TEXTURE_TARGET_2D && type != NVN_TEXTURE_TARGET_RECTANGLE) ||
         v->samples != VK_SAMPLE_COUNT_1_BIT || format.depth || clear_color_type(format.f) != CLEAR_FLOAT) {
         RED_ONCE(102, "DrawTexture requires a single-sample float or normalized 2D view"); return;

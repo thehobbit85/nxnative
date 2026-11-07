@@ -5,7 +5,7 @@ static int border_image_view(const shader_t *shader,const sbind *binding,border_
     uint64_t handle=descriptor_handle(shader->guest_stage,binding,0);
     treg_t registration;vtex *image=registered_texture((int)(handle&0xfffff),&registration);
     if (!image || !registration.ok) return 0;
-    fmt_t format=view_format(image,&registration.v,registration.has_v);
+    fmt_t format=view_format(image,&registration.t,&registration.v,registration.has_v);
     if (format.depth || clear_color_type(format.f)!=CLEAR_FLOAT) return 0;
     *out=sampler_view(image,&registration);
     memcpy(map,(uint8_t[]){2,3,4,5},4);

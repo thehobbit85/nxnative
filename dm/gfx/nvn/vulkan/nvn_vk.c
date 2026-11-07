@@ -1040,7 +1040,7 @@ static vtex *tex_get_locked(const tex_t *t, int for_rt) {
         else if (!v->gpu && t->mem && (v->dirty || sparse_changed(v,t) || (v->span && nvn_dirty_since_span(v->span, t->mem, t->L.size, v->stamp)))) { v->dirty = 0; tex_upload(v, t); }   // never over what the GPU drew: a flush of the pool range around a render target is not new content
         return v;
     }
-    fmt_t f = fmt_of(t->d.format);
+    fmt_t f = fmt_of(texture_backing_format(t->d.format));
     if (!f.f) { static int n; if (n++ < 8) LOG("[RED] vk: texture format %#x has no Vulkan format yet (serial %llu)", t->d.format, (unsigned long long)t->serial); return NULL; }
     if (t->d.target == NVN_TEXTURE_TARGET_BUFFER) { RED_ONCE(3, "buffer textures are not implemented yet"); return NULL; }
     v = calloc(1, sizeof *v); v->serial = t->serial; v->f = f; v->nvn_fmt = t->d.format; v->target = t->d.target; v->mem = t->mem; v->len = t->L.size;
@@ -1193,9 +1193,8 @@ static void garbage_free(uint64_t done) {
 }
 // A view of the image: type and format from the NVN view (or the texture), levels and layers, swizzle (the format's missing alpha, the texture's and the view's swizzles)
 enum { VIEW_SAMPLED, VIEW_ATTACHMENT, VIEW_STORAGE };
-static fmt_t view_format(const vtex *v, const view_t *view, int has_view) {
-    if (!has_view || !view->set_format) return v->f;
-    fmt_t f = fmt_of(view->format);
+static fmt_t view_format(const vtex *v,const tex_t *texture,const view_t *view,int has_view) {
+    fmt_t f=fmt_of(has_view && view->set_format ? view->format : texture->d.format);
     // The decoder preserves encoded RGB bytes. Linear and sRGB registrations
     // of the same BC encoding choose different views of that one allocation.
     if (!f.f || f.dec != v->f.dec) return v->f;
@@ -1314,7 +1313,7 @@ static VkImageView tex_view_format(vtex *v, const tex_t *t, const view_t *vw, in
     return view;
 }
 static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_vw, int want_type, int purpose) {
-    return tex_view_format(v, t, vw, has_vw, want_type, purpose, view_format(v, vw, has_vw));
+    return tex_view_format(v, t, vw, has_vw, want_type, purpose, view_format(v,t,vw,has_vw));
 }
 
 // ---------- Registrations (game threads) ----------
@@ -1375,7 +1374,7 @@ void mtl_prog_release(prog_t *p) { (void)p; }
 enum { BORDER_SWIZZLED=1, BORDER_PACKED=2, BORDER_MIXED_FORMATS=4, BORDER_MIXED_NUMBERS=8, BORDER_FLOAT_AND_INT=16, BORDER_STENCIL=32 };
 typedef struct { VkFormat format; unsigned flags; } border_view;
 static border_view sampler_view(const vtex *v, const treg_t *tr) {
-    fmt_t f = view_format(v,&tr->v,tr->has_v);
+    fmt_t f = view_format(v,&tr->t,&tr->v,tr->has_v);
     border_view result = {depth_red_view(v,f) ? v->f.f : f.f};
     if (sampled_stencil(v,&tr->t,&tr->v,tr->has_v)) {
         result.format = v->f.f;
@@ -2383,7 +2382,7 @@ static void set_rt(const p_set_rt *r) {
         if (!P.cv[i]) { P.ct[i] = NULL; continue; }
         uint32_t layers=attachment_key(v,P.cv[i]).range.layerCount;
         if (layers<P.max_layers) P.max_layers=layers;
-        P.cf[i] = view_format(v,view,has_view).f;
+        P.cf[i] = view_format(v,attachment,view,has_view).f;
         uint32_t lv = has_view && view->set_levels ? view->base_level : 0, w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
         P.clv[i] = lv; P.cly[i] = has_view && view->set_layers ? view->min_layer : 0; P.cwr[i] = 1;
         if (w < P.w) P.w = w; if (h < P.h) P.h = h;
@@ -2772,7 +2771,7 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
         tr.v.nlevels = tr.v.nlayers = 1;
     }
     if (b->num == 0) {
-        NVNformat fit = float_word_format(view_format(v, &tr.v, tr.has_v).f);
+        NVNformat fit = float_word_format(view_format(v,&tr.t,&tr.v,tr.has_v).f);
         if (fit != NVN_FORMAT_NONE) {
             tr.has_v = tr.v.set_format = 1;
             tr.v.format = fit;
@@ -3268,7 +3267,7 @@ static int bind_storage(VkDescriptorSet ds, const sbind *b, int stage) {
         }
         if (!v || !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return 0;
         if (!compatible_dimension(v, b->view)) return 0;
-        fmt_t f = view_format(v, &tr.v, tr.has_v);
+        fmt_t f = view_format(v,&tr.t,&tr.v,tr.has_v);
         int bw, bh, bytes = nvn_fmt_bpb(tr.t.d.format, &bw, &bh);
         if (b->storage_image > 1) {
             // The image instruction specifies the texel layout. For example,
@@ -4472,7 +4471,7 @@ static void clear_tex(const p_clear_tex *c) {
         (!volume && c->has_view && c->view.set_layers && c->view.nlayers && (uint64_t)c->r.zoffset + count > c->view.nlayers)) {
         RED_ONCE(84, "clear outside texture layers"); return;
     }
-    fmt_t fmt = view_format(v, &c->view, c->has_view);
+    fmt_t fmt = view_format(v,c->tex,&c->view,c->has_view);
     enum clear_type type = clear_color_type(fmt.f);
     VkClearColorValue value;
     if (c->is_uint && type != CLEAR_FLOAT) memcpy(&value, &c->c, sizeof value);

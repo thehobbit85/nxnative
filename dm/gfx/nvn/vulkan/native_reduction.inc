@@ -4,7 +4,7 @@
 static int native_reduction_view(const vtex *image,const treg_t *registration,int number,int multisample) {
     VkFormat format=dummy_format(number,multisample);
     if (image && registration->ok) {
-        fmt_t viewed=view_format(image,&registration->v,registration->has_v);
+        fmt_t viewed=view_format(image,&registration->t,&registration->v,registration->has_v);
         if (number==0) {
             NVNformat fit=float_word_format(viewed.f);
             if (fit!=NVN_FORMAT_NONE) viewed=fmt_of(fit);
