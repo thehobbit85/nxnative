@@ -69,3 +69,49 @@ static void block_targets(void) {
     mtl_queue_forget(SLOT);
     printf("Compressed target shadows preserve encoded blocks, mip/layer/3D guards and immediate samples in %u cases\n",checks);
 }
+
+static void depth_color_targets(void) {
+    enum { SLOT=1649 };
+    mtl_queue_activate(SLOT);
+    for (unsigned wide=0;wide<2;wide++) for (unsigned array=0;array<2;array++) for (unsigned mip=0;mip<2;mip++) {
+        unsigned layers=array ? 2 : 1, selected=array ? 1 : 0;
+        tex_t depth={.serial=0x17c00+wide*4+array*2+mip,.d={.width=8,.height=8,.depth=layers,.levels=2,
+            .target=array ? NVN_TEXTURE_TARGET_2D_ARRAY : NVN_TEXTURE_TARGET_2D,
+            .format=wide ? NVN_FORMAT_DEPTH32F : NVN_FORMAT_DEPTH16}};
+        nvn_tex_layout(&depth.d,&depth.L);
+        uint32_t words[4]={wide ? 0x3e800000 : 12345,0,0,0};
+        uint8_t returned[2][8*8*2*4]={{0}};
+        mtl_pool_add(words,sizeof words);mtl_pool_add(returned,sizeof returned);
+        list_t list={0};
+        for (unsigned level=0;level<2;level++) {
+            RECORD(OP_CLEAR_TEX,p_clear_tex,.tex=&depth,.has_view=1,
+                .view={.set_levels=1,.base_level=level,.nlevels=1},
+                .r={.width=8>>level,.height=8>>level,.depth=layers},.mask=15,.c.f={.75f});
+        }
+        view_t view={.set_levels=1,.base_level=mip,.nlevels=1,.set_layers=1,.min_layer=selected,.nlayers=1,
+            .set_format=1,.format=wide ? NVN_FORMAT_R32UI : NVN_FORMAT_R16UI};
+        RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&depth},.has_cview={1},.cview={view});
+        RECORD(OP_VIEWPORTS,p_viewports,.n=1,.v={{0,0,8>>mip,8>>mip}});
+        RECORD(OP_SCISSOR,p_scissor,.x=1,.y=1,.w=1,.h=1);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&block_target_program,.stages=3);
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=1,.index=0,.addr=(uintptr_t)words,.size=sizeof words);
+        RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+        for (unsigned level=0;level<2;level++) {
+            RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&depth,.src=(uintptr_t)returned[level],.has_view=1,
+                .view={.set_levels=1,.base_level=level,.nlevels=1},.r={.width=8>>level,.height=8>>level,.depth=layers});
+        }
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (unsigned level=0;level<2;level++) for (unsigned layer=0;layer<layers;layer++) {
+            unsigned size=8>>level, bytes=wide ? 4 : 2;
+            for (unsigned y=0;y<size;y++) for (unsigned x=0;x<size;x++) {
+                uint32_t actual=0;memcpy(&actual,returned[level]+((layer*size+y)*size+x)*bytes,bytes);
+                uint32_t expected=level==mip && layer==selected && x==1 && y==1 ? words[0] : wide ? 0x3f400000 : 49151;
+                if (actual!=expected) die("depth color target wide%u array%u mip%u returned level%u layer%u xy%u,%u %#x expected %#x",
+                    wide,array,mip,level,layer,x,y,actual,expected);
+            }
+        }
+        mtl_tex_release(&depth);mtl_pool_del(words);mtl_pool_del(returned);
+    }
+    mtl_queue_forget(SLOT);
+    puts("D16 and D32F color targets preserve prior GPU depth, selected pixels, mip and layer guards");
+}

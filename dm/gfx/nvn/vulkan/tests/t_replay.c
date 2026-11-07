@@ -3298,6 +3298,7 @@ int main(void) {
     }
     if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
     if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }
+    if (getenv("DM_VK_TEST_DEPTH_COLOR_TARGETS")) { depth_color_targets(); return 0; }
     if (getenv("DM_VK_TEST_BLOCK_TARGETS")) { block_targets(); return 0; }
     if (getenv("DM_VK_TEST_WRAPPED_BUFFER")) { wrapped_buffer(); return 0; }
     if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); sparse_mrt_outputs(); mixed_integer_outputs(); return 0; }

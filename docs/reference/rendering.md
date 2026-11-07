@@ -507,6 +507,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** the boot aborts in Metal's pipeline validation: `MTLPixelFormatDepth16Unorm is not color renderable`.
 - **Cause:** a depth texture drawn through a colour view (a 1024×1024 D16 texture through an R16 view); Metal has no colour view of a depth texture.
 - **Fix:** such a pass draws into a colour shadow of the same pixel size, copied in before and back after the pass through a buffer, as a compressed render target is ([Compressed textures as render targets through an uncompressed shadow](#compressed-textures-as-render-targets-through-an-uncompressed-shadow); `shrt_block`; D16 and D32F, whose Metal pixel is the NVN pixel; not D24S8).
+- **Android:** D16 and D32F color attachments use the shadow path with GPU buffer copies in both directions. The selected depth plane supplies current GPU-written bits before drawing, and the shadow publishes its bits back before later depth sampling or readback. This path stays on the GPU. Focused dynamic and legacy checks cover both formats, 2D and array targets, two mip levels, a one-pixel draw and untouched mip/layer guards.
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md).
 
 ### The same texture attached at two colour slots
