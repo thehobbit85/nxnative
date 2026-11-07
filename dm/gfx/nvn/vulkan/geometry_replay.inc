@@ -283,6 +283,7 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
                 gw_t *write=&g_wb[i];
                 buffer_written(write->addr,write->size,write->buf,write->off,write->p);
             }
+            global_memory_written();
             geometry_pack(&geometry,(uint32_t)groups,ranges[7]);
             if (feedback_count) {
                 // Capture each reader vertex once. Strip decomposition can

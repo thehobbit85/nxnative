@@ -825,4 +825,5 @@ $(B)/t_replay: tests/global_memory.inc
 global-memory-fixture: fixture
 	PATH="$(dir $(GLSLC)):$$PATH" python3 ../../../android/tests/global_memory_fixture.py $(B)/global-memory-fixture
 	cp $(B)/global-memory-fixture/export/*.spv $(B)/global-memory-fixture/export/*.vk.txt $(B)/shaders/
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: global_memory_read.inc
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: global_memory.inc
+$(B)/t_replay: ../../../android/tests/global_memory_cases.h

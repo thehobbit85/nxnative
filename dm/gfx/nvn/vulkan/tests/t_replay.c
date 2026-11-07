@@ -41,7 +41,7 @@ static prog_t wrapped_table_program={.nstage=1};
 static prog_t wrapped_array_program[2]={{.nstage=1},{.nstage=1}};
 static prog_t logical_slot_program[2]={{.nstage=1},{.nstage=1}};
 static prog_t c2_array_program[3]={{.nstage=1},{.nstage=1},{.nstage=1}};
-static prog_t global_load_program[7];
+static prog_t global_memory_program[21];
 static prog_t resource_pool_program={.nstage=1};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
@@ -157,7 +157,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
     for (unsigned variant=0;variant<2;variant++) if (p==&logical_slot_program[variant]) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0xaa;key[7]=1+variant;return 1; }
     for (unsigned variant=0;variant<3;variant++) if (p==&c2_array_program[variant]) { assert(!stage);const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x40,variant};memcpy(key,k,8);return 1; }
-    for (unsigned variant=0;variant<7;variant++) if (p==&global_load_program[variant]) { assert(!stage);const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x50,variant};memcpy(key,k,8);return 1; }
+    for (unsigned variant=0;variant<21;variant++) if (p==&global_memory_program[variant]) { assert(!stage);const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x50,variant};memcpy(key,k,8);return 1; }
     if (p==&resource_pool_program) { assert(!stage);const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x60,0};memcpy(key,k,8);return 1; }
     if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
     if (p == &c2_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x51 : 0x35; return 1; }
@@ -3310,6 +3310,7 @@ int main(void) {
         return 0;
     }
     if (getenv("DM_VK_TEST_LOGICAL_SLOTS")) { logical_buffer_slots();logical_image_slots();return 0; }
+    if (getenv("DM_VK_TEST_GLOBAL_WRITES")) { global_writes();return 0; }
     if (getenv("DM_VK_TEST_GLOBAL_LOADS")) { global_loads();return 0; }
     if (getenv("DM_VK_TEST_RESOURCE_POOLS")) { resource_pools();return 0; }
     if (getenv("DM_VK_TEST_C2_ARRAYS")) { c2_arrays();return 0; }
