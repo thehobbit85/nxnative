@@ -18,8 +18,8 @@ static int prepare_wrapped_buffers(shader_t **selected) {
             }
             pthread_mutex_unlock(&g_rmu);
         }
-        if (has_buffer && has_image && (binding->table || !binding->count || binding->count>32)) {
-            RED_ONCE(24,"mixed wrapped descriptors require a fixed array of at most 32 elements");return 0;
+        if (has_buffer && has_image && (!binding->count || (!binding->table && binding->count>32))) {
+            RED_ONCE(24,"mixed wrapped descriptors require a bounded array or compact handle table");return 0;
         }
         if (has_buffer && binding->table && !g_texel_descriptor_tables) {
             RED_ONCE(24,"wrapped handle tables require nonuniform texel-buffer descriptor indexing");return 0;
@@ -48,6 +48,9 @@ static int prepare_wrapped_buffers(shader_t **selected) {
         }
         sbind *image=&variant->b[i],*buffer=&variant->b[variant->nb];
         *buffer=*image;buffer->binding=binding++;buffer->type=BT_UTB;
+        // The clone appears after driver_table_spv has mapped the original
+        // interface. It reuses that compact index and must not map it twice.
+        buffer->logical_count=0;
         image->mixed_image=1;
         variant->wrapped[variant->nb++]=1;
         sbind *flags=&variant->b[variant->nb++];

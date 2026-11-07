@@ -42,6 +42,7 @@ static prog_t wrapped_buffer_program={.nstage=1};
 static prog_t block_target_program={.nstage=2}, block_sample_program={.nstage=1};
 static prog_t wrapped_table_program={.nstage=1};
 static prog_t wrapped_array_program[3]={{.nstage=1},{.nstage=1},{.nstage=1}};
+static prog_t wrapped_c2_program={.nstage=1};
 static prog_t logical_slot_program[2]={{.nstage=1},{.nstage=1}};
 static prog_t c2_array_program[3]={{.nstage=1},{.nstage=1},{.nstage=1}};
 static prog_t global_memory_program[21];
@@ -94,6 +95,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p==&wrapped_c2_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=7;return 1; }
     for (unsigned form=0;form<3;form++) if (p==&wrapped_array_program[form]) {
         assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=form==2 ? 5 : 2+form;return 1;
     }

@@ -3446,17 +3446,18 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
                 *d = b->kind == K_CAPTURE_RECORDS ? capture->records : capture->control;
             } else if (b->kind==K_WRAP_FLAGS) {
                 const sbind *source=&s->b[b->reg];
-                uint32_t flags[33]={0};
-                if (!source->count || source->count>32) return VK_NULL_HANDLE;
+                VkDeviceSize bytes=((VkDeviceSize)source->count+1)*sizeof(uint32_t);
+                if (!source->count || bytes>g_props.limits.maxStorageBufferRange) return VK_NULL_HANDLE;
+                VkDeviceSize offset=ring_alloc(bytes,g_props.limits.minStorageBufferOffsetAlignment);
+                if (offset==VK_WHOLE_SIZE) return VK_NULL_HANDLE;
+                uint32_t *flags=(uint32_t *)(C->ringp+offset);
                 for (uint32_t element=0;element<source->count;element++) {
                     int id=(int)(descriptor_handle(stage,source,element)&0xfffff);
                     pthread_mutex_lock(&g_rmu);
                     flags[element]=id>0 && id<g_ntreg && g_treg[id].ok && g_treg[id].t.d.target==NVN_TEXTURE_TARGET_BUFFER;
                     pthread_mutex_unlock(&g_rmu);
                 }
-                VkDeviceSize bytes=(source->count+1)*sizeof *flags;
-                VkDeviceSize offset=ring_put(flags,bytes,g_props.limits.minStorageBufferOffsetAlignment);
-                if (offset==VK_WHOLE_SIZE) return VK_NULL_HANDLE;
+                flags[source->count]=0;
                 *d=(VkDescriptorBufferInfo){C->ring,offset,bytes};
             } else if (b->kind==K_GMEM_MAP) {
                 if (!global_memory_map(d)) return VK_NULL_HANDLE;

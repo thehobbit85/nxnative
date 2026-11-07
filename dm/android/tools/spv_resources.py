@@ -109,7 +109,9 @@ def fields(binding):
         if name not in binding: continue
         if type(binding[name]) is not bool: raise ValueError('invalid wrapped fetch flag')
         if binding[name]: result.append(name + '=1')
-    if result and (kind != 'tex' or binding['type'] not in ('tex', 'cis') or
-                   binding['count'] != 1 or binding.get('view') != 1 or not binding.get('fetch1d')):
+    sampled = ('tex', 'tex_ubo', 'tex_slots', 'tex_c2a', 'tex_htab', 'tex_pool')
+    if result and (kind not in sampled or binding['type'] not in ('tex', 'cis') or
+                   type(binding['count']) is not int or binding['count'] < 1 or
+                   binding.get('view') != 1 or not binding.get('fetch1d')):
         raise ValueError('invalid wrapped fetch binding')
     return tuple(result)

@@ -1,15 +1,23 @@
 #include "../spv_mixed_wrapped.h"
+#include "../spv_descriptor_table.h"
 #include <assert.h>
 #include <stdio.h>
 
 int main(int argc,char **argv) {
-    assert(argc==3);
+    assert(argc>=3 && argc<=5);
     FILE *file=fopen(argv[1],"rb");assert(file);
     assert(!fseek(file,0,SEEK_END));long bytes=ftell(file);rewind(file);
     assert(bytes>=20 && bytes%4==0);
     uint32_t *input=malloc(bytes);assert(input);
     assert(fread(input,1,bytes,file)==(size_t)bytes);fclose(file);
     mixed_wrapped_edit edit={0,3,4,3};size_t count;const char *reason;
+    if (argc>=4) edit.count=(uint32_t)strtoul(argv[3],NULL,10);
+    if (argc==5) {
+        assert(!strcmp(argv[4],"compact"));descriptor_table_edit table={0,2,3};
+        uint32_t *mapped=spv_descriptor_table(input,bytes/4,&table,1,&count,&reason);
+        if (!mapped) { fprintf(stderr,"%s\n",reason);free(input);return 1; }
+        free(input);input=mapped;bytes=(long)count*4;
+    }
     assert(!spv_mixed_wrapped(input,4,&edit,1,&count,&reason) && reason);
     mixed_wrapped_edit missing={0xffff,3,4,3};
     assert(!spv_mixed_wrapped(input,bytes/4,&missing,1,&count,&reason) && reason);

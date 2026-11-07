@@ -1,5 +1,5 @@
 static void wrapped_buffer_table(void) {
-    enum { COUNT=40, SLOT=1600 };
+    enum { COUNT=72, SLOT=1600 };
     tex_t textures[COUNT];uint32_t memory[COUNT][COUNT], result[COUNT+1][4];
     uint64_t handles[COUNT];
     mtl_pool_add(memory,sizeof memory);mtl_pool_add(result,sizeof result);mtl_pool_add(handles,sizeof handles);
@@ -9,11 +9,17 @@ static void wrapped_buffer_table(void) {
             .d={.width=i+1,.height=1,.depth=1,.levels=1,.format=NVN_FORMAT_R32UI,.target=NVN_TEXTURE_TARGET_BUFFER}};
         nvn_tex_layout(&textures[i].d,&textures[i].L);mtl_reg_tex(SLOT+i,&textures[i],NULL);
     }
-    const unsigned live_counts[]={1,40,2,40};
+    tex_t image={.serial=0x17b00,.d={.width=3,.height=1,.depth=1,.levels=1,
+        .format=NVN_FORMAT_R32UI,.target=NVN_TEXTURE_TARGET_2D}};
+    nvn_tex_layout(&image.d,&image.L);mtl_reg_tex(SLOT+COUNT,&image,NULL);
+    uint32_t pixels[]={777,778,779};
+    const unsigned live_counts[]={1,72,2,72,72,4,72,72};
     for (unsigned run=0;run<sizeof live_counts/sizeof *live_counts;run++) {
         unsigned live=live_counts[run];
-        for (unsigned i=0;i<COUNT;i++) handles[i]=i<live ? SLOT+i : 0;
+        int mixed=run>=4 && run<7;
+        for (unsigned i=0;i<COUNT;i++) handles[i]=i<live ? (mixed && i%2 ? SLOT+COUNT : SLOT+i) : 0;
         memset(result,0,sizeof result);list_t list={0};
+        RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&image,.src=(uintptr_t)pixels,.r={.width=3,.height=1,.depth=1});
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&wrapped_table_program,.stages=0x20);
         RECORD(OP_BIND_UBO,p_bind_buf,.stage=5,.index=7,.addr=(uintptr_t)handles,.size=sizeof handles);
         RECORD(OP_BIND_UBO,p_bind_buf,.stage=5,.index=8,.addr=0,.size=0);
@@ -21,11 +27,14 @@ static void wrapped_buffer_table(void) {
         RECORD(OP_DISPATCH,p_dispatch,.x=COUNT+1,.y=1,.z=1);
         put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
         for (unsigned i=0;i<=COUNT;i++) {
-            uint32_t expected[]={i<live ? 100+i : 0,i<live ? i+1 : 4096,1,1};
-            if (memcmp(result[i],expected,16)) die("wrapped table live%u lane%u: %u,%u,%u,%u",live,i,
+            int ordinary=i<live && mixed && i%2;
+            uint32_t expected[]={ordinary ? 777 : i<live ? 100+i : 0,
+                ordinary ? 3 : i<live ? i+1 : mixed ? 1 : 4096,1,1};
+            if (memcmp(result[i],expected,16)) die("wrapped table run%u live%u lane%u: %u,%u,%u,%u",run,live,i,
                 result[i][0],result[i][1],result[i][2],result[i][3]);
         }
     }
+    mtl_reg_tex(SLOT+COUNT,NULL,NULL);mtl_tex_release(&image);
     for (unsigned i=0;i<COUNT;i++) { mtl_reg_tex(SLOT+i,NULL,NULL);mtl_tex_release(&textures[i]); }
     mtl_pool_del(memory);mtl_pool_del(result);mtl_pool_del(handles);
 }
@@ -68,14 +77,14 @@ static void wrapped_buffer(void) {
     mtl_reg_tex(SLOT+2,&short_view,NULL);
     uint64_t handles[5]={0,0,SLOT,SLOT+2,0};
     mtl_pool_add(handles,sizeof handles);
-    for (unsigned run=0;run<9;run++) {
-        unsigned form=run<3 ? run : (run-3)%2;
-        int mixed=run>=3 && run<7,swap=run>=5 && run<7;
+    for (unsigned run=0;run<12;run++) {
+        unsigned form=run>=9 ? 3 : run<3 ? run : (run-3)%2;
+        int mixed=(run>=3 && run<7) || run==9 || run==10,swap=(run>=5 && run<7) || run==10;
         handles[3]=swap ? SLOT+1 : SLOT+2;
         handles[4]=swap ? SLOT+2 : mixed ? SLOT+1 : 0;
         for (unsigned i=0;i<COUNT+2;i++) memory[i]=i+17;
         memset(result,0,sizeof result);list_t list={0};
-        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&wrapped_array_program[form],.stages=0x20);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=form==3 ? &wrapped_c2_program : &wrapped_array_program[form],.stages=0x20);
         RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=3,.h={SLOT,handles[3],handles[4]});
         RECORD(OP_BIND_UBO,p_bind_buf,.stage=5,.index=7,.addr=(uintptr_t)handles,.size=sizeof handles);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result,.size=sizeof result);

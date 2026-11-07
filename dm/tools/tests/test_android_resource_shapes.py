@@ -50,7 +50,7 @@ class ResourceShapes(unittest.TestCase):
     def test_resource_fields_reject_ambiguous_shapes(self):
         good = dict(binding=2, type='cis', count=1, kind='tex', reg=128, view=1, fetch1d=True, fetch1d_size=True)
         for field, value in [('fetch1d', False), ('fetch1d', 1), ('fetch1d_size', 'true'),
-                             ('count', 2), ('kind', 'sbuf'), ('view', 0), ('type', 'utb')]:
+                             ('kind', 'sbuf'), ('view', 0), ('type', 'utb')]:
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'wrapped fetch'):
                 vk.vk_txt(dict(stage='cs', bindings=[dict(good, **{field: value})]))
         for descriptor, element in [('tex', 'texture2d<float>'), ('tex', 'depth2d<float>'),
@@ -60,6 +60,15 @@ class ResourceShapes(unittest.TestCase):
             self.assertEqual(actual['kind'], 'samp_slots' if descriptor == 'samp' else 'tex_slots')
             for count in (0, 31, 33):
                 with self.assertRaisesRegex(ValueError, 'slot array'): spv_resources.slot_array(resource, descriptor, count)
+
+    def test_wrapped_shapes_survive_array_and_table_interfaces(self):
+        for kind in ('tex', 'tex_ubo', 'tex_slots', 'tex_c2a', 'tex_htab', 'tex_pool'):
+            with self.subTest(kind=kind):
+                binding = dict(type='cis', count=3, kind=kind, reg=None, view=1, fetch1d=True, fetch1d_size=True)
+                self.assertEqual(spv_resources.fields(binding), ('fetch1d=1', 'fetch1d_size=1'))
+        for count in (0, -1, True):
+            with self.subTest(count=count), self.assertRaisesRegex(ValueError, 'wrapped fetch'):
+                spv_resources.fields(dict(type='tex', count=count, kind='tex_c2a', view=1, fetch1d=True))
 
     def test_native_reader_retains_and_bounds_resource_shapes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -76,8 +85,11 @@ class ResourceShapes(unittest.TestCase):
             self.assertEqual(module.shape(good, len(good)), 3)
             plain = good.split(b' fetch1d=')[0]; self.assertEqual(module.shape(plain, len(plain)), 0)
             for bad in (good.replace(b'fetch1d=1', b'fetch1d=0'), good.replace(b'fetch1d=1 ', b''),
-                        good + b' fetch1d=1', good.replace(b'view=1', b'view=0'), good.replace(b'cis 1', b'cis 2')):
+                        good + b' fetch1d=1', good.replace(b'view=1', b'view=0'), good.replace(b'cis 1', b'cis 0')):
                 with self.subTest(line=bad): self.assertEqual(module.shape(bad, len(bad)), -1)
+            for kind in ('tex', 'tex_ubo', 'tex_slots', 'tex_c2a', 'tex_htab', 'tex_pool'):
+                line = f'b 2 cis 3 {kind} -1 32 samp_tex -1 view=1 fetch1d=1 fetch1d_size=1'.encode()
+                with self.subTest(kind=kind): self.assertEqual(module.shape(line, len(line)), 3)
             for descriptor, kind in [('utb', 'tex_slots'), ('samp', 'samp_slots')]:
                 line = f'b 36 {descriptor} 32 {kind} -1 -1 - -1'.encode()
                 self.assertEqual(module.shape(line, len(line)), 0)

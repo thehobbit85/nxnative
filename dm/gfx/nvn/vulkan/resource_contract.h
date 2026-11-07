@@ -27,8 +27,10 @@ static inline const char *dm_vk_resource_line(const char *line, size_t n, dm_vk_
             if (length != 14 || field[13] != '1' || shape->fetch1d_size++) return "invalid wrapped fetch size flag";
         } else if (length == 6 && !memcmp(field, "view=", 5) && field[5] >= '0' && field[5] <= '6') view = field[5] - '0';
     }
+    int sampled=!strcmp(kind,"tex") || !strcmp(kind,"tex_ubo") || !strcmp(kind,"tex_slots") ||
+        !strcmp(kind,"tex_c2a") || !strcmp(kind,"tex_htab") || !strcmp(kind,"tex_pool");
     if ((shape->fetch1d || shape->fetch1d_size) &&
-        (strcmp(kind, "tex") || (strcmp(type, "tex") && strcmp(type, "cis")) || count != 1 || view != 1 || !shape->fetch1d))
+        (!sampled || (strcmp(type, "tex") && strcmp(type, "cis")) || view != 1 || !shape->fetch1d))
         return "invalid wrapped fetch binding";
     if (!strcmp(kind, "tex_slots") || !strcmp(kind, "samp_slots")) {
         int sampler_array = !strcmp(kind, "samp_slots");

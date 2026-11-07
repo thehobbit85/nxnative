@@ -9,7 +9,7 @@ $(B)/t_wrapped_buffer: tests/t_wrapped_buffer.c spv_wrapped_buffer.h spv_texel_b
 	mkdir -p $(B)
 	$(CC) $(CFLAGS) $< -o $@
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_mixed_wrapped.h
-$(B)/t_mixed_wrapped: tests/t_mixed_wrapped.c spv_mixed_wrapped.h spv_wrapped_buffer.h spv_texel_bias.h
+$(B)/t_mixed_wrapped: tests/t_mixed_wrapped.c spv_mixed_wrapped.h spv_wrapped_buffer.h spv_texel_bias.h spv_descriptor_table.h
 	mkdir -p $(B)
 	$(CC) $(CFLAGS) $< -o $@
 fixture: $(B)/shaders/00000000feed9e01.spv
@@ -26,6 +26,11 @@ $(B)/shaders/00000000feed9e03.spv: tests/wrapped_buffer_array.comp Makefile
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 -DSEPARATE $< -o $@
 	printf 'stage cs\ntg 1 1 1\nb 0 tex 3 tex_ubo 7 16 - -1 view=1 num=2\nb 1 ssbo 1 sbuf 0 -1 - -1\nb 2 samp 1 samp 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+fixture: $(B)/shaders/00000000feed9e07.spv
+$(B)/shaders/00000000feed9e07.spv: tests/wrapped_buffer_array.comp Makefile
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 3 tex_c2a -1 32 samp_c2a -1 soff=32 view=1 num=2 fetch1d=1\nb 1 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
 fixture: $(B)/shaders/00000000feed9e04.spv
 $(B)/shaders/00000000feed9e04.spv: tests/wrapped_buffer_table.comp Makefile
 	mkdir -p $(@D)
