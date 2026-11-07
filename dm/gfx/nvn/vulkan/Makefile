@@ -178,6 +178,25 @@ $(B)/t_replay: tests/storage_views.inc tests/bc_views.inc
 $(B)/t_replay: tests/empty_images.inc
 $(B)/t_replay: tests/empty_ms.inc
 $(B)/t_replay: tests/subresource_views.inc
+$(B)/t_replay: tests/sampler_reduction.inc
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sample_reduction.h
+fixture: $(B)/shaders/0000000000000075.spv $(B)/shaders/0000000000000076.spv $(B)/shaders/0000000000000077.spv $(B)/shaders/0000000000000078.spv
+$(B)/shaders/0000000000000077.spv: tests/sampler_reduction.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DARRAY $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/0000000000000078.spv: tests/sampler_reduction.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DARRAY -DSEPARATE $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 tex 1 tex 0 -1 - -1\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\nb 3 samp 1 samp 1 -1 - -1\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/0000000000000075.spv: tests/sampler_reduction.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/0000000000000076.spv: tests/sampler_reduction.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DSEPARATE $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 tex 1 tex 0 -1 - -1\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\nb 3 samp 1 samp 1 -1 - -1\n' > $(@:.spv=.vk.txt)
 $(B)/t_replay: tests/one_row_guest.inc ../../../android/tests/texture_coordinates_cases.h
 fixture: $(B)/shaders/0000000000000072.spv $(B)/shaders/0000000000000073.spv $(B)/shaders/0000000000000074.spv
 $(B)/shaders/0000000000000074.spv: tests/subresource_views.comp
@@ -534,3 +553,19 @@ one-row-guest-fixture: fixture
 	python3 ../../../android/tests/texture_query_shapes_fixture.py $(abspath $(B))/one-row-queries
 	cp $(B)/one-row-samples/export/*.spv $(B)/one-row-samples/export/*.vk.txt $(B)/shaders/
 	cp $(B)/one-row-queries/export/*.spv $(B)/one-row-queries/export/*.vk.txt $(B)/shaders/
+
+$(B)/t_sample_reduction: tests/t_sample_reduction.c spv_sample_reduction.h spv_texel_bias.h spv_texel_wide.inc
+	mkdir -p $(B)
+	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror -Wno-unused-function $(BUILD_CFLAGS) $< -o $@
+.PHONY: sampler-reduction-check
+sampler-reduction-check: $(B)/t_sample_reduction $(B)/shaders/0000000000000075.spv $(B)/shaders/0000000000000076.spv $(B)/shaders/0000000000000077.spv $(B)/shaders/0000000000000078.spv
+	$(B)/t_sample_reduction $(B)/shaders/0000000000000075.spv $(B)/reduction-combined.spv 0
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-combined.spv
+	$(B)/t_sample_reduction $(B)/shaders/0000000000000076.spv $(B)/reduction-separate.spv 3
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-separate.spv
+	$(B)/t_sample_reduction $(B)/shaders/0000000000000077.spv $(B)/reduction-array.spv 0
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-array.spv
+	$(B)/t_sample_reduction $(B)/shaders/0000000000000078.spv $(B)/reduction-array-separate.spv 3
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-array-separate.spv
+	$(B)/t_sample_reduction $(B)/shaders/0000000000000075.spv $(B)/reduction-no-import.spv 0 no-import
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-no-import.spv

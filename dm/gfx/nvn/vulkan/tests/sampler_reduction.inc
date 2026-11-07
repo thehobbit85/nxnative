@@ -1,0 +1,73 @@
+// The component-wise footprint oracle also backs the public DrawTexture test.
+// This path exercises an ordinary guest shader and separate texture/sampler slots.
+static void sampler_reduction(void) {
+    enum { slot = 1512 };
+    static const struct { float u, v, lod; int filter, mag; float expected[3]; int border; float bias; } cases[] = {
+        {.25f,.25f,1, NVN_MIN_FILTER_LINEAR,1, {4,1,7}},
+        {.5f,.5f,1, NVN_MIN_FILTER_LINEAR_MIPMAP_NEAREST,1, {12,9,15}},
+        {.375f,.375f,0, NVN_MIN_FILTER_LINEAR,1, {7,7,7}},
+        {.5f,.5f,.5f, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {8,1,15}},
+        {0,.125f,0, NVN_MIN_FILTER_LINEAR,1, {2,1,3}},
+        {.5f,.5f,1, NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST,0, {15,15,15}},
+        {.5f,.5f,.25f, NVN_MIN_FILTER_LINEAR_MIPMAP_NEAREST,1, {4,1,15}},
+        {.5f,.5f,.25f, NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST,0, {1,1,15}},
+        {0,.125f,0, NVN_MIN_FILTER_LINEAR,1, {.5f,0,1},1},
+        {-1,.125f,0, NVN_MIN_FILTER_LINEAR,1, {0,0,0},1},
+        {.25f,.25f,-1, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,0, {7,7,7}},
+        {.25f,.25f,1, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,0, {9,9,9}},
+        {.5f,.5f,.5f, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {12,9,15},0,.5f},
+    };
+    const NVNformat formats[] = {NVN_FORMAT_R32F,NVN_FORMAT_RGBA32F,NVN_FORMAT_RGBA8,NVN_FORMAT_DEPTH32F};
+    mtl_queue_activate(slot);
+    unsigned checks = 0;
+    for (int array = 0; array < 2; array++) for (int format = 0; format < 4; format++) {
+        tex_t texture = {.serial=0x17500+4*array+format, .d={.width=4,.height=4,.depth=array ? 2 : 1,.levels=2,
+            .target=array ? NVN_TEXTURE_TARGET_2D_ARRAY : NVN_TEXTURE_TARGET_2D,.format=formats[format]}};
+        nvn_tex_layout(&texture.d,&texture.L); mtl_reg_tex(slot,&texture,NULL);
+        float rgba[2][20][4]; uint8_t bytes[2][20][4]; float red[2][20];
+        for (int layer = 0; layer <= array; layer++) for (int i = 0; i < 20; i++) {
+            float value = i < 16 ? 1+2*(i%2)+4*(i/4%2) : 9+2*(i-16);
+            if (array && !layer) value += 100;
+            red[layer][i] = format == 3 ? value/128 : value;
+            memcpy(rgba[layer][i], (float[]){value,120-value,2*value,1}, sizeof rgba[layer][i]);
+            memcpy(bytes[layer][i], (uint8_t[]){value,120-value,2*value,255}, sizeof bytes[layer][i]);
+        }
+        list_t upload={0};
+        for (int layer = 0; layer <= array; layer++) for (int mip = 0; mip < 2; mip++) {
+            int offset = mip ? 16 : 0;
+            uintptr_t source = format == 0 || format == 3 ? (uintptr_t)(red[layer]+offset) :
+                format == 1 ? (uintptr_t)(rgba[layer]+offset) : (uintptr_t)(bytes[layer]+offset);
+            p_copy_b2t copy={.tex=&texture,.src=source,.has_view=1,.view={.set_levels=1,.base_level=mip},
+                .r={.width=4>>mip,.height=4>>mip,.zoffset=layer,.depth=1}};
+            put(&upload,OP_COPY_B2T,&copy,sizeof copy);
+        }
+        put(&upload,OP_END,NULL,0); mtl_sub_begin();mtl_exec(upload.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        for (int separate=0;separate<2;separate++) for (unsigned test=0;test<sizeof cases/sizeof *cases;test++) for (int mode=0;mode<3;mode++) {
+            const typeof(cases[0]) *c=cases+test;
+            float green_border = format == 1 ? 120 : format == 2 ? 120.0f/255 : 0;
+            samp_par sampler={.ws=c->border ? NVN_WRAP_MODE_CLAMP_TO_BORDER : NVN_WRAP_MODE_REPEAT,
+                .wt=NVN_WRAP_MODE_REPEAT,.wr=NVN_WRAP_MODE_REPEAT,.border={0,green_border,0,1},
+                .minf=c->filter,.magf=c->mag,.lod_bias=c->bias,.lod_max=10,.reduction=mode};
+            mtl_reg_samp(slot,&sampler);
+            float coordinate[]={c->u,c->v,c->lod,array}, result[4]; memset(result,0xcc,sizeof result);
+            list_t list={0};
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&sampler_reduction_program[array][separate],.stages=0x20);
+            RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=0,.h=((uint64_t)slot<<20)|slot);
+            RECORD(OP_BIND_SAMP,p_bind_handles,.stage=5,.first=1,.n=1,.h={(uint64_t)slot<<20});
+            RECORD(OP_BIND_UBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)coordinate,.size=sizeof coordinate);
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result,.size=sizeof result);
+            RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+            put(&list,OP_END,NULL,0); mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+            float expected[]={c->expected[mode],0,0,1};
+            if (format == 1 || format == 2) { expected[1]=120-c->expected[mode ? 3-mode : 0]; expected[2]=2*expected[0]; }
+            if (format==2) for (int ch=0;ch<3;ch++) expected[ch]/=255;
+            if (format==3) expected[0]/=128;
+            for (int ch=0;ch<4;ch++) if (!isfinite(result[ch]) || fabsf(result[ch]-expected[ch])>0.00001f)
+                die("sampler reduction array%d format%d separate%d case%u mode%d channel%d: %g expected %g",array,format,separate,test,mode,ch,result[ch],expected[ch]);
+            checks++;
+        }
+        mtl_reg_tex(slot,NULL,NULL);mtl_tex_release(&texture);
+    }
+    mtl_queue_forget(slot);
+    printf("Guest sampler average/min/max passed %u format, independent binding, mip and spatial footprint cases\n",checks);
+}
