@@ -8,6 +8,10 @@ $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: wrapped
 $(B)/t_wrapped_buffer: tests/t_wrapped_buffer.c spv_wrapped_buffer.h spv_texel_bias.h
 	mkdir -p $(B)
 	$(CC) $(CFLAGS) $< -o $@
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_mixed_wrapped.h
+$(B)/t_mixed_wrapped: tests/t_mixed_wrapped.c spv_mixed_wrapped.h spv_wrapped_buffer.h spv_texel_bias.h
+	mkdir -p $(B)
+	$(CC) $(CFLAGS) $< -o $@
 fixture: $(B)/shaders/00000000feed9e01.spv
 $(B)/shaders/00000000feed9e01.spv: tests/wrapped_buffer.comp
 	mkdir -p $(@D)

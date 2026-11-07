@@ -18,17 +18,17 @@ static int prepare_wrapped_buffers(shader_t **selected) {
             }
             pthread_mutex_unlock(&g_rmu);
         }
-        if (has_buffer && has_image) {
-            RED_ONCE(24,"mixed wrapped buffer and image arrays require per-element image interfaces");return 0;
+        if (has_buffer && has_image && (binding->table || !binding->count || binding->count>32)) {
+            RED_ONCE(24,"mixed wrapped descriptors require a fixed array of at most 32 elements");return 0;
         }
         if (has_buffer && binding->table && !g_texel_descriptor_tables) {
             RED_ONCE(24,"wrapped handle tables require nonuniform texel-buffer descriptor indexing");return 0;
         }
-        if (has_buffer) { wrapped[i]=1;any=1; }
+        if (has_buffer) { wrapped[i]=has_image ? 2 : 1;any=1; }
     }
     if (!any) return 1;
     for (shader_t *variant=base->wrapped_variants;variant;variant=variant->next_wrapped_variant)
-        if (!memcmp(variant->wrapped,wrapped,sizeof wrapped)) {
+        if (!memcmp(variant->wrapped,wrapped,(size_t)base->nb)) {
             *selected=variant;return variant->mod && variant->dsl;
         }
     shader_t *variant=malloc(sizeof *variant);
@@ -38,7 +38,22 @@ static int prepare_wrapped_buffers(shader_t **selected) {
     variant->fragment_variants=NULL;variant->cpp=VK_NULL_HANDLE;variant->cpl=VK_NULL_HANDLE;
     variant->mod=VK_NULL_HANDLE;variant->dsl=VK_NULL_HANDLE;
     memcpy(variant->wrapped,wrapped,sizeof wrapped);
-    for (int i=0;i<variant->nb;i++) if (wrapped[i]) variant->b[i].type=BT_UTB;
+    uint32_t binding=0;
+    for (int i=0;i<base->nb;i++) if (base->b[i].binding>=binding) binding=base->b[i].binding+1;
+    for (int i=0;i<base->nb;i++) {
+        if (wrapped[i]==1) variant->b[i].type=BT_UTB;
+        if (wrapped[i]!=2) continue;
+        if (variant->nb>DM_VK_MAX_BINDINGS-2 || binding>UINT32_MAX-2) {
+            RED_ONCE(24,"mixed descriptor interfaces exceed the shader binding capacity");free(variant);return 0;
+        }
+        sbind *image=&variant->b[i],*buffer=&variant->b[variant->nb];
+        *buffer=*image;buffer->binding=binding++;buffer->type=BT_UTB;
+        image->mixed_image=1;
+        variant->wrapped[variant->nb++]=1;
+        sbind *flags=&variant->b[variant->nb++];
+        *flags=(sbind){.binding=binding++,.type=BT_SSBO,.count=1,.kind=K_WRAP_FLAGS,.reg=i,.read_only=1};
+        variant->mixed[variant->nmixed++]=(mixed_wrapped_edit){image->binding,buffer->binding,flags->binding,image->count};
+    }
     variant->next_wrapped_variant=base->wrapped_variants;base->wrapped_variants=variant;
     char path[1024];size_t bytes;
     snprintf(path,sizeof path,"%s/%s.spv",g_vkdir,variant->key);

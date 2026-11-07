@@ -37,15 +37,15 @@ static void wrapped_buffer(void) {
     tex_t texture={.serial=0x179d0,.mem=(uint8_t *)(memory+1),
         .d={.width=COUNT,.height=1,.depth=1,.levels=1,.format=NVN_FORMAT_R32UI,.target=NVN_TEXTURE_TARGET_BUFFER}};
     nvn_tex_layout(&texture.d,&texture.L);mtl_reg_tex(SLOT,&texture,NULL);
-    tex_t ordinary={.serial=0x179d1,.d={.width=1,.height=1,.depth=1,.levels=1,
+    tex_t ordinary={.serial=0x179d1,.d={.width=17,.height=1,.depth=1,.levels=1,
         .format=NVN_FORMAT_R32UI,.target=NVN_TEXTURE_TARGET_2D}};
     nvn_tex_layout(&ordinary.d,&ordinary.L);mtl_reg_tex(SLOT+1,&ordinary,NULL);
-    uint32_t pixel=42;
+    uint32_t pixels[17];for (unsigned i=0;i<17;i++) pixels[i]=42+i;
     const unsigned positions[]={0,16383,16384,16388};
     for (unsigned run=0;run<4;run++) {
         for (unsigned i=0;i<COUNT+2;i++) memory[i]=i+17;
         memset(result,0,sizeof result);list_t list={0};
-        RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&ordinary,.src=(uintptr_t)&pixel,.r={.width=1,.height=1,.depth=1});
+        RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&ordinary,.src=(uintptr_t)pixels,.r={.width=17,.height=1,.depth=1});
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=run>=2 ? &wrapped_mixed_program : &wrapped_buffer_program,.stages=0x20);
         RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=2,.h={SLOT,SLOT+1});
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)(memory+1),.size=COUNT*4);
@@ -63,21 +63,26 @@ static void wrapped_buffer(void) {
         }
         assert(memory[0]==17 && memory[COUNT+1]==COUNT+18);
     }
-    tex_t short_view=texture;short_view.serial++;short_view.d.width=17;
+    tex_t short_view=texture;short_view.serial+=2;short_view.d.width=17;
     short_view.mem=(uint8_t *)(memory+5);nvn_tex_layout(&short_view.d,&short_view.L);
     mtl_reg_tex(SLOT+2,&short_view,NULL);
     uint64_t handles[5]={0,0,SLOT,SLOT+2,0};
     mtl_pool_add(handles,sizeof handles);
-    for (unsigned form=0;form<3;form++) {
+    for (unsigned run=0;run<9;run++) {
+        unsigned form=run<3 ? run : (run-3)%2;
+        int mixed=run>=3 && run<7,swap=run>=5 && run<7;
+        handles[3]=swap ? SLOT+1 : SLOT+2;
+        handles[4]=swap ? SLOT+2 : mixed ? SLOT+1 : 0;
         for (unsigned i=0;i<COUNT+2;i++) memory[i]=i+17;
         memset(result,0,sizeof result);list_t list={0};
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&wrapped_array_program[form],.stages=0x20);
-        RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=3,.h={SLOT,SLOT+2,0});
+        RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=3,.h={SLOT,handles[3],handles[4]});
         RECORD(OP_BIND_UBO,p_bind_buf,.stage=5,.index=7,.addr=(uintptr_t)handles,.size=sizeof handles);
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result,.size=sizeof result);
         RECORD(OP_DISPATCH,p_dispatch,.x=3,.y=1,.z=1);
         put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
-        const uint32_t expected[3][4]={{16402,16384,2,1},{38,17,1,1},{0,4096,1,1}};
+        const uint32_t expected[3][4]={{16402,16384,2,1},{swap ? 58 : 38,17,1,1},
+            {swap ? 22 : mixed ? 42 : 0,mixed ? 17 : 4096,1,1}};
         for (unsigned lane=0;lane<3;lane++) if (memcmp(result[0][lane],expected[lane],16))
             die("wrapped array form%u lane%u: %u,%u,%u,%u",form,lane,
                 result[0][lane][0],result[0][lane][1],result[0][lane][2],result[0][lane][3]);
@@ -87,5 +92,5 @@ static void wrapped_buffer(void) {
     mtl_reg_tex(SLOT+1,NULL,NULL);mtl_tex_release(&ordinary);
     mtl_pool_del(memory);mtl_pool_del(result);free(memory);
     wrapped_buffer_table();
-    puts("Wrapped buffer fetches preserve rows, aliases, uniform-handle arrays, nested descriptor helpers and compact nonuniform tables");
+    puts("Wrapped buffer fetches preserve rows, aliases, mixed image/buffer arrays, nested descriptor helpers and compact nonuniform tables");
 }

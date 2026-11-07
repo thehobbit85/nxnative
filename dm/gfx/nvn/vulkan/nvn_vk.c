@@ -24,6 +24,7 @@
 #include "spv_buffer_bias.h"
 #include "spv_texel_bias.h"
 #include "spv_wrapped_buffer.h"
+#include "spv_mixed_wrapped.h"
 #include "spv_descriptor_table.h"
 #include "spv_one_row.h"
 #include "spv_sample_reduction.h"
@@ -1483,7 +1484,8 @@ static int sampler_source(const char *kind) {
     if (!strcmp(kind,"samp_c2a")) return S_SAMP_C2;
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:!strcmp(kind,"samp_slots")?S_SAMP_SLOTS:S_NONE;
 }
-typedef struct { uint32_t binding, count, storage_image, logical_count; uint8_t type, kind, skind, read_only, table, pool, texel_atomic, multisample, depth_image; int16_t slot; int16_t reg, sreg; int32_t off, soff, view, num, driver_sampler; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
+enum { K_WRAP_FLAGS = K_MESH+1 };
+typedef struct { uint32_t binding, count, storage_image, logical_count; uint8_t type, kind, skind, read_only, table, pool, texel_atomic, multisample, depth_image, mixed_image; int16_t slot; int16_t reg, sreg; int32_t off, soff, view, num, driver_sampler; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 #include "spv_sampler_pairs.inc"
 #include "spv_storage_texels.inc"
 typedef struct vin_module {
@@ -1501,6 +1503,7 @@ struct shader {
     shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
     shader_t *wrapped_variants, *next_wrapped_variant;
     uint8_t wrapped[DM_VK_MAX_BINDINGS];
+    mixed_wrapped_edit mixed[DM_VK_MAX_BINDINGS]; size_t nmixed;
     int has_tables,logical_slots,raw_writes;
     sampler_pairs *sampler_images;
     texel_bias *texel_biases; size_t ntexel_biases; // sparse per-element prefixes of writable aliases
@@ -1689,8 +1692,15 @@ static uint32_t *image_shape_spv(uint32_t *spv, size_t *bytes, const shader_t *s
     return spv;
 }
 static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
+    if (spv && s->nmixed) {
+        size_t count;const char *reason;
+        uint32_t *adjusted=spv_mixed_wrapped(spv,*bytes/4,s->mixed,s->nmixed,&count,&reason);
+        free(spv);spv=adjusted;
+        if (!spv) LOG("[RED] vk: shader %s mixed descriptor lowering failed: %s",s->key,reason);
+        else *bytes=count*4;
+    }
     uint32_t wrapped[DM_VK_MAX_BINDINGS];size_t wrapped_count=0;
-    for (int i=0;i<s->nb;i++) if (s->wrapped[i]) wrapped[wrapped_count++]=s->b[i].binding;
+    for (int i=0;i<s->nb;i++) if (s->wrapped[i]==1) wrapped[wrapped_count++]=s->b[i].binding;
     if (spv && wrapped_count) {
         size_t count;const char *reason;
         uint32_t *adjusted=spv_wrapped_buffer(spv,*bytes/4,wrapped,wrapped_count,&count,&reason);
@@ -2727,6 +2737,12 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
     VkImageView dummy = sampled_dummy(b->view, b->num, b->multisample, b->depth_image);
     int tid = (int)(h & 0xfffff);
     if (!tid) { g_tex_miss[0]++; return dummy; }
+    if (b->mixed_image) {
+        pthread_mutex_lock(&g_rmu);
+        int buffer=tid<g_ntreg && g_treg[tid].ok && g_treg[tid].t.d.target==NVN_TEXTURE_TARGET_BUFFER;
+        pthread_mutex_unlock(&g_rmu);
+        if (buffer) return dummy;
+    }
     treg_t tr; vtex *v = registered_texture(tid, &tr);
     if (!tr.ok) { g_tex_miss[1]++; return dummy; }
     if (tr.t.d.target == NVN_TEXTURE_TARGET_BUFFER && b->view == VK_IMAGE_VIEW_TYPE_2D && (b->shape.fetch1d || b->kind == K_TEXU)) {
@@ -3428,6 +3444,20 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
             if (b->kind == K_CAPTURE_RECORDS || b->kind == K_CAPTURE_CONTROL) {
                 if (!capture) return VK_NULL_HANDLE;
                 *d = b->kind == K_CAPTURE_RECORDS ? capture->records : capture->control;
+            } else if (b->kind==K_WRAP_FLAGS) {
+                const sbind *source=&s->b[b->reg];
+                uint32_t flags[33]={0};
+                if (!source->count || source->count>32) return VK_NULL_HANDLE;
+                for (uint32_t element=0;element<source->count;element++) {
+                    int id=(int)(descriptor_handle(stage,source,element)&0xfffff);
+                    pthread_mutex_lock(&g_rmu);
+                    flags[element]=id>0 && id<g_ntreg && g_treg[id].ok && g_treg[id].t.d.target==NVN_TEXTURE_TARGET_BUFFER;
+                    pthread_mutex_unlock(&g_rmu);
+                }
+                VkDeviceSize bytes=(source->count+1)*sizeof *flags;
+                VkDeviceSize offset=ring_put(flags,bytes,g_props.limits.minStorageBufferOffsetAlignment);
+                if (offset==VK_WHOLE_SIZE) return VK_NULL_HANDLE;
+                *d=(VkDescriptorBufferInfo){C->ring,offset,bytes};
             } else if (b->kind==K_GMEM_MAP) {
                 if (!global_memory_map(d)) return VK_NULL_HANDLE;
             } else if (b->kind==K_GMEM_LOG) {
