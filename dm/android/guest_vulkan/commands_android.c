@@ -123,21 +123,31 @@ static void packed_impl_vkCmdPipelineBarrier(const packet_vkCmdPipelineBarrier *
     vkCmdPipelineBarrier(args->commandBuffer, args->srcStageMask, args->dstStageMask, args->dependencyFlags, args->memoryBarrierCount, args->pMemoryBarriers, args->bufferMemoryBarrierCount, args->pBufferMemoryBarriers, args->imageMemoryBarrierCount, args->pImageMemoryBarriers);
 }
 GVK(vkQueueSubmit, GVK_DEVICE, VkResult, VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits, VkFence fence) {
-    return vkQueueSubmit(queue, submitCount, pSubmits, fence);
+    dm_gfx_enter();
+    VkResult result = vkQueueSubmit(queue, submitCount, pSubmits, fence);
+    dm_gfx_leave();
+    return result;
 }
 GVK(vkQueueBindSparse, GVK_DEVICE, VkResult, VkQueue queue, uint32_t bindInfoCount, const VkBindSparseInfo* pBindInfo, VkFence fence) {
-    return vkQueueBindSparse(queue, bindInfoCount, pBindInfo, fence);
+    dm_gfx_enter();
+    VkResult result = vkQueueBindSparse(queue, bindInfoCount, pBindInfo, fence);
+    dm_gfx_leave();
+    return result;
 }
 GVK(vkQueueWaitIdle, GVK_DEVICE, VkResult, VkQueue queue) {
+    dm_gfx_enter();
     dm_thread_native_wait(1);
     VkResult result = vkQueueWaitIdle(queue);
     dm_thread_native_wait(0);
+    dm_gfx_leave();
     return result;
 }
 GVK(vkDeviceWaitIdle, GVK_DEVICE, VkResult, VkDevice device) {
+    dm_gfx_enter();
     dm_thread_native_wait(1);
     VkResult result = vkDeviceWaitIdle(device);
     dm_thread_native_wait(0);
+    dm_gfx_leave();
     return result;
 }
 GVK(vkCreateFence, GVK_DEVICE, VkResult, VkDevice device, const VkFenceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFence* pFence) {

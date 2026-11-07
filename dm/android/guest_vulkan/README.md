@@ -48,6 +48,9 @@ with 256 exact pixel checks, GPU buffer readback, semaphore-linked submissions,
 fence timeout/completion/reset, timestamps and command reuse. A ten-argument
 image barrier checks the argument packet used before switching host stacks.
 Native GPU waits release the guest core through the existing host wait interface.
+Submissions and queue/device idle calls also use the shared graphics lifecycle
+gate. The Android pause drain tracks every guest-created device and serializes
+with device destruction; it does not depend on the NVN executor's device.
 
 Descriptor templates use the Apple frontend's byte-layout interpretation and
 expand to ordinary native descriptor writes. The emulator's ranchu native

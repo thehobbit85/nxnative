@@ -125,9 +125,13 @@ GVK(vkCreateDevice, GVK_INSTANCE, VkResult, VkPhysicalDevice pd, const VkDeviceC
             LOG("[RED] guest Vulkan device pNext type %u is not bridged yet", p->sType);
             return VK_ERROR_FEATURE_NOT_PRESENT;
         }
-    return vkCreateDevice(pd, ci, NULL, out);
+    VkResult r = vkCreateDevice(pd, ci, NULL, out);
+    if (r != VK_SUCCESS) return r;
+    r = guest_vk_track_device(pd, *out);
+    if (r != VK_SUCCESS) { vkDestroyDevice(*out, NULL); *out = VK_NULL_HANDLE; }
+    return r;
 }
-GVK(vkDestroyDevice, GVK_DEVICE, void, VkDevice device, const VkAllocationCallbacks *allocation) { (void)allocation; vkDestroyDevice(device, NULL); }
+GVK(vkDestroyDevice, GVK_DEVICE, void, VkDevice device, const VkAllocationCallbacks *allocation) { (void)allocation; guest_vk_destroy_device(device); }
 GVK(vkGetDeviceQueue, GVK_DEVICE, void, VkDevice device, uint32_t family, uint32_t index, VkQueue *out) { vkGetDeviceQueue(device, family, index, out); }
 
 static const guest_vk_proc *find_proc(const char *name) {

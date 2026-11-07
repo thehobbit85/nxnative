@@ -38,6 +38,7 @@ vkCreateFence vkDestroyFence vkResetFences vkGetFenceStatus vkWaitForFences
 vkCreateQueryPool vkDestroyQueryPool vkGetQueryPoolResults vkCreateSemaphore vkDestroySemaphore
 '''.split()
 WAITS = {'vkQueueWaitIdle', 'vkDeviceWaitIdle', 'vkWaitForFences', 'vkGetQueryPoolResults'}
+GATED = {'vkQueueSubmit', 'vkQueueBindSparse', 'vkQueueWaitIdle', 'vkDeviceWaitIdle'}
 ALIASES = {name: name + 'KHR' for name in '''
 vkGetBufferMemoryRequirements2 vkGetImageMemoryRequirements2 vkGetImageSparseMemoryRequirements2
 vkBindBufferMemory2 vkBindImageMemory2
@@ -79,10 +80,13 @@ def render(names):
             out.append(f'GVK({name}, GVK_DEVICE, {ret}, ' + ', '.join(params) + ') {')
         if 'pAllocator' in args and not packed: out.append('    (void)pAllocator; // Same host-allocation policy as the Apple frontend.')
         forwarded = ['NULL' if a == 'pAllocator' else ('args->' if packed else '') + a for a in args]
+        if name in GATED: out.append('    dm_gfx_enter();')
         if name in WAITS: out.append('    dm_thread_native_wait(1);')
-        prefix = (ret + ' result = ') if name in WAITS else ('return ' if ret != 'void' else '')
+        prefix = (ret + ' result = ') if name in WAITS | GATED else ('return ' if ret != 'void' else '')
         out.append('    ' + prefix + name + '(' + ', '.join(forwarded) + ');')
-        if name in WAITS: out += ['    dm_thread_native_wait(0);', '    return result;']
+        if name in WAITS: out.append('    dm_thread_native_wait(0);')
+        if name in GATED: out.append('    dm_gfx_leave();')
+        if name in WAITS | GATED: out.append('    return result;')
         out.append('}')
         if name in ALIASES: out.append(f'GVK_ALIAS({ALIASES[name]}, {name}, GVK_DEVICE);')
     return '\n'.join(out) + '\n'

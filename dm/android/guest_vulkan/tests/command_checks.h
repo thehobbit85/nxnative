@@ -69,7 +69,12 @@ static __attribute__((noinline)) void command_checks(VkDevice device, PFN_vkGetD
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo submit[2] = {{.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb[0], .signalSemaphoreCount = 1, .pSignalSemaphores = &semaphore},
         {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1, .pWaitSemaphores = &semaphore, .pWaitDstStageMask = &wait_stage, .commandBufferCount = 1, .pCommandBuffers = &cb[1]}};
-    OK(vkQueueSubmit(queue, 2, submit, fence)); OK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+    OK(vkQueueSubmit(queue, 2, submit, fence));
+#ifndef TEST_NATIVE_CONTROL
+    dm_vk_drain(); // The Android pause hook must include guest-created devices.
+    OK(vkGetFenceStatus(device, fence));
+#endif
+    OK(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
     OK(vkGetFenceStatus(device, fence));
     uint64_t stamps[2]; OK(vkGetQueryPoolResults(device, queries, 0, 2, sizeof stamps, stamps, sizeof stamps[0], VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT));
     assert(stamps[1] >= stamps[0] && stamps[1]);

@@ -8,6 +8,11 @@
 static uintptr_t guest_low, guest_high;
 static unsigned stack_switches;
 static unsigned wait_entries, wait_depth;
+static unsigned graphics_entries, graphics_depth;
+__thread _Atomic int dm_host_work;
+void dm_gfx_enter(void) { ++graphics_entries; ++graphics_depth; }
+void dm_gfx_leave(void) { assert(graphics_depth); --graphics_depth; }
+void dm_vk_drain(void);
 void dm_thread_native_wait(int entering) {
     if (entering) { ++wait_entries; ++wait_depth; }
     else { assert(wait_depth); --wait_depth; }
@@ -137,7 +142,7 @@ int main(void) {
     on_stack(guest_high, dispatch_test);
     assert(stack_switches > 20); munmap(memory, page * 2);
 #ifdef TEST_COMMANDS
-    assert(wait_entries >= 16 && !wait_depth);
+    assert(wait_entries >= 16 && !wait_depth && graphics_entries >= 16 && !graphics_depth);
 #endif
     puts("guest Vulkan dispatch: scopes, extension filtering, two independent devices and guarded 8 KiB guest stack passed");
 }

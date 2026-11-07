@@ -5,6 +5,11 @@
 
 enum { GVK_GLOBAL, GVK_INSTANCE, GVK_DEVICE };
 typedef struct { const char *name; PFN_vkVoidFunction fn; unsigned scope; } guest_vk_proc;
+// Shared graphics lifecycle gate, and the guest-device list drained on Android pause.
+void dm_gfx_enter(void);
+void dm_gfx_leave(void);
+VkResult guest_vk_track_device(VkPhysicalDevice physical, VkDevice device);
+void guest_vk_destroy_device(VkDevice device);
 #define GVK_RECORD(name, target, scope_) \
     __attribute__((used, DM_SECTION(dmguestvk))) static const guest_vk_proc gp_##name = {#name, (PFN_vkVoidFunction)target, scope_}; \
     __attribute__((used, DM_SECTION(swhle))) static const hle_ent ge_##name = {#name, (void *)target}
