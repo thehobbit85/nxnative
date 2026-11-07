@@ -1,0 +1,42 @@
+#version 450
+#ifndef FRAGMENT
+layout(local_size_x=1) in;
+#endif
+#ifdef ARRAY
+#define TEXTURE textureCubeArray
+#define SAMPLER samplerCubeArray
+#define COORD direction
+#else
+#define TEXTURE textureCube
+#define SAMPLER samplerCube
+#define COORD direction.xyz
+#endif
+#ifdef SEPARATE
+layout(binding=0) uniform TEXTURE source;
+layout(binding=3) uniform sampler filtering;
+#define SOURCE SAMPLER(source,filtering)
+#else
+layout(binding=0) uniform SAMPLER source;
+#define SOURCE source
+#endif
+#ifdef FRAGMENT
+layout(location=0) out vec4 value;
+#else
+layout(binding=1,std430) buffer Result { vec4 value; };
+#endif
+layout(binding=2,std140) uniform Parameters { vec4 direction, dx, dy, lod; } params;
+void main() {
+    vec4 direction=params.direction;
+#ifdef FRAGMENT
+    direction.xyz+=(gl_FragCoord.x-.5)*params.dx.xyz+(gl_FragCoord.y-.5)*params.dy.xyz;
+#ifdef QUERY
+    value=vec4(textureQueryLod(SOURCE,direction.xyz),0,1);
+#else
+    value=texture(SOURCE,COORD);
+#endif
+#elif defined(GRADIENTS)
+    value=textureGrad(SOURCE,COORD,params.dx.xyz,params.dy.xyz);
+#else
+    value=textureLod(SOURCE,COORD,params.lod.x);
+#endif
+}

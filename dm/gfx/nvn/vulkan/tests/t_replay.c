@@ -30,6 +30,7 @@ static prog_t empty_ms_program = {.nstage=1};
 static prog_t subresource_program[3] = {{.nstage=1}, {.nstage=1}, {.nstage=1}};
 static prog_t one_row_guest_program[2][2] = {{{.nstage=1},{.nstage=1}},{{.nstage=1},{.nstage=1}}};
 static prog_t sampler_reduction_program[13][5][2];
+static prog_t cube_reduction_program[16];
 static prog_t sampler_array_program[3][2][2];
 static prog_t sampler_compare_program[12][2];
 static prog_t layered_program[2]={{.nstage=2},{.nstage=2}};
@@ -130,6 +131,11 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
             else { key[4]=0xfe; key[5]=0xed; key[6]=0x99; key[7]=0xb1+8*form+2*constant+separate; }
             return 1;
         }
+    for (int i=0;i<16;i++) if (p==&cube_reduction_program[i]) {
+        assert(stage<(i>=8 ? 2u : 1u));memset(key,0,8);
+        if (i>=8 && !stage) key[7]=0x35;
+        else { key[4]=0xfe;key[5]=0xed;key[6]=0xb1;key[7]=i; }return 1;
+    }
     for (int i=0; i<3; i++) if (p == &subresource_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x72+i; return 1; }
     for (int form=0; form<13; form++) for (int array=0; array<5; array++) for (int i=0; i<2; i++) if (p == &sampler_reduction_program[form][array][i]) {
         int fragment = (form >= 4 && form < 8) || form >= 10;
@@ -659,6 +665,7 @@ static void float_image_views(void) {
 #include "mesh_replay.inc"
 #include "one_row_guest.inc"
 #include "sampler_reduction.inc"
+#include "cube_reduction.inc"
 #include "bc_views.inc"
 static void empty_sampled_slots(void) {
     enum { slot=1462 };
@@ -3371,6 +3378,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_SAMPLER_COMPARE")) { sampler_reduction_compare(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_ARRAY")) { sampler_reduction_arrays(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_REDUCTION")) { sampler_reduction(); sampler_reduction_arrays(); sampler_reduction_compare(); return 0; }
+    if (getenv("DM_VK_TEST_CUBE_REDUCTION")) { cube_reduction(); return 0; }
     if (getenv("DM_VK_TEST_BC_VIEWS")) { compressed_color_views(); return 0; }
     if (getenv("DM_VK_TEST_EMPTY_SAMPLED")) { empty_sampled_slots(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
@@ -3430,7 +3438,7 @@ int main(void) {
     feedback_capture();
     float_image_views();
     depth_image_views();
-    cube_ranges();
+    cube_ranges();cube_reduction();
     storage_image_views();
     compressed_color_views();
     empty_sampled_slots();
