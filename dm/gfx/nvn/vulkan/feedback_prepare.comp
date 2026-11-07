@@ -4,13 +4,15 @@
 layout(local_size_x=1) in;
 layout(set=0,binding=0,std430) buffer Control { uint offsets[4]; uint args[4]; } state;
 layout(set=0,binding=1,std430) buffer Jobs { uint words[]; } jobs;
+layout(set=0,binding=2,std430) readonly buffer Indirect { uint count; } indirect;
 layout(push_constant) uniform Draw {
     uvec4 stride;
     uvec4 capacity;
-    uint requested, primitive, job_words;
+    uint requested, primitive, job_words, use_indirect;
 } draw;
 void main() {
     uint n = draw.requested;
+    if (draw.use_indirect != 0) n = min(n, indirect.count);
     for (uint b=0; b<4; b++) if (draw.stride[b] != 0) {
         uint available = draw.capacity[b] - min(draw.capacity[b], state.offsets[b]);
         n = min(n, available / draw.stride[b]);

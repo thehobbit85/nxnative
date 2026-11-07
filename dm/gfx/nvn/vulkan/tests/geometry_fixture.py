@@ -26,7 +26,9 @@ def main():
         shader.write_bytes(passthrough_shader())
         key = '00000000feed9c02'
         jobs = work / 'jobs.json'
-        jobs.write_text(json.dumps([dict(key=key, stage='gs', code=str(shader), tex={}, img={}, attr={}, fout={})]))
+        feedback = [dict(stride=16, outputs=[[0, 1], [1, 3]]), [],
+                    dict(stride=8, outputs=[[0, 1], [0, 1]]), []]
+        jobs.write_text(json.dumps([dict(key=key, stage='gs', code=str(shader), tex={}, img={}, attr={}, fout={}, tf=feedback)]))
         previous = os.environ.get('DMSH_SPV_CAPTURE')
         os.environ['DMSH_SPV_CAPTURE'] = str(captured)
         try:
@@ -43,12 +45,13 @@ def main():
         vertex = b'''#version 450
 layout(location=0) in vec4 position;
 layout(location=0) out vec4 value;
-void main() { gl_Position=position; value=vec4(0,0,0,1); }
+layout(location=1) out vec4 coordinates;
+void main() { gl_Position=position; value=vec4(0,0,0,1); coordinates=vec4(position.xy,0,1); }
 '''
         fragment = b'''#version 450
 layout(location=0) in vec4 value;
 layout(location=0) out vec4 color;
-void main() { color=value; }
+void main() { color=vec4(value.x,0,0,1); }
 '''
         for name, stage, source in [('00000000feed9c01', 'vs', vertex), ('00000000feed9c03', 'ps', fragment)]:
             data = subprocess.check_output([os.environ.get('GLSLC', 'glslc'), '--target-env=vulkan1.1',

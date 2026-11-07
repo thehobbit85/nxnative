@@ -38,10 +38,6 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
         RED_ONCE(122,"geometry capture needs a vertex shader with storage writes and no tessellation");
         return;
     }
-    if (S.feedback_active) {
-        RED_ONCE(123,"geometry transform-feedback packing remains unavailable");
-        return;
-    }
     int primitive=draw ? draw->prim : indexed->prim;
     int count=draw ? draw->count : indexed->count;
     int instances=draw ? draw->instances : indexed->instances;
@@ -106,9 +102,21 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
     }
     uint64_t emitted=groups*geometry.vertices;
     uint64_t output_width=geometry.output==1 ? 1 : geometry.output==6 ? 2 : 3;
+    uint32_t feedback_count=S.feedback_active && reader->feedback_layout ?
+        feedback_capacity(reader->feedback_layout,emitted*output_width) : 0;
+    shader_t *feedback_entry=NULL;
+    if (feedback_count) {
+        feedback_entry=feedback_capture_shader(reader);
+        if (!feedback_entry || !feedback_entry->mod || !feedback_entry->capture_entry ||
+            !feedback_entry->feedback_layout ||
+            memcmp(feedback_entry->feedback_layout,reader->feedback_layout,sizeof *reader->feedback_layout)) {
+            free(order);RED_ONCE(123,"geometry feedback needs its exported reader capture entry");return;
+        }
+    }
     VkDeviceSize sizes[]={records*GEO_CAPTURE_WORDS*4,emitted*geometry.stride*4,
         groups*geometry.index_stride*4,32,map_words*4,emitted*output_width*4,
-        sizeof(VkDrawIndexedIndirectCommand),(groups+(groups+63)/64)*4,24};
+        sizeof(VkDrawIndexedIndirectCommand),(groups+(groups+63)/64)*4,24,
+        feedback_count ? emitted*GEO_CAPTURE_WORDS*4 : 0,feedback_count ? 24 : 0};
     VkDeviceSize alignment=g_props.limits.minStorageBufferOffsetAlignment;
     if (alignment<g_props.limits.minUniformBufferOffsetAlignment) alignment=g_props.limits.minUniformBufferOffsetAlignment;
     if (alignment<g_props.limits.minTexelBufferOffsetAlignment) alignment=g_props.limits.minTexelBufferOffsetAlignment;
@@ -183,6 +191,26 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
                 buffer_written(write->addr,write->size,write->buf,write->off,write->p);
             }
             geometry_pack(&geometry,(uint32_t)groups,ranges[7]);
+            if (feedback_count) {
+                // Capture each reader vertex once. Strip decomposition can
+                // repeat an output index, so the later gather expands those
+                // references without racing writes to the same record.
+                uint32_t reader_control[]={0,(uint32_t)emitted,0,1,0,(uint32_t)emitted};
+                memcpy(mapped+ranges[10].offset,reader_control,sizeof reader_control);
+                G.phase=1;G.vertex=feedback_entry;
+                G.capture=(capture_draw){.records=ranges[9],.control=ranges[10]};
+                S.rasterizer_discard=1;
+                p_draw points={.prim=NVN_DRAW_PRIMITIVE_POINTS,.count=(int)emitted,.instances=1};
+                uint64_t before=g_stat_draws;
+                draw_direct(&points,NULL,draw_index);
+                S.rasterizer_discard=discard;
+                if (g_stat_draws!=before) {
+                    capture_draw packed={.records=ranges[9],.order=G.indices,.indirect=G.arguments,
+                        .layout=reader->feedback_layout,.source_records=(uint32_t)emitted,
+                        .capacity=feedback_count,.primitive=(uint32_t)output_width};
+                    feedback_finish(&packed);
+                }
+            }
             if (!discard) {
                 G.phase=2;G.vertex=reader;
                 p_draw raster={.prim=geometry.output==1 ? NVN_DRAW_PRIMITIVE_POINTS : geometry.output==6 ? NVN_DRAW_PRIMITIVE_LINES : NVN_DRAW_PRIMITIVE_TRIANGLES,
