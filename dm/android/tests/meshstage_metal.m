@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #define INPUT_WORDS 400u
-#define OUTPUT_WORDS (13u + 35u * 424u + 17u)
+#define OUTPUT_WORDS (13u + 35u * 445u + 17u)
 static uint32_t bits(unsigned n) {
     const uint32_t values[] = {0x80000000, 0x7fc12345, 1, 0xff800000, 0x3f800000, 0xdeadbeef, 0x007fffff, 0};
     return values[n % 8];
@@ -17,7 +17,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     if (argc != 3) return 2;
     unsigned variant = (unsigned)strtoul(argv[2], NULL, 10); if (variant > 4) return 2;
     const unsigned threads[] = {8, 129, 32, 8, 1};
-    const unsigned words = variant == 2 || variant == 3 ? 424 : 20;
+    const unsigned words = variant == 2 || variant == 3 ? 445 : 20;
     id<MTLDevice> device = MTLCreateSystemDefaultDevice(); if (!device) return 77;
     NSError *error = nil;
     NSString *path = [@(argv[1]) stringByAppendingPathComponent:[NSString stringWithFormat:@"00000000feed001%u.metallib", variant]];
