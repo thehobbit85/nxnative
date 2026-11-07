@@ -915,7 +915,11 @@ static void bc_decode(int dec, const uint8_t *src, size_t src_pitch, uint32_t w,
 }
 
 // ---------- Images ----------
-typedef struct { uint64_t key; VkImageView v; } vview;
+typedef struct {
+    VkFormat format; VkImageViewType type; VkImageUsageFlags usage;
+    VkComponentMapping components; VkImageSubresourceRange range;
+} image_view_key;
+typedef struct { image_view_key key; VkImageView v; } vview;
 struct vtex {
     uint64_t serial; VkImage img; VkSampleCountFlagBits samples; VkImageUsageFlags usage; VkDeviceMemory m; int blk; VkDeviceSize moff, msize; fmt_t f; int nvn_fmt, target;
     uint32_t w, h, d, levels, layers; VkImageAspectFlags aspect; int uploaded; _Atomic int gpu;
@@ -1132,6 +1136,13 @@ static fmt_t view_format(const vtex *v, const view_t *view, int has_view) {
     if (!f.f || f.dec != v->f.dec || (f.dec && f.f != v->f.f)) return v->f;
     return f;
 }
+static int depth_red_view(const vtex *v, fmt_t requested) {
+    return (v->f.f == VK_FORMAT_D32_SFLOAT && requested.f == VK_FORMAT_R32_SFLOAT) ||
+           (v->f.f == VK_FORMAT_D16_UNORM && requested.f == VK_FORMAT_R16_UNORM);
+}
+static int sampled_stencil(const vtex *v, const tex_t *texture, const view_t *view, int has_view) {
+    return v->f.stencil && (has_view && view->set_dsmode ? view->dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL : texture->stencil);
+}
 static void sampled_swizzle(uint8_t swz[4], fmt_t f, const tex_t *t, const view_t *vw, int has_vw) {
     if (t->set_swz) for (int i = 0; i < 4; i++) swz[i] = (uint8_t)(t->swz >> (3 * i) & 7);
     if (has_vw && vw->set_swizzle) memcpy(swz, vw->swz, 4);
@@ -1148,6 +1159,19 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
     fmt_t f = view_format(v, vw, has_vw);
     uint8_t swz[4] = {2, 3, 4, 5};
     if (!rt && !storage) sampled_swizzle(swz, f, t, vw, has_vw);
+    if (purpose == VIEW_SAMPLED && depth_red_view(v, f)) {
+        // Depth and colour formats cannot alias in VkImageView. Sample the
+        // original depth plane and compose (R,0,0,1) with the guest swizzle.
+        f = v->f;
+        for (int i = 0; i < 4; i++) {
+            if (swz[i] == NVN_TEXTURE_SWIZZLE_G || swz[i] == NVN_TEXTURE_SWIZZLE_B) swz[i] = NVN_TEXTURE_SWIZZLE_ZERO;
+            if (swz[i] == NVN_TEXTURE_SWIZZLE_A) swz[i] = NVN_TEXTURE_SWIZZLE_ONE;
+        }
+    }
+    if ((v->f.depth || f.depth) && f.f != v->f.f) {
+        RED_ONCE(117, "incompatible depth image view (format %d as %d)", v->f.f, f.f);
+        return VK_NULL_HANDLE;
+    }
     VkImageViewType vt;
     if (want_type >= 0) vt = (VkImageViewType)want_type;
     else switch (target) {
@@ -1167,16 +1191,19 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
     if ((vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_2D) && nly > 1) nly = 1;
     if (vt == VK_IMAGE_VIEW_TYPE_CUBE) { nly = 6; if (b0 + 6 > v->layers) b0 = v->layers >= 6 ? v->layers - 6 : 0; }
     if (vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) { nly -= nly % 6; if (!nly) { vt = VK_IMAGE_VIEW_TYPE_CUBE; nly = 6; b0 = 0; } }
-    VkImageAspectFlags asp = v->aspect; if (asp & VK_IMAGE_ASPECT_DEPTH_BIT && !rt) asp = VK_IMAGE_ASPECT_DEPTH_BIT;   // sampling reads depth
-    uint64_t key = (uint64_t)f.f | (uint64_t)vt << 16 | (uint64_t)bl << 20 | (uint64_t)nl << 25 | (uint64_t)b0 << 30 | (uint64_t)nly << 42 | (uint64_t)(swz[0] | swz[1] << 3 | swz[2] << 6 | swz[3] << 9) << 50 | (uint64_t)storage << 62 | (uint64_t)rt << 63;
-    for (int i = 0; i < v->nviews; i++) if (v->views[i].key == key) return v->views[i].v;
-    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, v->img, vt, f.f,
-                                {(VkComponentSwizzle)(swz[0] + 1), (VkComponentSwizzle)(swz[1] + 1), (VkComponentSwizzle)(swz[2] + 1), (VkComponentSwizzle)(swz[3] + 1)}, {asp, bl, nl, b0, nly}};
+    VkImageAspectFlags asp = v->aspect;
+    if (purpose == VIEW_SAMPLED && v->f.depth)
+        asp = sampled_stencil(v, t, vw, has_vw) ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
+    VkComponentMapping components = {(VkComponentSwizzle)(swz[0]+1), (VkComponentSwizzle)(swz[1]+1),
+                                     (VkComponentSwizzle)(swz[2]+1), (VkComponentSwizzle)(swz[3]+1)};
+    if (storage) components = (VkComponentMapping){0};
     // A sampled sRGB alias of a storage-capable UNORM image need only support
     // sampling. Do not make aliased formats inherit unrelated image usages.
     VkImageUsageFlags usage = rt ? (v->f.depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
                                  : storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
     if (!(v->usage & usage)) return VK_NULL_HANDLE;
+    image_view_key key = {f.f, vt, usage, components, {asp, bl, nl, b0, nly}};
+    for (int i = 0; i < v->nviews; i++) if (!memcmp(&v->views[i].key, &key, sizeof key)) return v->views[i].v;
     if (f.f != v->f.f) {
         VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, f.f, &fp);
         VkFormatFeatureFlags need = rt ? (v->f.depth ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
@@ -1184,8 +1211,7 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
         if (!(fp.optimalTilingFeatures & need)) return VK_NULL_HANDLE;
     }
     VkImageViewUsageCreateInfo view_usage = {VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, NULL, usage};
-    vi.pNext = &view_usage;
-    if (storage) vi.components = (VkComponentMapping){0};
+    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, &view_usage, 0, v->img, vt, f.f, components, key.range};
     VkImageView view; VkResult r = vkCreateImageView(g_dev, &vi, NULL, &view);
     if (r != VK_SUCCESS) { static int n; if (n++ < 8) LOG("[RED] vk: image view (format %d type %d levels %u+%u layers %u+%u) failed (%d)", f.f, vt, bl, nl, b0, nly, (int)r); return VK_NULL_HANDLE; }
     v->views = realloc(v->views, (v->nviews + 1) * sizeof *v->views); v->views[v->nviews++] = (vview){key, view};
@@ -1248,11 +1274,15 @@ void mtl_prog_release(prog_t *p) { (void)p; }
 
 // Samplers, cached by their parameters
 #include "../nvn_border.h"
-enum { BORDER_SWIZZLED=1, BORDER_PACKED=2, BORDER_MIXED_FORMATS=4, BORDER_MIXED_NUMBERS=8, BORDER_FLOAT_AND_INT=16 };
+enum { BORDER_SWIZZLED=1, BORDER_PACKED=2, BORDER_MIXED_FORMATS=4, BORDER_MIXED_NUMBERS=8, BORDER_FLOAT_AND_INT=16, BORDER_STENCIL=32 };
 typedef struct { VkFormat format; unsigned flags; } border_view;
 static border_view sampler_view(const vtex *v, const treg_t *tr) {
     fmt_t f = view_format(v,&tr->v,tr->has_v);
-    border_view result = {f.f};
+    border_view result = {depth_red_view(v,f) ? v->f.f : f.f};
+    if (sampled_stencil(v,&tr->t,&tr->v,tr->has_v)) {
+        result.format = v->f.f;
+        result.flags |= BORDER_STENCIL;
+    }
     if (!g_border_from_image && (f.noalpha || tr->t.set_swz || (tr->has_v && tr->v.set_swizzle))) {
         uint8_t swz[] = {2,3,4,5};
         sampled_swizzle(swz,f,&tr->t,&tr->v,tr->has_v);
@@ -1266,6 +1296,9 @@ static VkClearColorValue clear_value(const float rgba[4], enum clear_type type);
 static VkSamplerAddressMode wrap(int w) {
     switch (w) { case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT; case 6: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; case 4: case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
                  case 2: case 3: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE; default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; }
+}
+static enum clear_type border_number(border_view view) {
+    return view.flags & BORDER_STENCIL ? CLEAR_UINT : clear_color_type(view.format);
 }
 static VkSampler sampler_for(samp_par p, border_view view) {
     int border = p.ws == 4 || p.ws == 5 || p.wt == 4 || p.wt == 5 || p.wr == 4 || p.wr == 5;
@@ -1291,7 +1324,7 @@ static VkSampler sampler_for(samp_par p, border_view view) {
         RED_ONCE(105, "independent sampler may select both integer and floating images, clamping border axes to edge");
     } else if (border) {
         int stock = nvn_stock_border(p.border);
-        enum clear_type type = clear_color_type(view.format);
+        enum clear_type type = border_number(view);
         const VkBorderColor fixed[][3] = {
             {VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE},
             {VK_BORDER_COLOR_INT_TRANSPARENT_BLACK,VK_BORDER_COLOR_INT_OPAQUE_BLACK,VK_BORDER_COLOR_INT_OPAQUE_WHITE}};
@@ -2846,10 +2879,10 @@ static void include_border_view(border_view *common, border_view view) {
         default: break;
     }
     if (!common->format) { *common = view; return; }
+    enum clear_type first = border_number(*common), next = border_number(view);
     common->flags |= view.flags;
-    if (common->format == view.format) return;
+    if (common->format == view.format && first == next) return;
     common->flags |= BORDER_MIXED_FORMATS;
-    enum clear_type first = clear_color_type(common->format), next = clear_color_type(view.format);
     if (first != next) common->flags |= BORDER_MIXED_NUMBERS;
     if ((first == CLEAR_FLOAT) != (next == CLEAR_FLOAT)) common->flags |= BORDER_FLOAT_AND_INT;
 }

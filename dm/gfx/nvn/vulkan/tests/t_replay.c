@@ -564,6 +564,8 @@ static void float_image_views(void) {
     puts("Float sampling of 32-bit integer textures preserves filtering, mip, array layer and swizzle");
 }
 
+#include "depth_views.inc"
+
 static void custom_borders(void) {
     int native;
     replay_features(&native,NULL);
@@ -3194,6 +3196,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_DISCARD")) { graphics_storage(); return 0; }
     if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
+    if (getenv("DM_VK_TEST_DEPTH_VIEWS")) { depth_image_views(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
     if (getenv("DM_VK_TEST_CUSTOM_BORDER")) { custom_borders(); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features(NULL,NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
@@ -3248,6 +3251,7 @@ int main(void) {
     dlss_spatial_corpus(1); dlss_temporal_corpus();
     feedback_capture();
     float_image_views();
+    depth_image_views();
     custom_borders();
     compute_driver_constants();
     many_resource_bindings();
