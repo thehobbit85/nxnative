@@ -9,15 +9,41 @@ void main() {
     values[1] = uvec4(textureSize(sampledVolume, 0), textureQueryLevels(sampledVolume));
     imageStore(storageVolume, ivec3(2, 2, 3), uvec4(0x91827364u));
 }
+#elif defined(ONE_ROW)
+layout(binding=0) uniform usampler2D sampledLine;
+layout(binding=1) uniform usampler2DArray sampledArray;
+layout(binding=2, r32ui) uniform uimage2DArray storageArray;
+layout(binding=3, std430) buffer Results { uvec4 values[2]; };
+void main() {
+    values[0] = uvec4(texelFetch(sampledLine, ivec2(1, 0), 0).r,
+        texelFetch(sampledArray, ivec3(2, 0, 1), 0).r, textureSize(sampledArray, 0).xz);
+    values[1] = uvec4(textureSize(sampledLine, 0).x, textureQueryLevels(sampledLine), imageSize(storageArray).xz);
+    imageStore(storageArray, ivec3(2, 0, 1), uvec4(0x91827364u));
+}
 #else
 layout(binding=0) uniform usampler1D sampledLine;
 layout(binding=1) uniform usampler1DArray sampledArray;
-layout(binding=2, r32ui) uniform uimage1DArray storageArray;
-layout(binding=3, std430) buffer Results { uvec4 values[2]; };
+layout(binding=2, r32ui) uniform coherent uimage1DArray storageArray;
+layout(binding=3, std430) buffer Results { uvec4 values[6]; };
+layout(binding=4, r32ui) uniform coherent uimage2DArray sameStorage;
+layout(binding=5) uniform usampler2D sameSampled;
 void main() {
     values[0] = uvec4(texelFetch(sampledLine, 1, 0).r, texelFetch(sampledArray, ivec2(2, 1), 0).r,
         textureSize(sampledArray, 0));
     values[1] = uvec4(textureSize(sampledLine, 0), textureQueryLevels(sampledLine), imageSize(storageArray));
+    values[2] = uvec4(textureLod(sampledLine, 0.375, 0).r,
+        textureLodOffset(sampledLine, 0.125, 0, 1).r,
+        textureGrad(sampledLine, 0.375, 0, 0).r,
+        textureProjLod(sampledLine, vec2(0.75, 2), 0).r);
+    values[3] = uvec4(textureLod(sampledArray, vec2(0.625, 1), 0).r,
+        textureLodOffset(sampledArray, vec2(0.375, 1), 0, 1).r,
+        texelFetchOffset(sampledLine, 0, 0, 1).r, imageLoad(storageArray, ivec2(2, 1)).r);
+    values[4] = uvec4(textureGradOffset(sampledLine, 0.125, 0, 0, 1).r,
+        textureProjLodOffset(sampledLine, vec2(0.25, 2), 0, 1).r,
+        texelFetch(sameSampled, ivec2(1, 0), 0).r, imageAtomicAdd(storageArray, ivec2(1, 1), 10));
     imageStore(storageArray, ivec2(2, 1), uvec4(0x91827364u));
+    memoryBarrierImage();
+    values[5] = uvec4(imageLoad(sameStorage, ivec3(2, 0, 1)).r,
+        imageAtomicAdd(sameStorage, ivec3(1, 0, 1), 20), imageSize(sameStorage).xz);
 }
 #endif
