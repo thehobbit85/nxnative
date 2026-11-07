@@ -240,7 +240,11 @@ $(B)/t_replay: tests/empty_images.inc
 $(B)/t_replay: tests/empty_ms.inc
 $(B)/t_replay: tests/subresource_views.inc
 $(B)/t_replay: tests/sampler_reduction.inc tests/cube_reduction.inc tests/draw_texture_anisotropy.inc
-$(B)/t_replay: tests/draw_texture_border.inc
+$(B)/t_replay: tests/draw_texture_border.inc tests/sampler_border.inc
+.PHONY: sampler-border-fixture
+fixture: sampler-border-fixture
+sampler-border-fixture:
+	GLSLC="$(GLSLC)" python3 tests/sampler_border_fixture.py $(B)/shaders
 $(B)/t_replay: tests/sampler_anisotropy.inc
 $(B)/t_replay: tests/sampler_gather.inc
 .PHONY: sampler-gather-fixture
@@ -922,3 +926,16 @@ pipeline-cache-test: $(B)/t_pipeline_cache
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: pipeline_cache.inc ../dmsh_chain.h
 
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: diagnostic_present.inc present_source.inc
+
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sample_border.h custom_border.inc
+
+$(B)/t_sample_border: tests/t_sample_border.c spv_sample_border.h spv_wrapped_buffer.h spv_texel_bias.h
+	mkdir -p $(B)
+	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror -Wno-unused-function $(BUILD_CFLAGS) $< -o $@
+.PHONY: sampler-border-check
+sampler-border-check: sampler-border-fixture $(B)/t_sample_border
+	@set -e; for input in $(B)/shaders/00000000feedb4*.spv; do \
+	  key=$${input##*/}; value=$${key%.spv}; binding=$$((0x$$value % 2 * 3)); \
+	  $(B)/t_sample_border "$$input" "$(B)/border-$$key" "$$binding"; \
+	  $(SPIRV_VAL) --target-env vulkan1.1 "$(B)/border-$$key"; \
+	done

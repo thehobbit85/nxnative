@@ -1,0 +1,29 @@
+#version 450
+#ifdef SEPARATE
+layout(set=0,binding=0) uniform texture2D sourceImage;
+layout(set=0,binding=3) uniform sampler sourceSampler;
+#define image sampler2D(sourceImage,sourceSampler)
+#else
+layout(set=0,binding=0) uniform sampler2D image;
+#endif
+layout(set=0,binding=2,std140) uniform Parameters { vec4 coordinate; } args;
+#if FORM==3
+layout(location=0) out vec4 result;
+#else
+layout(local_size_x=1) in;
+layout(set=0,binding=1,std430) buffer Output { vec4 result; } outputBuffer;
+#define result outputBuffer.result
+#endif
+void main() {
+#if FORM==0
+    result=textureLod(image,args.coordinate.xy,0);
+#elif FORM==1
+    result=textureGrad(image,args.coordinate.xy,vec2(.25,0),vec2(0,.25));
+#elif FORM==2
+    result=textureLodOffset(image,args.coordinate.xy,0,ivec2(1,-1));
+#elif FORM==3
+    result=texture(image,args.coordinate.xy);
+#else
+    result=textureProjLod(image,vec3(args.coordinate.xy*2,2),0);
+#endif
+}

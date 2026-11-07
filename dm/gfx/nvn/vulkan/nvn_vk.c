@@ -28,6 +28,7 @@
 #include "spv_descriptor_table.h"
 #include "spv_one_row.h"
 #include "spv_sample_reduction.h"
+#include "spv_sample_border.h"
 #include "feedback_gather.h"
 #include "../nvn_geometry.h"
 #include "uniform_address.h"
@@ -1462,9 +1463,10 @@ static VkSampler sampler_for(samp_par p, border_view view) {
     return s;
 }
 
-static VkSampler samp_get(int sid, border_view view, int reduce_in_shader) {
+static VkSampler samp_get(int sid, border_view view, int reduce_in_shader,int border_stock) {
     if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid]) return g_dummy_samp;
     samp_par p = g_sreg[sid];
+    if (border_stock) memcpy(p.border,nvn_mtl_border[border_stock-1],sizeof p.border);
     if (reduce_in_shader && (p.reduction == NVN_SAMPLER_REDUCTION_MIN || p.reduction == NVN_SAMPLER_REDUCTION_MAX)) {
         p.minf = NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST; p.magf = NVN_MAG_FILTER_NEAREST;
         p.lod_min = p.lod_bias = 0; p.lod_max = VK_LOD_CLAMP_NONE; p.aniso = 1;
@@ -1485,7 +1487,7 @@ static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:!strcmp(kind,"samp_slots")?S_SAMP_SLOTS:S_NONE;
 }
 enum { K_WRAP_FLAGS = K_MESH+1 };
-typedef struct { uint32_t binding, count, storage_image, logical_count; uint8_t type, kind, skind, read_only, table, pool, texel_atomic, multisample, depth_image, mixed_image; int16_t slot; int16_t reg, sreg; int32_t off, soff, view, num, driver_sampler; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
+typedef struct { uint32_t binding, count, storage_image, logical_count; uint8_t type, kind, skind, read_only, table, pool, texel_atomic, multisample, depth_image, mixed_image, border_stock; int16_t slot; int16_t reg, sreg; int32_t off, soff, view, num, driver_sampler; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 #include "spv_sampler_pairs.inc"
 #include "spv_storage_texels.inc"
 typedef struct vin_module {
@@ -1502,6 +1504,8 @@ typedef struct shader shader_t;
 struct shader {
     shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
     shader_t *wrapped_variants, *next_wrapped_variant;
+    shader_t *border_variants,*next_border_variant;
+    sample_border borders[DM_VK_MAX_BINDINGS];size_t nborders;
     uint8_t wrapped[DM_VK_MAX_BINDINGS];
     mixed_wrapped_edit mixed[DM_VK_MAX_BINDINGS]; size_t nmixed;
     int has_tables,logical_slots,raw_writes;
@@ -1718,6 +1722,12 @@ static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s
         free(spv); spv = adjusted;
         if (!spv) { LOG("[RED] vk: shader %s sampler reduction failed: %s", s->key, reason); return NULL; }
         *bytes = words * 4;
+    }
+    if (spv && s->nborders) {
+        uint32_t *adjusted=spv_sample_border(spv,*bytes/4,s->borders,s->nborders,&words,&reason);
+        free(spv);spv=adjusted;
+        if (!spv) LOG("[RED] vk: shader %s custom-border correction failed: %s",s->key,reason);
+        else *bytes=words*4;
     }
     if (spv && s->ntexel_biases) {
         uint32_t *adjusted=spv_texel_bias(spv,*bytes/4,s->texel_biases,s->ntexel_biases,&words,&reason);
@@ -3004,12 +3014,14 @@ static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t
     return 1;
 }
 #include "wrapped_buffer.inc"
+#include "custom_border.inc"
 #include "global_memory.inc"
 static int prepare_storage(shader_t **first, shader_t **second) {
     g_nstorage = 0;
     int needs_texel_variant=0;
     if (!prepare_tables(first) || (second && !prepare_tables(second))) return 0;
     if (!prepare_wrapped_buffers(first) || (second && !prepare_wrapped_buffers(second))) return 0;
+    if (!prepare_custom_borders(first) || (second && !prepare_custom_borders(second))) return 0;
     shader_t *stages[] = {*first, second ? *second : NULL};
     for (int st = 0; st < 2; st++) {
         shader_t *s = stages[st]; if (!s) continue;
@@ -3350,7 +3362,7 @@ static int write_sampled_binding(VkDescriptorSet ds, const sbind *b, int stage, 
             }
             if (b->type == BT_SAMP) sampled = *possible_views;
             if (b->type != BT_TEX) {
-                pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20),sampled,reduce_in_shader); pthread_mutex_unlock(&g_rmu);
+                pthread_mutex_lock(&g_rmu); images[element].sampler = samp_get((int)(handle >> 20),sampled,reduce_in_shader,b->border_stock); pthread_mutex_unlock(&g_rmu);
             }
             if (b->type == BT_CIS && sampled.format == VK_FORMAT_UNDEFINED && b->num) {
                 static VkSampler nearest;
