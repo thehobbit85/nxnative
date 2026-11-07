@@ -112,7 +112,7 @@ static int reduction_finish(reduction_module *m, const uint32_t *p, unsigned len
         memcpy(original, p, len * sizeof *p);
         original[2] = m->code.next++;
         if (!texel_append(&m->code.body, original, len)) return 0;
-        uint32_t mask = reduction_mask(m, active, p[1] == m->float4 ? 4 : 2);
+        uint32_t mask = p[1] == m->floating ? active : reduction_mask(m, active, p[1] == m->float4 ? 4 : 2);
         reduced = REDUCTION_VALUE(m, 169, p[1], mask, reduced, original[2]);
     }
     uint32_t copy[] = {p[1], p[2], reduced};
@@ -122,7 +122,7 @@ static int reduction_finish(reduction_module *m, const uint32_t *p, unsigned len
 
 static uint32_t reduction_level(reduction_module *m, uint32_t sampled, uint32_t image, uint32_t coordinate,
                                 uint32_t level, uint32_t linear, unsigned dimensions, unsigned array, uint32_t minimum,
-                                uint32_t offset_mask, uint32_t offset) {
+                                uint32_t offset_mask, uint32_t offset, uint32_t reference) {
     uint32_t spatial = dimensions == 3 ? m->float3 : m->float2;
     uint32_t integer_level = REDUCTION_VALUE(m, 110, m->sint, level); // OpConvertFToS
     uint32_t size = REDUCTION_VALUE(m, 103, array || dimensions == 3 ? m->int3 : m->int2, image, integer_level);
@@ -157,8 +157,15 @@ static uint32_t reduction_level(reduction_module *m, uint32_t sampled, uint32_t 
             uint32_t x = reduction_component(m, point, 0), y = reduction_component(m, point, 1);
             point = REDUCTION_VALUE(m, 80, m->float3, x, y, layer);
         }
-        uint32_t value = offset ? REDUCTION_VALUE(m, 88, m->float4, sampled, point, 2 | offset_mask, level, offset) :
-                                 REDUCTION_VALUE(m, 88, m->float4, sampled, point, 2, level);
+        uint32_t operands[6] = {sampled, point};
+        unsigned count = 2;
+        if (reference) operands[count++] = reference;
+        operands[count++] = 2 | offset_mask; operands[count++] = level;
+        if (offset) operands[count++] = offset;
+        uint32_t value = reduction_value(m, reference ? 90 : 88, reference ? m->floating : m->float4, operands, count);
+        // Depth comparisons produce each point's 0/1 value before reduction,
+        // as specified by EXT_texture_filter_minmax.
+        if (reference) value = reduction_splat(m, m->float4, value, 4);
         if (!tap) { result = value; continue; }
         uint32_t weight = 0;
         for (unsigned axis = 0; axis < dimensions; axis++) if (tap & (1u << axis))
@@ -189,17 +196,22 @@ static uint32_t reduction_gradient_lod(reduction_module *m, uint32_t image, uint
 static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len, const reduction_filter *filter) {
     // Other sample forms are diagnosed before their sampler can become point
     // filtered. Offsets stay in texel units and use native sampler addressing.
-    if (len < 5 || p[1] != m->float4 || p[3] >= m->bound || p[4] >= m->bound) return 0;
     unsigned opcode = p[0] & 0xffff;
-    int implicit = opcode == 87 || opcode == 91, projected = opcode == 91 || opcode == 92;
-    unsigned operands = len > 5 ? p[5] : 0, gradient = operands & 4, offset_mask = operands & (8 | 16);
+    int comparison = opcode == 89 || opcode == 90 || opcode == 93 || opcode == 94;
+    if (len < 5u + comparison || p[1] != (comparison ? m->floating : m->float4) || p[3] >= m->bound || p[4] >= m->bound) return 0;
+    uint32_t reference = comparison ? p[5] : 0;
+    if (comparison && (!reference || reference >= m->bound || m->ids[reference].type != m->floating)) return 0;
+    int implicit = opcode == 87 || opcode == 89 || opcode == 91 || opcode == 93;
+    int projected = opcode >= 91 && opcode <= 94;
+    unsigned mask_at = 5 + comparison;
+    unsigned operands = len > mask_at ? p[mask_at] : 0, gradient = operands & 4, offset_mask = operands & (8 | 16);
     unsigned allowed = (implicit ? 1u : 6u) | 8u | 16u;
     if ((operands & ~allowed) || offset_mask == (8 | 16) ||
         (!implicit && (operands & 6) != (gradient ? 4u : 2u))) return 0;
-    unsigned next = len > 5 ? 6 : 5;
+    unsigned next = len > mask_at ? mask_at + 1 : mask_at;
     unsigned required = (implicit ? !!(operands & 1) : 1u + !!gradient) + !!offset_mask;
     if (len - next != required) return 0;
-    for (unsigned arg = 6; arg < len; arg++) if (p[arg] >= m->bound) return 0;
+    for (unsigned arg = mask_at + 1; arg < len; arg++) if (p[arg] >= m->bound) return 0;
     uint32_t shader_bias = implicit && (operands & 1) ? p[next++] : 0;
     uint32_t explicit_lod = implicit ? 0 : p[next++];
     uint32_t dy = gradient ? p[next++] : 0;
@@ -225,7 +237,15 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
         uint32_t q = reduction_component(m, coordinate, dimensions);
         uint32_t divisor = reduction_splat(m, spatial, q, dimensions);
         coordinate = REDUCTION_VALUE(m, 136, spatial, position, divisor);
-    } else if (coordinate_type != (array ? m->float3 : spatial)) return 0;
+        if (comparison) reference = REDUCTION_VALUE(m, 136, m->floating, reference, q);
+    } else if (coordinate_type != (array ? m->float3 : spatial)) {
+        unsigned lanes = dimensions + array;
+        if (m->ids[coordinate_type].scalar != m->floating || m->ids[coordinate_type].lanes < lanes) return 0;
+        // The SPIR-V coordinate can contain unused trailing components. GLSL
+        // shadow samples commonly retain the separately supplied reference.
+        coordinate = lanes == 3 ? REDUCTION_VALUE(m, 79, m->float3, coordinate, coordinate, 0, 1, 2) :
+                                  REDUCTION_VALUE(m, 79, m->float2, coordinate, coordinate, 0, 1);
+    }
     uint32_t image = REDUCTION_VALUE(m, 100, image_type, p[3]);
     uint32_t levels = REDUCTION_VALUE(m, 106, m->sint, image);
     uint32_t last = REDUCTION_VALUE(m, 111, m->floating, levels);
@@ -257,9 +277,10 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t first = REDUCTION_EXT(m, m->floating, 8, lod), second = REDUCTION_EXT(m, m->floating, 9, lod);
     uint32_t minimum = REDUCTION_VALUE(m, 186, m->code.boolean, filter->minimum, zero);
     minimum = reduction_mask(m, minimum, 4);
-    uint32_t a = reduction_level(m, p[3], image, coordinate, first, linear, dimensions, array, minimum, offset_mask, offset);
-    uint32_t b = reduction_level(m, p[3], image, coordinate, second, linear, dimensions, array, minimum, offset_mask, offset);
+    uint32_t a = reduction_level(m, p[3], image, coordinate, first, linear, dimensions, array, minimum, offset_mask, offset, reference);
+    uint32_t b = reduction_level(m, p[3], image, coordinate, second, linear, dimensions, array, minimum, offset_mask, offset, reference);
     uint32_t value = reduction_combine(m, a, b, minimum);
+    if (comparison) value = reduction_component(m, value, 0);
     return reduction_finish(m, p, len, value, filter->active);
 }
 
@@ -355,7 +376,7 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
             if (!reduction_filter_for(&m, m.ids[p[3]], filters, nf, &selected)) goto fail;
             if (op == 105) {
                 if (!reduction_query(&m, p, len, &selected)) goto fail;
-            } else if ((op != 87 && op != 88 && op != 91 && op != 92) || !reduction_sample(&m, p, len, &selected)) goto fail;
+            } else if ((op < 87 || op > 94) || !reduction_sample(&m, p, len, &selected)) goto fail;
         } else if (!texel_append(&m.code.body, p, len)) goto fail;
         i += len;
     }

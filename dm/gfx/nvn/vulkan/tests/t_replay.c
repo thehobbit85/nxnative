@@ -31,6 +31,7 @@ static prog_t subresource_program[3] = {{.nstage=1}, {.nstage=1}, {.nstage=1}};
 static prog_t one_row_guest_program[2][2] = {{{.nstage=1},{.nstage=1}},{{.nstage=1},{.nstage=1}}};
 static prog_t sampler_reduction_program[13][5][2];
 static prog_t sampler_array_program[3][2][2];
+static prog_t sampler_compare_program[12][2];
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -77,6 +78,14 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    for (int form=0; form<12; form++) for (int separate=0; separate<2; separate++)
+        if (p == &sampler_compare_program[form][separate]) {
+            int fragment=(form>=4 && form<8) || form>=10;
+            assert(stage < (fragment ? 2u : 1u)); memset(key,0,8);
+            if (fragment && !stage) key[7]=0x35;
+            else { key[4]=0xfe; key[5]=0xed; key[6]=0x9a; key[7]=0xb1+2*form+separate; }
+            return 1;
+        }
     for (int form=0; form<3; form++) for (int constant=0; constant<2; constant++) for (int separate=0; separate<2; separate++)
         if (p == &sampler_array_program[form][constant][separate]) {
             assert(stage < (form ? 2u : 1u)); memset(key,0,8);
@@ -3288,8 +3297,9 @@ int main(void) {
     if (getenv("DM_VK_TEST_EMPTY_MS")) { empty_multisample_images(); return 0; }
     if (getenv("DM_VK_TEST_SUBRESOURCES")) { subresource_views(); return 0; }
     if (getenv("DM_VK_TEST_ONE_ROW_GUEST")) { one_row_guest(); return 0; }
+    if (getenv("DM_VK_TEST_SAMPLER_COMPARE")) { sampler_reduction_compare(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_ARRAY")) { sampler_reduction_arrays(); return 0; }
-    if (getenv("DM_VK_TEST_SAMPLER_REDUCTION")) { sampler_reduction(); sampler_reduction_arrays(); return 0; }
+    if (getenv("DM_VK_TEST_SAMPLER_REDUCTION")) { sampler_reduction(); sampler_reduction_arrays(); sampler_reduction_compare(); return 0; }
     if (getenv("DM_VK_TEST_BC_VIEWS")) { compressed_color_views(); return 0; }
     if (getenv("DM_VK_TEST_EMPTY_SAMPLED")) { empty_sampled_slots(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
@@ -3327,7 +3337,7 @@ int main(void) {
     gpu_indices();
     graphics_storage_alias();
     simultaneous_aliases();
-    image_order(); empty_storage_images(); empty_multisample_images(); subresource_views(); sampler_reduction(); sampler_reduction_arrays();
+    image_order(); empty_storage_images(); empty_multisample_images(); subresource_views(); sampler_reduction(); sampler_reduction_arrays(); sampler_reduction_compare();
     attachment_feedback();
     layered_feedback();
     graphics_storage();

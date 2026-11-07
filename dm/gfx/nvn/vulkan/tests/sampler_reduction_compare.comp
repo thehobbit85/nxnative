@@ -1,0 +1,57 @@
+#version 450
+#ifdef FRAGMENT
+layout(location=0) out vec4 value;
+#else
+layout(local_size_x=1) in;
+layout(binding=2, std430) buffer Results { vec4 value; };
+#endif
+layout(binding=1, std140) uniform Parameters { vec4 coordinate; };
+#ifdef SEPARATE
+layout(binding=0) uniform texture2D source;
+layout(binding=3) uniform samplerShadow filtering;
+#define sampled sampler2DShadow(source, filtering)
+#else
+layout(binding=0) uniform sampler2DShadow sampled;
+#endif
+#ifdef OFFSET
+#define SAMPLE textureOffset
+#define LOD textureLodOffset
+#define GRAD textureGradOffset
+#define OFFSET_ARGUMENT , ivec2(1,-1)
+#else
+#define SAMPLE texture
+#define LOD textureLod
+#define GRAD textureGrad
+#define OFFSET_ARGUMENT
+#endif
+#ifdef PROJECTED
+#undef SAMPLE
+#undef LOD
+#undef GRAD
+#define SAMPLE textureProj
+#define LOD textureProjLod
+#define GRAD textureProjGrad
+#define POSITION vec4(position * -2, coordinate.w * -2, -2)
+#else
+#define POSITION vec3(position,coordinate.w)
+#endif
+void main() {
+    vec2 position=coordinate.xy;
+#ifdef FRAGMENT
+#ifdef BIAS
+    const float bias=1;
+#define BIAS_ARGUMENT , bias
+#else
+    const float bias=0;
+#define BIAS_ARGUMENT
+#endif
+    position+=(gl_FragCoord.xy-vec2(.5))*exp2(coordinate.z-bias)/vec2(textureSize(sampled,0));
+    float result=SAMPLE(sampled,POSITION OFFSET_ARGUMENT BIAS_ARGUMENT);
+#elif defined(GRADIENTS)
+    vec2 scale=exp2(coordinate.z)/vec2(textureSize(sampled,0));
+    float result=GRAD(sampled,POSITION,vec2(scale.x,0),vec2(0,scale.y) OFFSET_ARGUMENT);
+#else
+    float result=LOD(sampled,POSITION,coordinate.z OFFSET_ARGUMENT);
+#endif
+    value=vec4(result,0,0,1);
+}
