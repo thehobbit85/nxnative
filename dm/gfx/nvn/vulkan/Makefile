@@ -173,6 +173,16 @@ $(B)/shaders/0000000000000052.spv: tests/depth_range.vert
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	echo 'stage vs' > $(@:.spv=.vk.txt)
 fixture: $(B)/shaders/000000000000006d.spv
+fixture: $(B)/shaders/000000000000006e.spv $(B)/shaders/000000000000006f.spv
+$(B)/t_replay: tests/storage_views.inc
+$(B)/shaders/000000000000006e.spv: tests/storage_views.comp tests/storage_views.vk.txt
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/storage_views.vk.txt $(@:.spv=.vk.txt)
+$(B)/shaders/000000000000006f.spv: tests/storage_views.comp tests/storage_views.vk.txt
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DFORMATLESS $< -o $@
+	cp tests/storage_views.vk.txt $(@:.spv=.vk.txt)
 $(B)/shaders/000000000000006d.spv: tests/cube_ranges.comp tests/cube_ranges.vk.txt
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
