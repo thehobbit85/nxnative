@@ -11,7 +11,7 @@ CFLAGS += -O1 -Wall -Werror -Wno-unused-function
 REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h ../../tests/recorded_sampler_reduction.h ../../tests/recorded_sparse_texture.h ../../tests/recorded_query_lifetime.h ../../tests/recorded_feedback_control.h
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_storage_texels.inc spv_sampler_pairs.inc ../nvn_border.h spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_storage_texels.inc spv_sampler_pairs.inc spv_one_row.h ../nvn_border.h spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
 $(B)/t_replay: ../../tests/packed_texel_corpus.h ../../tests/dlss_spatial_corpus.h ../../tests/dlss_temporal_corpus.h ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/depth_views.inc tests/cube_ranges.inc tests/logic.inc tests/feedback_capture.inc
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
@@ -178,11 +178,16 @@ $(B)/t_replay: tests/storage_views.inc tests/bc_views.inc
 $(B)/t_replay: tests/empty_images.inc
 $(B)/t_replay: tests/empty_ms.inc
 $(B)/t_replay: tests/subresource_views.inc
-fixture: $(B)/shaders/0000000000000072.spv $(B)/shaders/0000000000000073.spv
+$(B)/t_replay: tests/one_row_guest.inc ../../../android/tests/texture_coordinates_cases.h
+fixture: $(B)/shaders/0000000000000072.spv $(B)/shaders/0000000000000073.spv $(B)/shaders/0000000000000074.spv
+$(B)/shaders/0000000000000074.spv: tests/subresource_views.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DONE_ROW $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 cis 1 tex 1 -1 samp_tex 1\nb 2 simg 1 img 0 -1 - -1\nb 3 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
 $(B)/shaders/0000000000000072.spv: tests/subresource_views.comp
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
-	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 cis 1 tex 1 -1 samp_tex 1\nb 2 simg 1 img 0 -1 - -1\nb 3 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 cis 1 tex 1 -1 samp_tex 1\nb 2 simg 1 img 0 -1 - -1\nb 3 ssbo 1 sbuf 0 -1 - -1\nb 4 simg 1 img 0 -1 - -1\nb 5 cis 1 tex 0 -1 samp_tex 0\n' > $(@:.spv=.vk.txt)
 $(B)/shaders/0000000000000073.spv: tests/subresource_views.comp
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 -DVOLUME $< -o $@
@@ -506,3 +511,26 @@ $(B)/shaders/0000000000000051.spv: tests/c2_sample.frag tests/c2_sample.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	cp tests/c2_sample.vk.txt $(@:.spv=.vk.txt)
+
+# Runtime 1D compatibility also applies when loading older shader libraries.
+$(B)/t_one_row: tests/t_one_row.c spv_one_row.h
+	mkdir -p $(B)
+	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror $(BUILD_CFLAGS) $< -o $@
+$(B)/one-row-fragment.spv: tests/one_row.frag
+	mkdir -p $(B)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+.PHONY: one-row-check
+one-row-check: $(B)/t_one_row $(B)/one-row-fragment.spv $(B)/shaders/0000000000000072.spv $(B)/shaders/0000000000000074.spv
+	$(B)/t_one_row $(B)/shaders/0000000000000072.spv $(B)/one-row-compute.spv
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/one-row-compute.spv
+	$(B)/t_one_row $(B)/one-row-fragment.spv $(B)/one-row-fragment-adapted.spv
+	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/one-row-fragment-adapted.spv
+	$(B)/t_one_row $(B)/shaders/0000000000000074.spv $(B)/one-row-unchanged.spv
+	cmp $(B)/shaders/0000000000000074.spv $(B)/one-row-unchanged.spv
+
+.PHONY: one-row-guest-fixture
+one-row-guest-fixture: fixture
+	python3 ../../../android/tests/texture_coordinates_fixture.py $(abspath $(B))/one-row-samples
+	python3 ../../../android/tests/texture_query_shapes_fixture.py $(abspath $(B))/one-row-queries
+	cp $(B)/one-row-samples/export/*.spv $(B)/one-row-samples/export/*.vk.txt $(B)/shaders/
+	cp $(B)/one-row-queries/export/*.spv $(B)/one-row-queries/export/*.vk.txt $(B)/shaders/

@@ -1,6 +1,7 @@
 static void subresource_views(void) {
     enum { slot = 1504, base_words = 8*8*8, mip_words = 4*4*4 };
-    for (int volume = 0; volume < 2; volume++) {
+    for (int variant = 0; variant < 3; variant++) {
+        int volume = variant == 1;
         tex_t texture = {.serial=0x17380+volume, .d={.width=8, .height=volume ? 8 : 4,
             .depth=volume ? 8 : 1, .levels=2, .format=NVN_FORMAT_R32UI,
             .target=volume ? NVN_TEXTURE_TARGET_3D : NVN_TEXTURE_TARGET_1D_ARRAY}};
@@ -9,9 +10,10 @@ static void subresource_views(void) {
         view_t selected = mip;
         if (!volume) { selected.set_layers=1; selected.min_layer=1; selected.nlayers=2; }
         mtl_reg_tex(slot, &texture, &selected);
+        mtl_reg_samp(slot, &(samp_par){.ws=NVN_WRAP_MODE_CLAMP_TO_BORDER, .wt=NVN_WRAP_MODE_CLAMP_TO_BORDER});
         mtl_queue_activate(slot);
         for (int pass = 0; pass < 3; pass++) {
-            uint32_t base[base_words], source[mip_words], returned[base_words], result[8];
+            uint32_t base[base_words], source[mip_words], returned[base_words], result[24];
             unsigned base_count = volume ? base_words : 8*4, mip_count = volume ? mip_words : 4*4;
             for (unsigned i=0; i<base_count; i++) base[i] = 0xa0000000u + i;
             for (unsigned i=0; i<mip_count; i++) source[i] = 0xb0000000u + i;
@@ -21,7 +23,9 @@ static void subresource_views(void) {
                 .r={.width=8, .height=volume ? 8 : 1, .depth=volume ? 8 : 4});
             RECORD(OP_COPY_B2T, p_copy_b2t, .tex=&texture, .has_view=1, .view=mip, .src=(uintptr_t)source,
                 .r={.width=4, .height=volume ? 4 : 1, .depth=4});
-            uint32_t expected[8] = {source[5], source[10], 4, 2, 4, 1, 4, 2};
+            uint32_t expected[24] = {source[5], source[10], 4, 2, 4, 1, 4, 2,
+                source[5], source[5], source[5], source[5], source[10], source[10], source[5], source[10],
+                source[5], source[5], source[5], source[9], 0x91827364u, source[9]+10, 4, 2};
             if (volume) {
                 view_t slice = mip;
                 slice.set_layers=1; slice.min_layer=pass+1; slice.nlayers=1;
@@ -31,10 +35,11 @@ static void subresource_views(void) {
                 put(&list, OP_CLEAR_COLOR, &clear, sizeof clear);
                 for (int y=1; y<=2; y++) for (int x=1; x<=2; x++)
                     source[(pass+1)*16+y*4+x] = 1000+pass;
-                memcpy(expected, (uint32_t[]){source[5], source[21], source[37], source[53], 4, 4, 4, 1}, sizeof expected);
+                memcpy(expected, (uint32_t[]){source[5], source[21], source[37], source[53], 4, 4, 4, 1}, 8*sizeof *expected);
             }
-            RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&subresource_program[volume], .stages=0x20);
-            RECORD(OP_BIND_TEX, p_bind_handles, .stage=5, .first=0, .n=2, .h={slot, slot});
+            RECORD(OP_BIND_PROGRAM, p_bind_program, .prog=&subresource_program[variant], .stages=0x20);
+            uint64_t sampled = ((uint64_t)slot << 20) | slot;
+            RECORD(OP_BIND_TEX, p_bind_handles, .stage=5, .first=0, .n=2, .h={sampled, sampled});
             RECORD(OP_BIND_IMG, p_bind_handles, .stage=5, .first=0, .n=1, .h={slot});
             RECORD(OP_BIND_SSBO, p_bind_buf, .stage=5, .index=0, .addr=(uintptr_t)result, .size=sizeof result);
             RECORD(OP_DISPATCH, p_dispatch, .x=1, .y=1, .z=1);
@@ -42,9 +47,10 @@ static void subresource_views(void) {
                 .r={.width=4, .height=volume ? 4 : 1, .depth=4});
             put(&list, OP_END, NULL, 0);
             mtl_sub_begin(); mtl_exec(list.bytes); assert(mtl_wait(mtl_sub_commit(), UINT64_MAX));
-            for (int i=0; i<8; i++) if (result[i] != expected[i])
+            for (int i=0; i<(variant == 0 ? 24 : 8); i++) if (result[i] != expected[i])
                 die("subresource volume%d pass%d result%d: %#x expected %#x", volume, pass, i, result[i], expected[i]);
             source[volume ? 3*16+2*4+2 : 2*4+2] = 0x91827364u;
+            if (variant == 0) source[9] += 30;
             for (unsigned i=0; i<mip_count; i++) if (returned[i] != source[i])
                 die("subresource volume%d pass%d texel%u: %#x expected %#x", volume, pass, i, returned[i], source[i]);
             list = (list_t){0};

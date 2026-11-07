@@ -23,6 +23,7 @@
 #include "spv_draw_parameters.h"
 #include "spv_buffer_bias.h"
 #include "spv_texel_bias.h"
+#include "spv_one_row.h"
 #include "feedback_gather.h"
 #include "uniform_address.h"
 #include "present_rect.h"
@@ -1013,6 +1014,9 @@ static vtex *tex_get_locked(const tex_t *t, int for_rt) {
     if (t->d.target == NVN_TEXTURE_TARGET_BUFFER) { RED_ONCE(3, "buffer textures are not implemented yet"); return NULL; }
     v = calloc(1, sizeof *v); v->serial = t->serial; v->f = f; v->nvn_fmt = t->d.format; v->target = t->d.target; v->mem = t->mem; v->len = t->L.size;
     v->w = t->d.width ? t->d.width : 1; v->h = t->d.height ? t->d.height : 1; v->levels = t->d.levels ? t->d.levels : 1;
+    // Existing normalized 1D exports use a one-row 2D interface, as on Metal.
+    // Native 1D exports are adapted at module load to share this same storage.
+    if (t->d.target == NVN_TEXTURE_TARGET_1D || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY) v->h = 1;
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, cube = t->d.target == NVN_TEXTURE_TARGET_CUBEMAP || t->d.target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
     v->d = is3d ? (t->d.depth ? t->d.depth : 1) : 1;
     v->layers = is3d ? 1 : t->L.layers ? t->L.layers : t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY ? (t->d.depth ? t->d.depth : 1) : cube ? 6 : 1;
@@ -1028,7 +1032,7 @@ static vtex *tex_get_locked(const tex_t *t, int for_rt) {
     int cube_views = cube || (t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY && v->w == v->h &&
                               v->layers >= 6 && sc == VK_SAMPLE_COUNT_1_BIT);
     VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | (cube_views ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0) | (is3d ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0),
-                            is3d ? VK_IMAGE_TYPE_3D : t->d.target == NVN_TEXTURE_TARGET_1D || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
+                            is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
                             f.f, {v->w, t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY ? 1 : v->h, v->d}, v->levels, v->layers, sc, VK_IMAGE_TILING_OPTIMAL, u, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
     if (sc != VK_SAMPLE_COUNT_1_BIT) ii.mipLevels = 1;
     if (!f.dec && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && storage_compatible(&ii))
@@ -1170,9 +1174,8 @@ static void sampled_swizzle(uint8_t swz[4], fmt_t f, const tex_t *t, const view_
 }
 static int compatible_dimension(const vtex *v, int view) {
     if (view < 0) return 1;
-    int one = v->target == NVN_TEXTURE_TARGET_1D || v->target == NVN_TEXTURE_TARGET_1D_ARRAY;
-    int want_one = view == VK_IMAGE_VIEW_TYPE_1D || view == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
-    if (one != want_one || (v->target == NVN_TEXTURE_TARGET_3D) != (view == VK_IMAGE_VIEW_TYPE_3D)) return 0;
+    if (view == VK_IMAGE_VIEW_TYPE_1D || view == VK_IMAGE_VIEW_TYPE_1D_ARRAY ||
+        (v->target == NVN_TEXTURE_TARGET_3D) != (view == VK_IMAGE_VIEW_TYPE_3D)) return 0;
     return (view != VK_IMAGE_VIEW_TYPE_CUBE && view != VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) ||
            (v->layers >= 6 && v->w == v->h && v->samples == VK_SAMPLE_COUNT_1_BIT);
 }
@@ -1225,7 +1228,7 @@ static VkImageView tex_view_format(vtex *v, const tex_t *t, const view_t *vw, in
     VkImageViewType vt;
     if (want_type >= 0) vt = (VkImageViewType)want_type;
     else switch (target) {
-        case NVN_TEXTURE_TARGET_1D: vt = VK_IMAGE_VIEW_TYPE_1D; break; case NVN_TEXTURE_TARGET_1D_ARRAY: vt = VK_IMAGE_VIEW_TYPE_1D_ARRAY; break;
+        case NVN_TEXTURE_TARGET_1D: vt = VK_IMAGE_VIEW_TYPE_2D; break; case NVN_TEXTURE_TARGET_1D_ARRAY: vt = VK_IMAGE_VIEW_TYPE_2D_ARRAY; break;
         case NVN_TEXTURE_TARGET_3D: vt = VK_IMAGE_VIEW_TYPE_3D; break;
         case NVN_TEXTURE_TARGET_2D_ARRAY: case NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY: vt = VK_IMAGE_VIEW_TYPE_2D_ARRAY; break;
         case NVN_TEXTURE_TARGET_CUBEMAP: vt = VK_IMAGE_VIEW_TYPE_CUBE; break; case NVN_TEXTURE_TARGET_CUBEMAP_ARRAY: vt = VK_IMAGE_VIEW_TYPE_CUBE_ARRAY; break;
@@ -1611,7 +1614,19 @@ static uint32_t *vertex_spv(uint32_t *spv, size_t *bytes, shader_t *s) {
     return spv;
 }
 
+static uint32_t *image_shape_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
+    size_t words; const char *reason;
+    uint32_t *adjusted = spv_one_row(spv, *bytes / 4, &words, &reason);
+    if (reason) {
+        LOG("[RED] vk: shader %s one-row image conversion failed: %s", s->key, reason);
+        free(spv); return NULL;
+    }
+    if (adjusted) { free(spv); spv = adjusted; *bytes = words * 4; }
+    return spv;
+}
 static uint32_t *shader_bias_spv(uint32_t *spv, size_t *bytes, const shader_t *s) {
+    if (spv) spv = image_shape_spv(spv, bytes, s);
+    if (!spv) return NULL;
     uint32_t bindings[DM_VK_MAX_BINDINGS]; int any=0;
     for (int i=0;i<s->nb;i++) { bindings[i]=s->b[i].binding;any|=s->buffer_bias[i]!=0; }
     size_t words; const char *reason;
@@ -1877,11 +1892,11 @@ static shader_t *shader_by_key(const char *key) {
         s->pack_locations=1;
     }
     if (s->stage==1) s->outputs=spv_fragment_outputs(spv,ns/4);
-    reflect_shader_images(spv,ns/4,s->b,s->nb);
-    s->sampler_images=reflect_sampler_pairs(spv,ns/4,s->b,s->nb);
     s->depth_zero=g_depth_zero;
     spv=stage_spv(spv,&ns,s);
     if (!spv) return s;
+    reflect_shader_images(spv,ns/4,s->b,s->nb);
+    s->sampler_images=reflect_sampler_pairs(spv,ns/4,s->b,s->nb);
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, ns, spv};
     VkResult r = vkCreateShaderModule(g_dev, &mi, NULL, &s->mod); free(spv);
     if (r != VK_SUCCESS) { LOG("[RED] vk: shader %s rejected (%d)", key, (int)r); s->mod = VK_NULL_HANDLE; }
