@@ -8,18 +8,23 @@ static int prepare_wrapped_buffers(shader_t **selected) {
         const sbind *binding=&base->b[i];
         if ((binding->type!=BT_CIS && binding->type!=BT_TEX) || binding->view!=VK_IMAGE_VIEW_TYPE_2D ||
             (!binding->shape.fetch1d && binding->kind!=K_TEXU)) continue;
+        int has_buffer=0, has_image=0;
         for (uint32_t element=0;element<binding->count;element++) {
             int id=(int)(descriptor_handle(base->guest_stage,binding,element)&0xfffff);
             pthread_mutex_lock(&g_rmu);
-            int buffer=id>0 && id<g_ntreg && g_treg[id].ok && g_treg[id].t.d.target==NVN_TEXTURE_TARGET_BUFFER;
-            pthread_mutex_unlock(&g_rmu);
-            if (buffer) {
-                if (binding->count!=1) {
-                    RED_ONCE(24,"wrapped buffer arrays require per-element image interfaces");return 0;
-                }
-                wrapped[i]=1;any=1;
+            if (id>0 && id<g_ntreg && g_treg[id].ok) {
+                if (g_treg[id].t.d.target==NVN_TEXTURE_TARGET_BUFFER) has_buffer=1;
+                else has_image=1;
             }
+            pthread_mutex_unlock(&g_rmu);
         }
+        if (has_buffer && has_image) {
+            RED_ONCE(24,"mixed wrapped buffer and image arrays require per-element image interfaces");return 0;
+        }
+        if (has_buffer && binding->table && !g_texel_descriptor_tables) {
+            RED_ONCE(24,"wrapped handle tables require nonuniform texel-buffer descriptor indexing");return 0;
+        }
+        if (has_buffer) { wrapped[i]=1;any=1; }
     }
     if (!any) return 1;
     for (shader_t *variant=base->wrapped_variants;variant;variant=variant->next_wrapped_variant)

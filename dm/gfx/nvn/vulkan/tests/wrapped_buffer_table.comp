@@ -1,0 +1,12 @@
+#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+layout(local_size_x=1) in;
+layout(binding=0) uniform usampler2D source[];
+layout(binding=1,std430) buffer Result { uvec4 values[]; } result;
+layout(binding=2,std430) readonly buffer SlotMap { uint n; uint slot[]; } table;
+void main() {
+    uint lane=gl_GlobalInvocationID.x;
+    uint slot=table.slot[min(lane,table.n)];
+    result.values[lane]=uvec4(texelFetch(source[nonuniformEXT(slot)],ivec2(0),0).x,
+        textureSize(source[nonuniformEXT(slot)],0),textureQueryLevels(source[nonuniformEXT(slot)]));
+}
