@@ -26,6 +26,7 @@ static prog_t typed_border_program[] = {{.nstage=1},{.nstage=1}};
 static prog_t cube_ranges_program = {.nstage=1};
 static prog_t storage_views_program[2] = {{.nstage=1},{.nstage=1}};
 static prog_t empty_images_program = {.nstage=1};
+static prog_t empty_ms_program = {.nstage=1};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -72,6 +73,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &empty_ms_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x71; return 1; }
     if (p == &empty_images_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x70; return 1; }
     for (int i=0;i<2;i++) if (p == &storage_views_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x6e + i; return 1; }
     if (p == &cube_ranges_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x6d; return 1; }
@@ -574,6 +576,7 @@ static void float_image_views(void) {
 #include "cube_ranges.inc"
 #include "storage_views.inc"
 #include "empty_images.inc"
+#include "empty_ms.inc"
 #include "bc_views.inc"
 static void empty_sampled_slots(void) {
     enum { slot=1462 };
@@ -3253,6 +3256,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_CUBE_RANGES")) { cube_ranges(); return 0; }
     if (getenv("DM_VK_TEST_STORAGE_VIEWS")) { storage_image_views(); return 0; }
     if (getenv("DM_VK_TEST_EMPTY_IMAGES")) { empty_storage_images(); return 0; }
+    if (getenv("DM_VK_TEST_EMPTY_MS")) { empty_multisample_images(); return 0; }
     if (getenv("DM_VK_TEST_BC_VIEWS")) { compressed_color_views(); return 0; }
     if (getenv("DM_VK_TEST_EMPTY_SAMPLED")) { empty_sampled_slots(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
@@ -3290,7 +3294,7 @@ int main(void) {
     gpu_indices();
     graphics_storage_alias();
     simultaneous_aliases();
-    image_order(); empty_storage_images();
+    image_order(); empty_storage_images(); empty_multisample_images();
     attachment_feedback();
     layered_feedback();
     graphics_storage();
