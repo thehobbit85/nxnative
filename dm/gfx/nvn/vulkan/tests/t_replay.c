@@ -80,6 +80,7 @@ static prog_t draw_parameters_program = {.nstage = 2};
 static dpool_t texture_pool, sampler_pool, alternate_texture_pool, alternate_sampler_pool;
 static const void *flushed_storage;
 // The raw replay fixture has no shared recorder or sparse guest page tables.
+int nvn_host_readable(uint64_t address,uint64_t size) { (void)address;(void)size;return 1; }
 int nvn_ft_tracked(uint64_t serial) { (void)serial; return 0; }
 int nvn_sparse_pool(const void *pool) { (void)pool; return 0; }
 uint64_t nvn_sparse_gen(void) { abort(); } // Sparse paths are tested with the real public recorder.
@@ -3262,6 +3263,7 @@ static void typed_graphics(void) {
 #include "wrapped_buffer.inc"
 #include "block_targets.inc"
 #include "diagnostics.inc"
+#include "live_capture.inc"
 #include "alpha.inc"
 #include "logic.inc"
 #include "split_handle.inc"
@@ -3322,6 +3324,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_GLOBAL_LOADS")) { global_loads();return 0; }
     if (getenv("DM_VK_TEST_RESOURCE_POOLS")) { resource_pools();return 0; }
     if (getenv("DM_VK_TEST_C2_ARRAYS")) { c2_arrays();return 0; }
+    if (getenv("DM_VK_TEST_LIVE_CAPTURE")) { live_capture();return 0; }
     if (getenv("DM_VK_TEST_DIAGNOSTICS")) { graphics_diagnostics(); return 0; }
     if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
     if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }
