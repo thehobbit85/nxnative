@@ -314,6 +314,27 @@ $(REDUCTION_SHADERS): tests/sampler_reduction.comp
 	printf 'b 1 ubo 1 cbuf 0 -1 - -1\n' >> $(@:.spv=.vk.txt)
 	$(if $(findstring -DSEPARATE,$(REDUCTION_FLAGS)),printf 'b 0 tex 1 tex 0 -1 - -1\nb 3 samp 1 samp 1 -1 - -1\n',printf 'b 0 cis 1 tex 0 -1 samp_tex 0\n') >> $(@:.spv=.vk.txt)
 $(B)/t_replay: tests/one_row_guest.inc ../../../android/tests/texture_coordinates_cases.h
+REDUCTION_ARRAY_SHADERS = $(B)/shaders/00000000feed99b1.spv $(B)/shaders/00000000feed99b2.spv $(B)/shaders/00000000feed99b3.spv $(B)/shaders/00000000feed99b4.spv
+$(B)/shaders/00000000feed99b9.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed99ba.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DSEPARATE
+$(B)/shaders/00000000feed99bb.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DCONSTANT_INDEX
+$(B)/shaders/00000000feed99bc.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DCONSTANT_INDEX -DSEPARATE
+$(B)/shaders/00000000feed99c1.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DQUERY
+$(B)/shaders/00000000feed99c2.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DQUERY -DSEPARATE
+$(B)/shaders/00000000feed99c3.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DQUERY -DCONSTANT_INDEX
+$(B)/shaders/00000000feed99c4.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DQUERY -DCONSTANT_INDEX -DSEPARATE
+REDUCTION_ARRAY_SHADERS += $(B)/shaders/00000000feed99b9.spv $(B)/shaders/00000000feed99ba.spv $(B)/shaders/00000000feed99bb.spv $(B)/shaders/00000000feed99bc.spv $(B)/shaders/00000000feed99c1.spv $(B)/shaders/00000000feed99c2.spv $(B)/shaders/00000000feed99c3.spv $(B)/shaders/00000000feed99c4.spv
+fixture: $(REDUCTION_ARRAY_SHADERS)
+$(B)/shaders/00000000feed99b1.spv: ARRAY_FLAGS =
+$(B)/shaders/00000000feed99b2.spv: ARRAY_FLAGS = -DSEPARATE
+$(B)/shaders/00000000feed99b3.spv: ARRAY_FLAGS = -DCONSTANT_INDEX
+$(B)/shaders/00000000feed99b4.spv: ARRAY_FLAGS = -DCONSTANT_INDEX -DSEPARATE
+$(REDUCTION_ARRAY_SHADERS): tests/sampler_reduction_array.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $(ARRAY_FLAGS) $< -o $@
+	$(if $(findstring -DFRAGMENT,$(ARRAY_FLAGS)),printf 'stage ps\n',printf 'stage cs\ntg 1 1 1\nb 2 ssbo 1 sbuf 0 -1 - -1\n') > $(@:.spv=.vk.txt)
+	printf 'b 1 ubo 1 cbuf 0 -1 - -1\n' >> $(@:.spv=.vk.txt)
+	$(if $(findstring -DSEPARATE,$(ARRAY_FLAGS)),printf 'b 0 tex 32 tex 0 -1 - -1\nb 3 samp 32 samp 1 -1 - -1\n',printf 'b 0 cis 32 tex 0 -1 samp_tex 0\n') >> $(@:.spv=.vk.txt)
 fixture: $(B)/shaders/0000000000000072.spv $(B)/shaders/0000000000000073.spv $(B)/shaders/0000000000000074.spv
 $(B)/shaders/0000000000000074.spv: tests/subresource_views.comp
 	mkdir -p $(@D)
@@ -674,10 +695,11 @@ $(B)/t_sample_reduction: tests/t_sample_reduction.c spv_sample_reduction.h spv_o
 	mkdir -p $(B)
 	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror -Wno-unused-function $(BUILD_CFLAGS) $< -o $@
 .PHONY: sampler-reduction-check
-sampler-reduction-check: $(B)/t_sample_reduction $(REDUCTION_SHADERS)
-	@set -e; for input in $(REDUCTION_SHADERS); do \
+sampler-reduction-check: $(B)/t_sample_reduction $(REDUCTION_SHADERS) $(REDUCTION_ARRAY_SHADERS)
+	@set -e; for input in $(REDUCTION_SHADERS) $(REDUCTION_ARRAY_SHADERS); do \
 	  key=$${input##*/}; value=$${key%.spv}; binding=$$(( (0x$$value - 0x75) % 2 * 3 )); \
-	  $(B)/t_sample_reduction "$$input" "$(B)/reduction-$$key" "$$binding"; \
+	  case $$key in *feed99*) option=array ;; *) option= ;; esac; \
+	  $(B)/t_sample_reduction "$$input" "$(B)/reduction-$$key" "$$binding" $$option; \
 	  $(SPIRV_VAL) --target-env vulkan1.1 "$(B)/reduction-$$key"; \
 	done
 	$(B)/t_sample_reduction $(B)/shaders/0000000000000075.spv $(B)/reduction-no-import.spv 0 no-import

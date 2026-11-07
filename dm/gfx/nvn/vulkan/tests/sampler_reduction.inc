@@ -164,3 +164,83 @@ static void sampler_reduction(void) {
     mtl_tex_release(&target); mtl_queue_forget(slot);
     printf("Guest sampler average/min/max passed %u format, independent binding, mip and spatial footprint cases\n",checks);
 }
+
+static void sampler_reduction_arrays(void) {
+    enum { slot=1550 };
+    tex_t textures[3]; float texels[3][20];
+    mtl_queue_activate(slot);
+    tex_t target={.serial=0x17710,.d={.width=2,.height=2,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA32F}};
+    nvn_tex_layout(&target.d,&target.L);
+    list_t upload={0};
+    for (int i=0; i<3; i++) {
+        textures[i]=(tex_t){.serial=0x17700+i,.d={.width=4,.height=4,.depth=1,.levels=2,
+            .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_R32F}};
+        nvn_tex_layout(&textures[i].d,&textures[i].L); mtl_reg_tex(slot+i,&textures[i],NULL);
+        for (int texel=0; texel<20; texel++)
+            texels[i][texel]=100*i+(texel<16 ? 1+2*(texel%2)+4*(texel/4%2) : 9+2*(texel-16));
+        for (int mip=0; mip<2; mip++) {
+            p_copy_b2t copy={.tex=&textures[i],.src=(uintptr_t)(texels[i]+(mip ? 16 : 0)),
+                .has_view=1,.view={.set_levels=1,.base_level=mip},.r={.width=4>>mip,.height=4>>mip,.depth=1}};
+            put(&upload,OP_COPY_B2T,&copy,sizeof copy);
+        }
+    }
+    put(&upload,OP_END,NULL,0); mtl_sub_begin();mtl_exec(upload.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    const float expected[2][3][3]={{{4,8,12},{1,1,9},{7,15,15}},{{4,8,12},{1,15,15},{15,15,15}}};
+    unsigned checks=0;
+    for (int form=0; form<3; form++) for (int separate=0; separate<2; separate++) for (int constant=0; constant<2; constant++)
+      for (int variant=0; variant<2; variant++) for (int rotation=0; rotation<3; rotation++) {
+        uint64_t handles[32];
+        for (int i=0; i<32; i++) {
+            int mode=(i+rotation)%3;
+            samp_par sampler={.minf=NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,.magf=1,.lod_max=10,.reduction=mode};
+            if (variant && mode==1) { sampler.minf=NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST; sampler.lod_bias=.5f; }
+            if (variant && mode==2) sampler.lod_min=1;
+            mtl_reg_samp(slot+i,&sampler); handles[i]=((uint64_t)(slot+i)<<20)|(slot+i%3);
+        }
+        for (unsigned lod=0; lod<3; lod++) for (unsigned index=0; index<(constant ? 1u : 32u); index++) {
+            if (form && lod==1) continue; // Native implicit LOD can approximate fractional powers.
+            struct { uint32_t index; float lod,u,v; } params={index,.5f*lod,.5f,.5f};
+            float result[16]={-100,-100,-100,-100}, want[4]={0};
+            for (unsigned i=constant ? 0 : index; i<(constant ? 3u : index+1); i++) {
+                unsigned sampler=(i+separate)%32, mode=(sampler+rotation)%3;
+                unsigned weight=constant ? 1u<<i : 1;
+                float raw=params.lod+(variant && mode==1 ? .5f : 0);
+                want[0]+=weight*(form==2 ? (variant && mode==2 ? 1 : fminf(1,raw)) : 100*(i%3)+expected[variant][mode][lod]);
+                if (form==2) want[1]+=weight*raw;
+                want[3]+=weight;
+            }
+            int stage=form ? 1 : 5;
+            prog_t *program=&sampler_array_program[form][constant][separate]; program->nstage=form ? 2 : 1;
+            list_t list={0};
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=program,.stages=form ? 3 : 0x20);
+            for (int i=0; i<32; i++) {
+                RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=stage|BIND_TEX1_NOBASE,.slot=i,.h=handles[i]);
+            }
+            p_bind_handles samplers={.stage=stage,.first=1,.n=32};
+            memcpy(samplers.h,handles,sizeof handles);
+            put(&list,OP_BIND_SAMP,&samplers,sizeof samplers);
+            RECORD(OP_BIND_UBO,p_bind_buf,.stage=stage,.index=0,.addr=(uintptr_t)&params,.size=sizeof params);
+            if (form) {
+                RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
+                RECORD(OP_VIEWPORTS,p_viewports,.n=1,.v={{0,0,2,2}});
+                RECORD(OP_SCISSOR,p_scissor,.w=2,.h=2);
+                RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={-100,-100,-100,-100});
+                RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+                RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)result,.r={.width=2,.height=2,.depth=1});
+            } else {
+                RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result,.size=sizeof result);
+                RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+            }
+            put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+            for (int channel=0; channel<4; channel++) if (result[channel]!=want[channel])
+                die("sampler array form%d separate%d constant%d variant%d rotation%d lod%u index%u channel%d: %g expected %g",
+                    form,separate,constant,variant,rotation,lod,index,channel,result[channel],want[channel]);
+            checks++;
+        }
+      }
+    for (int i=0; i<3; i++) { mtl_reg_tex(slot+i,NULL,NULL);mtl_tex_release(&textures[i]); }
+    mtl_tex_release(&target);
+    mtl_queue_forget(slot);
+    printf("Mixed average/min/max sampler arrays passed %u constant/dynamic binding and filter-identity cases\n",checks);
+}
