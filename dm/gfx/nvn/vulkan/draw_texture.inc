@@ -50,8 +50,10 @@ typedef struct {
 static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *tr, draw_texture_params *params) {
     border_view sampled = sampler_view(v,tr);
     if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) return sampler_for(p,sampled);
+    if (g_minmax_filter && !p.cmp_mode && native_reduction_view(v,tr,0,0)) return sampler_for(p,sampled);
     if (p.aniso > 1 || p.cmp_mode) {
         RED_ONCE(103, "DrawTexture reduction with anisotropy or depth comparison is unavailable");
+        p.reduction=NVN_SAMPLER_REDUCTION_AVERAGE;
         return sampler_for(p,sampled);
     }
     uint32_t levels = v->levels;

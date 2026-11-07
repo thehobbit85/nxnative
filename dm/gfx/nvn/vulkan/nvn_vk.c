@@ -409,6 +409,7 @@ static void *completion_thread(void *a) {
 // ---------- Device ----------
 static int g_vertex_stores, g_has_u8, g_storage_ms, g_precise_visibility, g_depth_clamp, g_depth_bias_clamp;
 static int g_logic_op, g_non_solid_fill, g_layer_output;
+static int g_minmax_filter, g_minmax_swizzle;
 static uint32_t g_custom_border_limit, g_custom_border_count;
 static int g_border_from_image, g_border_without_format;
 static float g_max_anisotropy;
@@ -476,6 +477,7 @@ static void vk_init_(void) {
     // Every feature the GPU has is enabled (the translated shaders may use any of them), except the costly robustness beyond robustBufferAccess. The feature structures
     // chained are only those of the GPU's Vulkan version and extensions (1.1 phones have neither the 1.2 / 1.3 structures nor dynamic rendering)
     uint32_t dv = g_props.apiVersion;
+    int minmax_ext=0, driver_properties_ext=0;
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
     int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0, has_calibrated = 0;
@@ -493,6 +495,8 @@ static void vk_init_(void) {
         border_swizzle_ext |= !strcmp(ep[i].extensionName, VK_EXT_BORDER_COLOR_SWIZZLE_EXTENSION_NAME);
         divisor_ext |= ep[i].specVersion >= 3 && !strcmp(ep[i].extensionName,VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
         divisor_khr |= !strcmp(ep[i].extensionName,VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+        minmax_ext |= !strcmp(ep[i].extensionName,VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME);
+        driver_properties_ext |= !strcmp(ep[i].extensionName,VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
     }
     free(ep);
     g_subgroup_sizes = (VkPhysicalDeviceSubgroupSizeControlProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
@@ -505,6 +509,10 @@ static void vk_init_(void) {
     else if (divisor_khr) props2.pNext=&div_khr_props;
     VkPhysicalDeviceCustomBorderColorPropertiesEXT border_props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT, props2.pNext};
     if (border_ext) props2.pNext = &border_props;
+    VkPhysicalDeviceSamplerFilterMinmaxProperties minmax_props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES,props2.pNext};
+    if (dv>=VK_API_VERSION_1_2 || minmax_ext) props2.pNext=&minmax_props;
+    VkPhysicalDeviceDriverProperties driver_props={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,props2.pNext};
+    if (dv>=VK_API_VERSION_1_2 || driver_properties_ext) props2.pNext=&driver_props;
     int relaxed_texels=!getenv("DM_VK_STRICT_TEXEL_ALIGNMENT") && (dv>=VK_API_VERSION_1_3 || texel_ext);
     if (relaxed_texels) {
         g_texel_limits=(VkPhysicalDeviceTexelBufferAlignmentProperties){VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_PROPERTIES,props2.pNext};
@@ -554,7 +562,14 @@ static void vk_init_(void) {
     if (getenv("DM_VK_NO_WIREFRAME")) f2.features.fillModeNonSolid = VK_FALSE;
     g_non_solid_fill = f2.features.fillModeNonSolid;
     f13.robustImageAccess = VK_FALSE;
-    const char *ext[11]; uint32_t next = 0;
+    const char *ext[12]; uint32_t next = 0;
+    g_minmax_filter=(dv>=VK_API_VERSION_1_2 ? f12.samplerFilterMinmax : minmax_ext) && !getenv("DM_VK_NO_SAMPLER_MINMAX");
+    // Qualification found weighted min/max results on emulator software
+    // drivers, including a fractional-mip blend on desktop Lavapipe.
+    if (driver_props.driverID==VK_DRIVER_ID_MESA_LLVMPIPE || driver_props.driverID==VK_DRIVER_ID_GOOGLE_SWIFTSHADER)
+        g_minmax_filter=0;
+    g_minmax_swizzle=minmax_props.filterMinmaxImageComponentMapping;
+    if (g_minmax_filter && dv<VK_API_VERSION_1_2) ext[next++]=VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME;
     if (dv<VK_API_VERSION_1_3) {
         if (texel_features.texelBufferAlignment) ext[next++]=VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME;
         else relaxed_texels=0;
@@ -1420,8 +1435,18 @@ static VkSampler sampler_for(samp_par p, border_view view) {
             }
         }
     }
+    int custom_border=si.pNext==&custom;
+    VkSamplerReductionModeCreateInfo reduction={VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO,si.pNext};
+    if (g_minmax_filter && !p.cmp_mode &&
+        (p.reduction==NVN_SAMPLER_REDUCTION_MIN || p.reduction==NVN_SAMPLER_REDUCTION_MAX)) {
+        reduction.reductionMode=p.reduction==NVN_SAMPLER_REDUCTION_MIN ? VK_SAMPLER_REDUCTION_MODE_MIN : VK_SAMPLER_REDUCTION_MODE_MAX;
+        si.pNext=&reduction;
+        // Metal's reduction samplers always reduce across contributing mips.
+        si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        if (p.minf<2) si.minLod=si.maxLod=0;
+    }
     VkSampler s; if (vkCreateSampler(g_dev, &si, NULL, &s) != VK_SUCCESS) return g_dummy_samp;
-    if (si.pNext == &custom) ++g_custom_border_count;
+    if (custom_border) ++g_custom_border_count;
     g_sc = realloc(g_sc, (g_nsc + 1) * sizeof *g_sc); g_sc[g_nsc++] = (scache){p, view, s};
     return s;
 }
@@ -2825,9 +2850,11 @@ static int shader_texel_biases(const shader_t *s, texel_bias *edits, size_t *cou
     }
     return 1;
 }
+#include "native_reduction.inc"
 static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t *capacity, size_t *count) {
     *count = 0;
     if (!g_has_reduction_samplers) return 1;
+    if (native_shader_reduction(s)) return 1;
     for (int i=0; i<s->nb; i++) {
         const sbind *b = &s->b[i];
         if (b->type != BT_CIS && b->type != BT_SAMP) continue;
