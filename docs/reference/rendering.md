@@ -50,6 +50,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on** — the existing actual-Maxwell pool export executes 1,024 divergent lane samples per render mode through sparse IDs up to 65,536, missing entries, both pool bases, empty textures and sampler re-registration. Its compacted module passes `spirv-val`.
 - **Open** — the compact set must fit the device descriptor limits. Large live working sets, physical drivers and game-level qualification remain part of the later validation pass.
 
+### Vulkan raw-address reads
+
+- **Symptom** — a shader requires physical-address pool replay through `gmem_map`.
+- **Cause** — a pointer loaded from guest storage can reach any addressed memory pool. Its guest address needs a Vulkan buffer-device-address mapping while ordinary SSBO aliases retain the same bytes.
+- **Fix** — enable buffer device addresses through Vulkan 1.2 or `VK_KHR_buffer_device_address`, and allocate addressable submission backing. Remember addressed-pool intent across registration order, collect those pool ranges with the command's ordinary storage, and reuse ordered GPU writes during allocation. Bind the shared sorted guest-range table with device-address deltas and lookup hints. Trim overlapping table ranges and preserve low address bits for unaligned pool bases.
+- **Found on** — the existing Maxwell load exports cover unsigned/signed bytes and shorts, scalar/vector words, both present and missing addresses, overlapping and unaligned pools, and reads after an earlier GPU buffer clear in both render modes.
+- **Open** — raw stores/atomics and write-log publication are the next implementation increment. Pools added after a command is encoded, large live working sets and physical-driver qualification need further coverage.
+
 ### Vulkan descriptor exhaustion within one submission
 
 - **Symptom:** later draws or dispatches disappear after `descriptor pool exhausted in one submission: draws are dropped`.

@@ -820,3 +820,9 @@ resource-pools-fixture: fixture
 	PATH="$(dir $(GLSLC)):$$PATH" python3 ../../../android/tests/resource_pool_fixture.py $(B)/resource-pool-fixture
 	cp $(B)/resource-pool-fixture/export/*.spv $(B)/resource-pool-fixture/export/*.vk.txt $(B)/shaders/
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: resource_pools.inc
+$(B)/t_replay: tests/global_memory.inc
+.PHONY: global-memory-fixture
+global-memory-fixture: fixture
+	PATH="$(dir $(GLSLC)):$$PATH" python3 ../../../android/tests/global_memory_fixture.py $(B)/global-memory-fixture
+	cp $(B)/global-memory-fixture/export/*.spv $(B)/global-memory-fixture/export/*.vk.txt $(B)/shaders/
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: global_memory_read.inc

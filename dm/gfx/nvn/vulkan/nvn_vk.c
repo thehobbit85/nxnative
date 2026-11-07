@@ -55,6 +55,8 @@ static int g_segment_timestamps, g_cut_draws;
 static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
 static int g_draw_parameters, g_descriptor_tables, g_texel_descriptor_tables;
 static int g_sampled_indexing,g_texel_indexing;
+static int g_buffer_address;
+static PFN_vkGetBufferDeviceAddress p_buffer_address;
 static uint32_t g_vertex_divisor_limit = 1;
 static VkPhysicalDeviceTexelBufferAlignmentProperties g_texel_limits;
 static VkPhysicalDeviceSubgroupProperties g_subgroup;
@@ -73,10 +75,16 @@ static VkDeviceMemory mem_alloc(VkMemoryRequirements r, VkMemoryPropertyFlags wa
     VkDeviceMemory m; VKCHECK(vkAllocateMemory(g_dev, &ai, NULL, &m)); return m;
 }
 static VkBuffer buf_new(VkDeviceSize n, VkBufferUsageFlags u, VkDeviceMemory *m, void **map) {
+    if (g_buffer_address && (u&VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) u|=VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, n, u, VK_SHARING_MODE_EXCLUSIVE, 0, NULL};
     VkBuffer b; VKCHECK(vkCreateBuffer(g_dev, &bi, NULL, &b));
     VkMemoryRequirements r; vkGetBufferMemoryRequirements(g_dev, b, &r);
-    *m = mem_alloc(r, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (u&VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
+        VkMemoryAllocateFlagsInfo flags={VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,NULL,VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,0};
+        VkMemoryAllocateInfo info={VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,&flags,r.size,
+            mem_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+        VKCHECK(vkAllocateMemory(g_dev,&info,NULL,m));
+    } else *m = mem_alloc(r, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     VKCHECK(vkBindBufferMemory(g_dev, b, *m, 0));
     if (map) VKCHECK(vkMapMemory(g_dev, *m, 0, VK_WHOLE_SIZE, 0, map));
     return b;
@@ -479,7 +487,7 @@ static void vk_init_(void) {
     // Every feature the GPU has is enabled (the translated shaders may use any of them), except the costly robustness beyond robustBufferAccess. The feature structures
     // chained are only those of the GPU's Vulkan version and extensions (1.1 phones have neither the 1.2 / 1.3 structures nor dynamic rendering)
     uint32_t dv = g_props.apiVersion;
-    int minmax_ext=0, driver_properties_ext=0;
+    int minmax_ext=0, driver_properties_ext=0, address_ext=0;
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep); vkEnumerateDeviceExtensionProperties(g_pd, NULL, &ne, ep);
     int has_sc = 0, has_u8 = 0, has_dr = 0, has_subgroup_sizes = 0, has_calibrated = 0;
@@ -498,6 +506,7 @@ static void vk_init_(void) {
         divisor_ext |= ep[i].specVersion >= 3 && !strcmp(ep[i].extensionName,VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
         divisor_khr |= !strcmp(ep[i].extensionName,VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
         minmax_ext |= !strcmp(ep[i].extensionName,VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME);
+        address_ext |= !strcmp(ep[i].extensionName,VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
         driver_properties_ext |= !strcmp(ep[i].extensionName,VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
     }
     free(ep);
@@ -531,6 +540,8 @@ static void vk_init_(void) {
     VkPhysicalDeviceShaderDrawParametersFeatures sdp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
     VkPhysicalDeviceDescriptorIndexingFeatures indexing = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
     void *chain = dv < VK_API_VERSION_1_2 && descriptor_indexing ? &indexing : NULL;
+    VkPhysicalDeviceBufferDeviceAddressFeatures address_features={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,chain};
+    if (dv<VK_API_VERSION_1_2 && address_ext) chain=&address_features;
     VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT texel_features={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_FEATURES_EXT,chain};
     if (relaxed_texels && dv<VK_API_VERSION_1_3) chain=&texel_features;
     VkPhysicalDeviceCustomBorderColorFeaturesEXT border_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, chain};
@@ -564,7 +575,9 @@ static void vk_init_(void) {
     if (getenv("DM_VK_NO_WIREFRAME")) f2.features.fillModeNonSolid = VK_FALSE;
     g_non_solid_fill = f2.features.fillModeNonSolid;
     f13.robustImageAccess = VK_FALSE;
-    const char *ext[12]; uint32_t next = 0;
+    const char *ext[16]; uint32_t next = 0;
+    g_buffer_address=(dv>=VK_API_VERSION_1_2 ? f12.bufferDeviceAddress : address_features.bufferDeviceAddress);
+    if (g_buffer_address && dv<VK_API_VERSION_1_2) ext[next++]=VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
     g_minmax_filter=(dv>=VK_API_VERSION_1_2 ? f12.samplerFilterMinmax : minmax_ext) && !getenv("DM_VK_NO_SAMPLER_MINMAX");
     // Qualification found weighted min/max results on emulator software
     // drivers, including a fractional-mip blend on desktop Lavapipe.
@@ -627,6 +640,10 @@ static void vk_init_(void) {
     VKCHECK(vkCreateDevice(g_pd, &di, NULL, &g_dev));
     if (g_segment_timestamps && has_calibrated)
         p_calibrated_timestamps = (PFN_vkGetCalibratedTimestampsEXT)vkGetDeviceProcAddr(g_dev, "vkGetCalibratedTimestampsEXT");
+    if (g_buffer_address) {
+        p_buffer_address=(PFN_vkGetBufferDeviceAddress)vkGetDeviceProcAddr(g_dev,dv>=VK_API_VERSION_1_2 ? "vkGetBufferDeviceAddress" : "vkGetBufferDeviceAddressKHR");
+        if (!p_buffer_address) g_buffer_address=0;
+    }
     vkGetDeviceQueue(g_dev, g_qf, 0, &g_q);
     pcache_load();
     if (dv >= VK_API_VERSION_1_2 && f12.timelineSemaphore && !getenv("DM_VK_NO_TIMELINE")) {
@@ -1470,7 +1487,7 @@ static VkSampler samp_get(int sid, border_view view, int reduce_in_shader) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2, K_TEX_POOL, K_POOL_BOUNDS };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2, K_TEX_POOL, K_POOL_BOUNDS, K_GMEM_MAP };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU, S_SAMP_SLOTS, S_SAMP_C2, S_SAMP_POOL };
 static int sampler_source(const char *kind) {
     if (!strcmp(kind,"samp_pool")) return S_SAMP_POOL;
@@ -1871,8 +1888,11 @@ static shader_t *shader_by_key(const char *key) {
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
         else if (sscanf(ln, "vin %d %d", &l, &t) == 2 && l >= 0 && l < 32) { s->vin[l] = (uint8_t)t; s->vin_mask |= 1u << l; }
         else if (sscanf(ln, "b %d %7s %d %15s %d %d %15s %d %3s", &b, ty, &cnt, kind, &reg, &off, sk, &sreg, access) >= 8 && s->nb < DM_VK_MAX_BINDINGS) {
-            if (!strcmp(kind, "gmem_map") || !strcmp(kind, "gmem_log")) {
-                LOG("[RED] vk: shader %s requires physical-address pool replay", key); free(txt); free(spv); return s;
+            if (!strcmp(kind,"gmem_log") || (!strcmp(kind,"gmem_map") && !strstr(ln," gmem_write=0"))) {
+                LOG("[RED] vk: shader %s requires raw-memory write-log replay",key);free(txt);free(spv);return s;
+            }
+            if (!strcmp(kind,"gmem_map") && !g_buffer_address) {
+                LOG("[RED] vk: shader %s requires buffer device addresses",key);free(txt);free(spv);return s;
             }
             sbind *e = &s->b[s->nb++]; e->binding = (uint32_t)b; e->count = cnt > 0 ? (uint32_t)cnt : 1; e->reg = (int16_t)reg; e->off = off; e->sreg = (int16_t)sreg;
             if (dm_vk_resource_line(ln, strlen(ln), &e->shape)) { free(txt); free(spv); return s; }
@@ -1895,6 +1915,10 @@ static shader_t *shader_by_key(const char *key) {
             if (!strcmp(kind,"tex_c2a")) e->kind=K_TEX_C2;
             if (!strcmp(kind,"tex_pool")) e->kind=K_TEX_POOL;
             if (!strcmp(kind,"pool_bounds")) e->kind=K_POOL_BOUNDS;
+            if (!strcmp(kind,"gmem_map")) {
+                if (e->type!=BT_SSBO || cnt!=1) goto bad_table;
+                e->kind=K_GMEM_MAP;
+            }
             e->skind = sampler_source(sk);
             if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
             if (e->kind==K_TEX_SLOTS || e->skind==S_SAMP_SLOTS) {
@@ -2717,6 +2741,11 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
 #define MAX_BUFFER_BINDINGS (2 * (MAX_STAGE_TEXELS + DM_VK_MAX_BINDINGS))
 typedef struct { uint64_t addr, size; VkBuffer buf; VkDeviceSize off; uint8_t *p; uint64_t texel; VkDeviceSize texel_align; int writable, conflict; } storage_range;
 static storage_range g_storage[MAX_BUFFER_BINDINGS]; static size_t g_nstorage;
+typedef struct { const uint8_t *mem; uint64_t size; int addressed; } pool_range;
+static pool_range *g_pool;
+static size_t g_npool, g_cpool;
+static pool_range *g_addressed;static size_t g_naddressed;
+static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
 static int is_texel(const sbind *b) { return b->type == BT_TBUF || b->type == BT_UTB || b->type == BT_STB; }
 typedef struct { p_bind_buf range; VkFormat format; uint32_t bytes, swizzle, scaled; VkBufferUsageFlags single_usage; } texel_range;
 // The staging buffers carry both texel usage bits. Their views must meet
@@ -2940,6 +2969,7 @@ static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t
     return 1;
 }
 #include "wrapped_buffer.inc"
+#include "global_memory_read.inc"
 static int prepare_storage(shader_t **first, shader_t **second) {
     g_nstorage = 0;
     int needs_texel_variant=0;
@@ -2976,6 +3006,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
             }
         }
     }
+    if (!collect_global_reads(stages,2)) return 0;
     qsort(g_storage, g_nstorage, sizeof *g_storage, storage_order);
     size_t n = 0;
     for (size_t i = 0; i < g_nstorage; i++) {
@@ -3374,6 +3405,8 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
             if (b->kind == K_CAPTURE_RECORDS || b->kind == K_CAPTURE_CONTROL) {
                 if (!capture) return VK_NULL_HANDLE;
                 *d = b->kind == K_CAPTURE_RECORDS ? capture->records : capture->control;
+            } else if (b->kind==K_GMEM_MAP) {
+                if (!global_memory_map(d)) return VK_NULL_HANDLE;
             } else if (b->kind == K_TABLE_MAP) {
                 const handle_table *table = table_cache[stage][b->slot];
                 VkDeviceSize bytes = (table->map[0]+2u) * sizeof(uint32_t);
@@ -5138,13 +5171,22 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 }
 
 // Guest extents for checked address lookup and open-ended storage bindings.
-typedef struct { const uint8_t *mem; uint64_t size; } pool_range;
-static pool_range *g_pool;
-static size_t g_npool, g_cpool;
-static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
-// The Vulkan buffer paths resolve each referenced guest address against registered
-// extents at binding time. Taking an address does not create or pin a GPU buffer.
-void mtl_pool_addressed(const void *mem, uint64_t size) { (void)mem; (void)size; }
+
+// Raw shader addresses can reach any pool from which the guest took an address.
+// Keep that intent when the address is taken before the pool is registered.
+void mtl_pool_addressed(const void *mem, uint64_t size) {
+    if (!size || size>UINT64_MAX-(uintptr_t)mem) return;
+    pthread_mutex_lock(&g_pool_mu);
+    int known=0;
+    for (size_t i=0;i<g_naddressed;i++) if (g_addressed[i].mem==mem && g_addressed[i].size==size) known=1;
+    if (!known) {
+        pool_range *next=realloc(g_addressed,(g_naddressed+1)*sizeof *next);
+        if (!next) die("Vulkan: cannot track addressed pools");
+        g_addressed=next;g_addressed[g_naddressed++]=(pool_range){mem,size,1};
+    }
+    for (size_t i=0;i<g_npool;i++) if (overlaps((uintptr_t)mem,size,(uintptr_t)g_pool[i].mem,g_pool[i].size)) g_pool[i].addressed=1;
+    pthread_mutex_unlock(&g_pool_mu);
+}
 void mtl_pool_add(const void *mem, uint64_t size) {
     if (size > UINT64_MAX - (uintptr_t)mem) die("Vulkan: memory pool address overflow");
     pthread_mutex_lock(&g_pool_mu);
@@ -5155,7 +5197,9 @@ void mtl_pool_add(const void *mem, uint64_t size) {
         if (!next) die("Vulkan: cannot track memory pools");
         g_pool = next; g_cpool = capacity;
     }
-    g_pool[g_npool++] = (pool_range){mem, size};
+    int addressed=0;
+    for (size_t i=0;i<g_naddressed;i++) if (overlaps((uintptr_t)mem,size,(uintptr_t)g_addressed[i].mem,g_addressed[i].size)) addressed=1;
+    g_pool[g_npool++] = (pool_range){mem,size,addressed};
     pthread_mutex_unlock(&g_pool_mu);
 }
 void mtl_pool_del(const void *mem) { pthread_mutex_lock(&g_pool_mu); for (size_t i = 0; i < g_npool; i++) if (g_pool[i].mem == mem) { g_pool[i] = g_pool[--g_npool]; break; } pthread_mutex_unlock(&g_pool_mu); }
