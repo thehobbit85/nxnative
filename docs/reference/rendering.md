@@ -153,6 +153,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** Metal validation aborts in `tex_by_id` with `MTLPixelFormatDepth32Float` not compatible with `MTLPixelFormatR32Float`.
 - **Cause:** an NVN sampled view requests the single-channel colour format of a depth attachment. Metal forbids that format cast even with pixel-format-view usage. Reading the unmodified depth texture as colour can also repeat depth in the green and blue channels.
 - **Fix:** for D32F viewed as R32F, or D16 viewed as R16 UNORM, keep the depth format and map its value to `(depth, 0, 0, 1)` before applying the descriptor's channel swizzle. The view selects the requested mips and layers of the original attachment, so later depth writes stay visible.
+- **Android:** creating a depth image view with the colour format can abort the Vulkan driver. Keep the original physical depth format and compose the red channel with the guest mapping. The view cache includes the selected aspect, so a stencil registration and a depth registration can both read the same mip and slice after a render write. The Android fixture checks D16, D32F, D24S8 and D32FS8 through the float depth and unsigned stencil shader paths.
 - **Found on:** [Burnout Paradise Remastered (#985)](https://github.com/seedds/nxnative/issues/985) (D32F as R32F).
 
 ### Texture views cached by texture and view parameters
