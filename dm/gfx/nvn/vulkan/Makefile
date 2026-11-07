@@ -240,7 +240,19 @@ $(B)/t_replay: tests/empty_images.inc
 $(B)/t_replay: tests/empty_ms.inc
 $(B)/t_replay: tests/subresource_views.inc
 $(B)/t_replay: tests/sampler_reduction.inc tests/cube_reduction.inc tests/draw_texture_anisotropy.inc
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sample_reduction.h spv_reduction_cube.inc
+$(B)/t_replay: tests/sampler_anisotropy.inc
+.PHONY: sampler-anisotropy-fixture
+fixture: sampler-anisotropy-fixture
+sampler-anisotropy-fixture:
+	GLSLC="$(GLSLC)" python3 tests/sampler_anisotropy_fixture.py "$(B)/shaders"
+.PHONY: sampler-anisotropy-check
+sampler-anisotropy-check: sampler-anisotropy-fixture $(B)/t_sample_reduction
+	@set -e; for input in $(B)/shaders/00000000feedb2*.spv; do \
+	  key=$${input##*/}; value=$${key%.spv}; binding=$$(( (0x$$value % 2) * 3 )); \
+	  $(B)/t_sample_reduction "$$input" "$(B)/reduction-$$key" "$$binding" anisotropy; \
+	  $(SPIRV_VAL) --target-env vulkan1.1 "$(B)/reduction-$$key"; \
+	done
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sample_reduction.h spv_reduction_cube.inc spv_reduction_anisotropy.inc
 .PHONY: cube-reduction-fixture
 fixture: cube-reduction-fixture
 cube-reduction-fixture:
@@ -796,7 +808,7 @@ one-row-guest-fixture: fixture
 	cp $(B)/one-row-samples/export/*.spv $(B)/one-row-samples/export/*.vk.txt $(B)/shaders/
 	cp $(B)/one-row-queries/export/*.spv $(B)/one-row-queries/export/*.vk.txt $(B)/shaders/
 
-$(B)/t_sample_reduction: tests/t_sample_reduction.c spv_sample_reduction.h spv_reduction_cube.inc spv_one_row.h spv_texel_bias.h spv_texel_wide.inc
+$(B)/t_sample_reduction: tests/t_sample_reduction.c spv_sample_reduction.h spv_reduction_cube.inc spv_reduction_anisotropy.inc spv_one_row.h spv_texel_bias.h spv_texel_wide.inc
 	mkdir -p $(B)
 	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror -Wno-unused-function $(BUILD_CFLAGS) $< -o $@
 .PHONY: sampler-reduction-check

@@ -12,7 +12,8 @@ int main(int argc, char **argv) {
     uint32_t *input = malloc(bytes); assert(input);
     assert(fread(input, 1, bytes, file) == (size_t)bytes); fclose(file);
     int array = argc == 5 && !strcmp(argv[4], "array");
-    if (argc == 5 && !array) {
+    int anisotropy=argc==5 && !strcmp(argv[4],"anisotropy");
+    if (argc == 5 && !array && !anisotropy) {
         assert(!strcmp(argv[4], "no-import"));
         for (size_t i=5; i<(size_t)bytes/4;) {
             unsigned len=input[i]>>16, op=input[i]&0xffff;
@@ -24,7 +25,7 @@ int main(int argc, char **argv) {
         }
     }
     sample_reduction filters[2] = {{.binding=(uint32_t)strtoul(argv[3],NULL,10), .minimum=1,
-        .min_linear=1, .mag_linear=1, .max_lod=10, .max_bias=16}};
+        .min_linear=1, .mag_linear=1, .max_lod=10, .max_bias=16,.anisotropy=anisotropy ? 4 : 1}};
     if (array) {
         filters[1]=filters[0]; filters[1].element=2; filters[1].minimum=0; filters[1].min_lod=1;
         filters[0].element=1; filters[0].bias=.5f; filters[0].min_linear=0;

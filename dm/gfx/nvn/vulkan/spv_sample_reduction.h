@@ -6,6 +6,7 @@
 typedef struct {
     uint32_t binding, minimum, min_linear, mag_linear, element;
     float min_lod, max_lod, bias, max_bias;
+    uint32_t anisotropy;
 } sample_reduction;
 typedef struct {
     uint32_t type, scalar, lanes, image, binding, dimension, array, index;
@@ -13,6 +14,7 @@ typedef struct {
 } reduction_id;
 typedef struct {
     uint32_t minimum, min_linear, mag_linear, min_lod, max_lod, bias, max_bias, active;
+    uint32_t anisotropy, taps;
 } reduction_filter;
 typedef struct {
     texel_module code;
@@ -73,7 +75,7 @@ static int reduction_filter_for(reduction_module *m, reduction_id sampled, const
     uint32_t index_type = sampled.index < m->bound ? m->ids[sampled.index].type : 0;
     if (sampled.index && (!index_type || index_type >= m->bound || !m->ids[index_type].integer)) return 0;
     uint32_t *fields[] = {&out->minimum, &out->min_linear, &out->mag_linear, &out->min_lod,
-                         &out->max_lod, &out->bias, &out->max_bias};
+                         &out->max_lod, &out->bias, &out->max_bias, &out->anisotropy};
     memset(out, 0, sizeof *out);
     if (sampled.index) {
         out->active = m->code.next++;
@@ -89,7 +91,9 @@ static int reduction_filter_for(reduction_module *m, reduction_id sampled, const
             match = REDUCTION_VALUE(m, 170, m->code.boolean, sampled.index, element);
             out->active = REDUCTION_VALUE(m, 166, m->code.boolean, out->active, match); // OpLogicalOr
         }
-        const float values[] = {f->minimum, f->min_linear, f->mag_linear, f->min_lod, f->max_lod, f->bias, f->max_bias};
+        uint32_t taps=f->anisotropy<1 ? 1 : f->anisotropy>16 ? 16 : f->anisotropy;
+        if (taps>out->taps) out->taps=taps;
+        const float values[] = {f->minimum, f->min_linear, f->mag_linear, f->min_lod, f->max_lod, f->bias, f->max_bias,taps};
         for (unsigned field = 0; field < sizeof fields / sizeof *fields; field++) {
             uint32_t value = reduction_float(m, values[field]);
             *fields[field] = match && *fields[field] ? REDUCTION_VALUE(m, 169, m->floating, match, value, *fields[field]) : value;
@@ -202,6 +206,8 @@ static uint32_t reduction_gradient_lod(reduction_module *m, uint32_t image, uint
     return REDUCTION_VALUE(m, 133, m->floating, logarithm, reduction_float(m, .5f));
 }
 
+#include "spv_reduction_anisotropy.inc"
+
 static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len, const reduction_filter *filter) {
     // Other sample forms are diagnosed before their sampler can become point
     // filtered. Offsets stay in texel units and use native sampler addressing.
@@ -266,7 +272,17 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     last = REDUCTION_VALUE(m, 131, m->floating, last, one);
     uint32_t lower = filter->min_lod, upper = filter->max_lod;
     uint32_t lod = explicit_lod;
-    if (implicit) {
+    reduction_footprint footprint={0};
+    if (filter->taps>1 && (implicit || gradient)) {
+        uint32_t dx=explicit_lod;
+        if (implicit) {
+            uint32_t position=!array ? coordinate : is_cube ? REDUCTION_VALUE(m,79,m->float3,coordinate,coordinate,0,1,2) :
+                REDUCTION_VALUE(m,79,m->float2,coordinate,coordinate,0,1);
+            dx=REDUCTION_VALUE(m,207,spatial,position);dy=REDUCTION_VALUE(m,208,spatial,position);
+        }
+        footprint=reduction_anisotropic_footprint(m,image,dx,dy,dimensions,array,face,filter->anisotropy);
+        lod=footprint.lod;
+    } else if (implicit) {
         uint32_t xy = !array ? coordinate : is_cube ? REDUCTION_VALUE(m,79,m->float3,coordinate,coordinate,0,1,2) :
             REDUCTION_VALUE(m,79,m->float2,coordinate,coordinate,0,1);
         uint32_t query = REDUCTION_VALUE(m, 105, m->float2, p[3], xy);
@@ -291,9 +307,24 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t first = REDUCTION_EXT(m, m->floating, 8, lod), second = REDUCTION_EXT(m, m->floating, 9, lod);
     uint32_t minimum = REDUCTION_VALUE(m, 186, m->code.boolean, filter->minimum, zero);
     minimum = reduction_mask(m, minimum, 4);
-    uint32_t a = reduction_level(m, p[3], image, coordinate, first, linear, dimensions, array, minimum, offset_mask, offset, reference, face);
-    uint32_t b = reduction_level(m, p[3], image, coordinate, second, linear, dimensions, array, minimum, offset_mask, offset, reference, face);
-    uint32_t value = reduction_combine(m, a, b, minimum);
+    uint32_t value=0;
+    for (unsigned tap=0;tap<(footprint.samples ? filter->taps : 1);tap++) {
+        reduction_cube shifted=cube;uint32_t point=coordinate;
+        if (footprint.samples) {
+            point=reduction_anisotropic_coordinate(m,coordinate,&footprint,tap,dimensions,array,face);
+            if (is_cube) shifted=reduction_cube_project(m,point);
+        }
+        const reduction_cube *sample_face=is_cube ? &shifted : NULL;
+        uint32_t a=reduction_level(m,p[3],image,point,first,linear,dimensions,array,minimum,offset_mask,offset,reference,sample_face);
+        uint32_t b=reduction_level(m,p[3],image,point,second,linear,dimensions,array,minimum,offset_mask,offset,reference,sample_face);
+        uint32_t reduced=reduction_combine(m,a,b,minimum);
+        if (!tap) value=reduced;
+        else {
+            uint32_t used=REDUCTION_VALUE(m,184,m->code.boolean,reduction_float(m,(float)tap),footprint.samples);
+            uint32_t joined=reduction_combine(m,value,reduced,minimum);
+            value=REDUCTION_VALUE(m,169,m->float4,reduction_mask(m,used,4),joined,value);
+        }
+    }
     if (comparison) value = reduction_component(m, value, 0);
     return reduction_finish(m, p, len, value, filter->active);
 }
@@ -303,11 +334,21 @@ static int reduction_query(reduction_module *m, const uint32_t *p, unsigned len,
     uint32_t image_type = m->ids[m->ids[p[3]].type].image;
     if (!image_type || m->ids[image_type].dimension < 1 || m->ids[image_type].dimension > 3 || m->ids[image_type].array > 1) return 0;
     if (m->ids[p[4]].type != (m->ids[image_type].dimension >= 2 ? m->float3 : m->float2)) return 0;
-    uint32_t query = REDUCTION_VALUE(m, 105, m->float2, p[3], p[4]);
-    uint32_t raw = reduction_component(m, query, 1);
+    uint32_t image=REDUCTION_VALUE(m,100,image_type,p[3]),raw;
+    if (filter->taps>1) {
+        int cube=m->ids[image_type].dimension==3;
+        unsigned dimensions=cube ? 2 : m->ids[image_type].dimension+1;
+        uint32_t spatial=cube || dimensions==3 ? m->float3 : m->float2;
+        uint32_t dx=REDUCTION_VALUE(m,207,spatial,p[4]),dy=REDUCTION_VALUE(m,208,spatial,p[4]);
+        reduction_cube face={0};if (cube) face=reduction_cube_project(m,p[4]);
+        raw=reduction_anisotropic_footprint(m,image,dx,dy,dimensions,m->ids[image_type].array,
+            cube ? &face : NULL,filter->anisotropy).lod;
+    } else {
+        uint32_t query=REDUCTION_VALUE(m,105,m->float2,p[3],p[4]);
+        raw=reduction_component(m,query,1);
+    }
     raw = REDUCTION_VALUE(m, 129, m->floating, raw, filter->bias);
     uint32_t lod = REDUCTION_EXT(m, m->floating, 43, raw, filter->min_lod, filter->max_lod);
-    uint32_t image = REDUCTION_VALUE(m, 100, image_type, p[3]);
     uint32_t levels = REDUCTION_VALUE(m, 106, m->sint, image);
     uint32_t last = REDUCTION_VALUE(m, 111, m->floating, levels);
     last = REDUCTION_VALUE(m, 131, m->floating, last, reduction_float(m, 1));

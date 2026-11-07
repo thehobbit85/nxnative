@@ -41,6 +41,7 @@ static int native_shader_reduction(const shader_t *shader) {
             if (sampler.reduction!=NVN_SAMPLER_REDUCTION_MIN && sampler.reduction!=NVN_SAMPLER_REDUCTION_MAX) continue;
             // Vulkan's native min/max sampler forbids depth comparison.
             if (sampler.cmp_mode) return 0;
+            if (fminf(16,fmaxf(1,floorf(sampler.aniso)))>g_max_anisotropy) return 0;
             reduced=1;
             if (binding->type==BT_CIS && !native_reduction_image(shader->guest_stage,binding,element)) return 0;
         }

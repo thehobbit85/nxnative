@@ -31,6 +31,7 @@ static prog_t subresource_program[3] = {{.nstage=1}, {.nstage=1}, {.nstage=1}};
 static prog_t one_row_guest_program[2][2] = {{{.nstage=1},{.nstage=1}},{{.nstage=1},{.nstage=1}}};
 static prog_t sampler_reduction_program[13][5][2];
 static prog_t cube_reduction_program[16];
+static prog_t sampler_anisotropy_program[42];
 static prog_t sampler_array_program[3][2][2];
 static prog_t sampler_compare_program[12][2];
 static prog_t layered_program[2]={{.nstage=2},{.nstage=2}};
@@ -131,6 +132,11 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
             else { key[4]=0xfe; key[5]=0xed; key[6]=0x99; key[7]=0xb1+8*form+2*constant+separate; }
             return 1;
         }
+    for (int i=0;i<42;i++) if (p==&sampler_anisotropy_program[i]) {
+        int fragment=i%8>=4;assert(stage<(fragment ? 2u : 1u));memset(key,0,8);
+        if (fragment && !stage) key[7]=0x35;
+        else { key[4]=0xfe;key[5]=0xed;key[6]=0xb2;key[7]=i; }return 1;
+    }
     for (int i=0;i<16;i++) if (p==&cube_reduction_program[i]) {
         assert(stage<(i>=8 ? 2u : 1u));memset(key,0,8);
         if (i>=8 && !stage) key[7]=0x35;
@@ -667,6 +673,7 @@ static void float_image_views(void) {
 #include "sampler_reduction.inc"
 #include "cube_reduction.inc"
 #include "draw_texture_anisotropy.inc"
+#include "sampler_anisotropy.inc"
 #include "bc_views.inc"
 static void empty_sampled_slots(void) {
     enum { slot=1462 };
@@ -3315,6 +3322,7 @@ static void native_warp_width(unsigned available) {
 int main(void) {
 #ifdef DM_VK_TEST_SAMPLER_LIMITS
     if (getenv("DM_VK_TEST_DRAW_ANISOTROPY")) { draw_texture_anisotropy();return 0; }
+    if (getenv("DM_VK_TEST_GUEST_ANISOTROPY")) { sampler_anisotropy();return 0; }
     sampler_limits(); return 0;
 #endif
 #ifdef DM_VK_TEST_ANDROID_SURFACE
@@ -3382,6 +3390,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_SAMPLER_REDUCTION")) { sampler_reduction(); sampler_reduction_arrays(); sampler_reduction_compare(); return 0; }
     if (getenv("DM_VK_TEST_CUBE_REDUCTION")) { cube_reduction(); return 0; }
     if (getenv("DM_VK_TEST_DRAW_ANISOTROPY")) { draw_texture_anisotropy(); return 0; }
+    if (getenv("DM_VK_TEST_GUEST_ANISOTROPY")) { sampler_anisotropy();return 0; }
     if (getenv("DM_VK_TEST_BC_VIEWS")) { compressed_color_views(); return 0; }
     if (getenv("DM_VK_TEST_EMPTY_SAMPLED")) { empty_sampled_slots(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
@@ -3441,7 +3450,7 @@ int main(void) {
     feedback_capture();
     float_image_views();
     depth_image_views();
-    cube_ranges();cube_reduction();draw_texture_anisotropy();
+    cube_ranges();cube_reduction();draw_texture_anisotropy();sampler_anisotropy();
     storage_image_views();
     compressed_color_views();
     empty_sampled_slots();

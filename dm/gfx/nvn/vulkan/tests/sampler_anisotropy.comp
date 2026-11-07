@@ -1,0 +1,79 @@
+#version 450
+#if SHAPE == 0
+#define TEXTURE texture2D
+#define SAMPLER sampler2D
+#define COORD coordinate.xy
+#define GRAD value.xy
+#elif SHAPE == 1
+#define TEXTURE texture2DArray
+#define SAMPLER sampler2DArray
+#define COORD coordinate.xyz
+#define GRAD value.xy
+#elif SHAPE == 2
+#define TEXTURE texture3D
+#define SAMPLER sampler3D
+#define COORD coordinate.xyz
+#define GRAD value.xyz
+#elif SHAPE == 3
+#define TEXTURE textureCube
+#define SAMPLER samplerCube
+#define COORD coordinate.xyz
+#define GRAD value.xyz
+#else
+#define TEXTURE textureCubeArray
+#define SAMPLER samplerCubeArray
+#define COORD coordinate
+#define GRAD value.xyz
+#endif
+#ifdef SEPARATE
+#ifdef DESCRIPTOR_ARRAY
+layout(binding=0) uniform TEXTURE source[3];
+layout(binding=3) uniform sampler filtering[3];
+#define SOURCE SAMPLER(source[int(params.lod.y)],filtering[(int(params.lod.y)+1)%3])
+#else
+layout(binding=0) uniform TEXTURE source;
+layout(binding=3) uniform sampler filtering;
+#define SOURCE SAMPLER(source,filtering)
+#endif
+#else
+#ifdef DESCRIPTOR_ARRAY
+layout(binding=0) uniform SAMPLER source[3];
+#define SOURCE source[int(params.lod.y)]
+#else
+layout(binding=0) uniform SAMPLER source;
+#define SOURCE source
+#endif
+#endif
+#if FORM >= 2
+layout(location=0) out vec4 outputColor;
+#else
+layout(local_size_x=1) in;
+layout(binding=1,std430) buffer Result { vec4 outputColor; };
+#endif
+layout(binding=2,std140) uniform Parameters { vec4 coordinate,dx,dy,lod; } params;
+void main() {
+    vec4 coordinate=params.coordinate;
+#if FORM >= 2
+    coordinate+=(gl_FragCoord.x-.5)*params.dx+(gl_FragCoord.y-.5)*params.dy;
+#endif
+#if FORM == 0
+    outputColor=textureLod(SOURCE,COORD,params.lod.x);
+#elif FORM == 1
+    vec4 value=params.dx;
+#if SHAPE < 2
+    vec2 dx=GRAD;
+#else
+    vec3 dx=GRAD;
+#endif
+    value=params.dy;
+    outputColor=textureGrad(SOURCE,COORD,dx,GRAD);
+#elif FORM == 2
+    outputColor=texture(SOURCE,COORD);
+#else
+#if SHAPE < 2
+    outputColor=vec4(textureQueryLod(SOURCE,coordinate.xy),0,1);
+#else
+    outputColor=vec4(textureQueryLod(SOURCE,coordinate.xyz),0,1);
+#endif
+#endif
+}

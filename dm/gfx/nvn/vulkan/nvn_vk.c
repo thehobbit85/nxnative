@@ -2983,11 +2983,7 @@ static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t
             samp_par p = sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? g_sreg[sid] : (samp_par){0};
             pthread_mutex_unlock(&g_rmu);
             if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) continue;
-            float anisotropy = fminf(g_max_anisotropy, fmaxf(1, floorf(p.aniso)));
-            if (anisotropy > 1) {
-                RED_ONCE(121, "shader sampler reduction anisotropy remains unsupported");
-                return 0;
-            }
+            float anisotropy=fminf(16,fmaxf(1,floorf(p.aniso)));
             float lo = p.minf >= 2 ? fmaxf(0, p.lod_min) : 0;
             float hi = p.minf >= 2 ? fmaxf(lo, p.lod_max) : 0;
             float limit = g_props.limits.maxSamplerLodBias;
@@ -3002,7 +2998,7 @@ static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t
             (*edits)[(*count)++] = (sample_reduction){.binding=b->binding, .element=element,
                 .minimum=p.reduction == NVN_SAMPLER_REDUCTION_MIN,
                 .min_linear=p.minf == 1 || p.minf == 3 || p.minf == 5, .mag_linear=p.magf != 0,
-                .min_lod=lo, .max_lod=hi, .bias=lod_bias, .max_bias=limit};
+                .min_lod=lo, .max_lod=hi, .bias=lod_bias, .max_bias=limit,.anisotropy=(uint32_t)anisotropy};
         }
     }
     return 1;
