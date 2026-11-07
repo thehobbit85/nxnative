@@ -4,10 +4,14 @@
 #include "../nvn_hmap.h"
 #include "../../../host/host_memory.h"
 typedef struct { uint64_t pool;int64_t offset;nvn_texdesc description; } texture_alias_key;
+typedef struct { texture_alias_key storage;uint8_t has_layout,layout[8]; } texture_package_key;
 static nvn_hmap g_texture_aliases={.klen=sizeof(texture_alias_key)};
 static nvn_hmap g_texture_serials={.klen=sizeof(uint64_t)};
 static nvn_hmap g_texture_keys={.klen=sizeof(uint64_t)};
 static nvn_hmap g_texture_live={.klen=sizeof(uint64_t)};
+// As in Metal's g_pkg_share, uploaded images are shared but only their serials
+// own them. Include explicit layout bytes and keep their exact encoded format.
+static nvn_hmap g_texture_packages={.klen=sizeof(texture_package_key)};
 static void tex_free(vtex *v);
 // Keep a storage-capable linear allocation for each mutable-format family.
 // X and A formats have identical storage; each descriptor retains its own
@@ -36,6 +40,30 @@ static void texture_bind_serial(uint64_t serial,vtex *v) {
     if (old && old!=v) die("Vulkan: texture serial changed storage without finalization");
     if (!old) v->serial_refs++;
     v->alias_seen=g_fence+1;
+}
+static int texture_package_identity(const tex_t *t,texture_package_key *key) {
+    if (!t->pool || !t->mem || (t->pool->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->d.target==NVN_TEXTURE_TARGET_BUFFER) return 0;
+    memset(key,0,sizeof *key);key->storage.pool=(uintptr_t)t->pool;key->storage.offset=t->off;
+    key->storage.description=t->d;key->storage.description.flags&=~NVN_TEXTURE_FLAGS_IMAGE;
+    key->has_layout=t->has_layout;if (t->has_layout) memcpy(key->layout,t->layout,sizeof key->layout);
+    return 1;
+}
+static vtex *texture_package_find(const tex_t *t) {
+    texture_package_key key;
+    vtex *v=texture_package_identity(t,&key) ? nvn_hm_get(&g_texture_packages,&key) : NULL;
+    if (v) texture_bind_serial(t->serial,v);
+    return v;
+}
+static void texture_package_publish(const tex_t *t,vtex *v) {
+    texture_package_key key;if (v->package_key || !texture_package_identity(t,&key)) return;
+    vtex *old=nvn_hm_get(&g_texture_packages,&key);
+    if (old && old!=v) return;
+    v->package_key=malloc(sizeof key);if (!v->package_key) die("Vulkan: packaged texture identity allocation");
+    memcpy(v->package_key,&key,sizeof key);nvn_hm_put(&g_texture_packages,&key,v);
+}
+static void texture_package_remove(vtex *v) {
+    if (!v->package_key) return;
+    nvn_hm_del(&g_texture_packages,v->package_key);free(v->package_key);v->package_key=NULL;
 }
 static vtex *tex_find(uint64_t serial) {
     vtex *v=nvn_hm_get(&g_texture_serials,&serial);
@@ -85,11 +113,17 @@ static void texture_alias_publish(const tex_t *t,vtex *v) {
 }
 static void texture_retire_unused(vtex *v) {
     if (v->serial_refs || v->alias_owned) return;
+    texture_package_remove(v);
     for (vtex **link=&g_tex[v->serial%NHASH];*link;link=&(*link)->next) if (*link==v) {
         *link=v->next;tex_free(v);return;
     }
 }
 static void texture_alias_drop_pool(const void *pool) {
+    for (uint32_t i=0;i<g_texture_packages.cap;) {
+        vtex *v=g_texture_packages.vals[i];
+        if (!v || ((texture_package_key *)v->package_key)->storage.pool!=(uintptr_t)pool) { i++;continue; }
+        texture_package_remove(v);
+    }
     for (uint32_t i=0;i<g_texture_aliases.cap;) {
         if (!g_texture_aliases.vals[i]) { i++;continue; }
         texture_alias_key key;memcpy(&key,g_texture_aliases.keys+(size_t)i*sizeof key,sizeof key);

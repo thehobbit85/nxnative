@@ -65,3 +65,54 @@ static void check_texture_object_aliases(NVNdevice *device,NVNqueue *queue) {
     API(nvnMemoryPoolFinalize)(&pool);API(nvnMemoryPoolFinalize)(&command_pool);
     puts("Public texture aliases preserved GPU writes, IMAGE-only descriptors, object rebuilds, unused-alias CPU reads, retirement before completion and pool reuse");
 }
+
+// CPU uploads with explicit packaged layouts share one weakly held image.
+// Later GPU writes must be visible through every already-resolved descriptor.
+static void check_texture_packaged_aliases(NVNdevice *device,NVNqueue *queue) {
+    enum { W=8,H=8,BYTES=W*H*4 };
+    static _Alignas(16384) uint8_t storage[0x4000],commands[0x10000];
+    memset(storage,0,sizeof storage);
+    NVNmemoryPoolBuilder pb;NVNmemoryPool pool,command_pool;
+    API(nvnMemoryPoolBuilderSetDefaults)(&pb);API(nvnMemoryPoolBuilderSetDevice)(&pb,device);
+    API(nvnMemoryPoolBuilderSetFlags)(&pb,NVN_MEMORY_POOL_FLAGS_CPU_CACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+    API(nvnMemoryPoolBuilderSetStorage)(&pb,commands,sizeof commands);assert(API(nvnMemoryPoolInitialize)(&command_pool,&pb));
+    API(nvnMemoryPoolBuilderSetStorage)(&pb,storage,sizeof storage);assert(API(nvnMemoryPoolInitialize)(&pool,&pb));
+    NVNbufferAddress address=API(nvnMemoryPoolGetBufferAddress)(&command_pool);
+    NVNtextureBuilder tb;NVNtexture textures[3];NVNpackagedTextureLayout layout={0};
+    API(nvnTextureBuilderSetDefaults)(&tb);API(nvnTextureBuilderSetDevice)(&tb,device);
+    API(nvnTextureBuilderSetTarget)(&tb,NVN_TEXTURE_TARGET_2D);API(nvnTextureBuilderSetSize2D)(&tb,W,H);
+    API(nvnTextureBuilderSetFormat)(&tb,NVN_FORMAT_RGBA8);API(nvnTextureBuilderSetStorage)(&tb,&pool,0);
+    API(nvnTextureBuilderSetPackagedTextureLayout)(&tb,&layout);
+    for (int i=0;i<3;i++) assert(API(nvnTextureInitialize)(&textures[i],&tb));
+    NVNcommandBuffer cb;assert(API(nvnCommandBufferInitialize)(&cb,device));
+    API(nvnCommandBufferAddCommandMemory)(&cb,&command_pool,0,0x3000);
+    NVNcopyRegion full={0,0,0,W,H,1};uint8_t pixels[BYTES];
+    for (int phase=0;phase<4;phase++) {
+        uint8_t expected[]={phase==0 ? 255 : 0,phase>=2 ? 255 : 0,phase==1 ? 255 : 0,255};
+        if (phase<2) {
+            for (int j=0;j<W*H;j++) memcpy(pixels+4*j,expected,4);
+            API(nvnTextureWriteTexels)(&textures[phase ? 2 : 0],NULL,&full,pixels);
+        }
+        if (phase==3) { API(nvnTextureFinalize)(&textures[1]);API(nvnTextureFinalize)(&textures[2]); }
+        API(nvnCommandBufferBeginRecording)(&cb);
+        if (phase==2) {
+            const NVNtexture *targets[]={&textures[1]};
+            API(nvnCommandBufferSetRenderTargets)(&cb,1,targets,NULL,NULL,NULL);
+            API(nvnCommandBufferSetScissor)(&cb,0,0,W,H);
+            API(nvnCommandBufferClearColor)(&cb,0,(float[]){0,1,0,1},15);
+        }
+        API(nvnCommandBufferSetCopyRowStride)(&cb,0);API(nvnCommandBufferSetCopyImageStride)(&cb,0);
+        int readers=phase==3 ? 1 : 2;
+        for (int i=0;i<readers;i++) API(nvnCommandBufferCopyTextureToBuffer)(&cb,&textures[i],NULL,&full,address+0x4000+i*BYTES,0);
+        NVNcommandHandle list=API(nvnCommandBufferEndRecording)(&cb);
+        API(nvnQueueSubmitCommands)(queue,1,&list);API(nvnQueueFinish)(queue);
+        for (int i=0;i<readers;i++) for (int pixel=0;pixel<W*H;pixel++) {
+            uint8_t *got=commands+0x4000+i*BYTES+4*pixel;
+            if (memcmp(got,expected,4)) die("packaged alias phase%d reader%d pixel%d: %u,%u,%u,%u expected %u,%u,%u,%u",
+                phase,i,pixel,got[0],got[1],got[2],got[3],expected[0],expected[1],expected[2],expected[3]);
+        }
+    }
+    API(nvnCommandBufferFinalize)(&cb);API(nvnTextureFinalize)(&textures[0]);
+    API(nvnMemoryPoolFinalize)(&pool);API(nvnMemoryPoolFinalize)(&command_pool);
+    puts("Public packaged aliases shared CPU updates, GPU writes and independent object lifetimes");
+}

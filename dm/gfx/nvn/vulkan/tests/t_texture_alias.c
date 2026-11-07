@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 static void die(const char *format,...) { (void)format;abort(); }
-typedef struct vtex { uint64_t serial,len,alias_seen;unsigned serial_refs;int alias_owned;struct vtex *next; } vtex;
+typedef struct vtex { uint64_t serial,len,alias_seen;unsigned serial_refs;int alias_owned;void *package_key;struct vtex *next; } vtex;
 #define NHASH 64
 static vtex *g_tex[NHASH];static pthread_mutex_t g_rmu=PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_fence;static unsigned retired;
@@ -59,11 +59,25 @@ int main(void) {
     tex_t *unmapped=mmap(NULL,16384,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);assert(unmapped!=MAP_FAILED);
     *unmapped=description(&pool,10,0,8);unmapped->has_layout=1;vtex uv;publish(&uv,unmapped);
     copy=*unmapped;assert(!munmap(unmapped,16384));mtl_tex_release(&copy);assert(retired==10);
+    tex_t upload=description(&pool,11,0,8);upload.has_layout=1;vtex up;publish(&up,&upload);texture_package_publish(&upload,&up);
+    tex_t alias=upload;alias.serial=12;alias.d.flags|=NVN_TEXTURE_FLAGS_IMAGE;mtl_tex_init(&alias);
+    assert(texture_package_find(&alias)==&up && up.serial_refs==2);
+    tex_t different=alias;different.layout[1]=1;assert(!texture_package_find(&different));
+    different=alias;different.d.format=NVN_FORMAT_RGBA8_SRGB;assert(!texture_package_find(&different));
+    mtl_tex_release(&upload);assert(retired==10 && g_texture_packages.n==1);
+    mtl_tex_release(&alias);assert(retired==11 && !g_texture_packages.n);
+    // Pool removal evicts a weak key even while a serial keeps its image alive.
+    upload.serial=13;publish(&up,&upload);texture_package_publish(&upload,&up);
+    texture_alias_drop_pool(&pool);assert(!g_texture_packages.n && up.serial_refs==1 && !texture_package_find(&upload));
+    alias.serial=14;vtex replacement;publish(&replacement,&alias);texture_package_publish(&alias,&replacement);
+    mtl_tex_release(&upload);assert(retired==12 && texture_package_find(&alias)==&replacement);
+    mtl_tex_release(&alias);assert(retired==13 && !g_texture_packages.n);
     assert(!g_texture_aliases.n && !g_texture_serials.n && !g_texture_keys.n && !g_texture_live.n);
     for (unsigned i=0;i<NHASH;i++) assert(!g_tex[i]);
     free(g_texture_aliases.keys);free(g_texture_aliases.vals);free(g_texture_serials.keys);free(g_texture_serials.vals);
     free(g_texture_keys.keys);free(g_texture_keys.vals);
     free(g_texture_live.keys);free(g_texture_live.vals);
-    puts("Texture ownership retained recent/live/other-pool images and live originals, and retired stale overlaps, finalized pools and moved/unmapped owners");
+    free(g_texture_packages.keys);free(g_texture_packages.vals);
+    puts("Texture ownership retained live owners, shared exact packaged storage weakly, and retired stale overlaps, finalized pools and moved/unmapped owners");
     return 0;
 }

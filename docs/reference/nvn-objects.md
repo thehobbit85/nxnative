@@ -811,6 +811,7 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** a pool walk makes gigabytes of textures from far fewer images: Ocarina of Time's 32,768 IDs name 3,607 storages, and one texture per ID came to 2 GB.
 - **Cause:** a packaged texture belongs to its serial, and the engine registers the same storage under many texture objects.
 - **Fix:** general (`nvn_mtl.m` `g_pkg_share`, `tex_alias_key`, `pkg_shared`). Packaged textures are shared by storage, layout and format through a weak table, so a new serial of the same storage takes the existing one. A pool's removal evicts its keys (`mtl_alias_drop_pool`), and the walk's budget does not count a texture that is already shared.
+- **Android Vulkan:** `texture_alias.inc` uses a weak table keyed by pool, offset, exact description and explicit layout bytes; IMAGE-only flag changes share storage. Serial references own the upload, and pool retirement or its last serial removes the weak entry. CPU updates through another descriptor dirty the shared image. `DM_TEST_TEXTURE_PACKAGES=1` checks two resolved descriptors, an unused CPU-writing descriptor, later GPU writes and independent finalization on Metal and both Android modes; the ownership fixture checks weak retirement, layout/format separation and pool reuse.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
 ### A texture shared by its packaged texture's serials left the residency set with one of them

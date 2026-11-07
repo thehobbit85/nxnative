@@ -576,6 +576,10 @@ int main(void) {
         check_texture_srgb_aliases(&device,&queue);
         API(nvnQueueFinalize)(&queue);API(nvnDeviceFinalize)(&device);return 0;
     }
+    if (getenv("DM_TEST_TEXTURE_PACKAGES")) {
+        check_texture_packaged_aliases(&device,&queue);
+        API(nvnQueueFinalize)(&queue);API(nvnDeviceFinalize)(&device);return 0;
+    }
     if (getenv("DM_TEST_TEXTURE_ALIASES")) {
         check_texture_object_aliases(&device,&queue);
         API(nvnQueueFinalize)(&queue);API(nvnDeviceFinalize)(&device);return 0;
@@ -729,6 +733,7 @@ int main(void) {
     check_sampler_reduction(&device, &queue, NVN_FORMAT_RGBA8);
     check_sparse_textures(&device, &queue);
     check_texture_object_aliases(&device,&queue);
+    check_texture_packaged_aliases(&device,&queue);
     check_texture_srgb_aliases(&device,&queue);
     check_query_lifetimes(&device,&queue,&qb);
     check_feedback_controls(&device, &queue);
