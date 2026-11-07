@@ -3245,6 +3245,7 @@ static void typed_graphics(void) {
 #include "feedback_capture.inc"
 #include "wrapped_buffer.inc"
 #include "block_targets.inc"
+#include "diagnostics.inc"
 #include "alpha.inc"
 #include "logic.inc"
 #include "split_handle.inc"
@@ -3296,6 +3297,7 @@ int main(void) {
         puts("Headless presents hand VI completed tickets without a compositor timestamp");
         return 0;
     }
+    if (getenv("DM_VK_TEST_DIAGNOSTICS")) { graphics_diagnostics(); return 0; }
     if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
     if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_COLOR_TARGETS")) { depth_color_targets(); return 0; }

@@ -606,7 +606,11 @@ static void stbiw__linear_to_rgbe(unsigned char *rgbe, float *linear)
    if (maxcomp < 1e-32f) {
       rgbe[0] = rgbe[1] = rgbe[2] = rgbe[3] = 0;
    } else {
+#ifdef __cplusplus
       float normalize = (float) std::frexp(maxcomp, &exponent) * 256.0f/maxcomp;
+#else
+      float normalize = (float) frexp(maxcomp, &exponent) * 256.0f/maxcomp;
+#endif
 
       rgbe[0] = (unsigned char)(linear[0] * normalize);
       rgbe[1] = (unsigned char)(linear[1] * normalize);

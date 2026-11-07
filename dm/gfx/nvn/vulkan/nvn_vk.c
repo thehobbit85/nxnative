@@ -4697,12 +4697,34 @@ static void shot(const tex_t *t, uint64_t n) {
 // Diagnostics: DM_VK_RTDUMP=<frame> writes every color image the GPU rendered into, as it stands at that frame's present, to DM_VK_SHOT_DIR as
 // rt_<serial>_<w>x<h>_<VkFormat>.raw (level 0, layer 0, tightly packed), for comparing a frame's passes with the Mac's; DM_VK_RTDUMP_DEC=1 adds the textures decoded
 // from BC6H on upload. DM_VK_PASSLOG=<frame> logs that frame's passes (targets, clears) and draws (shaders, depth / stencil / blend state)
-static int rt_bpp(VkFormat f) {
-    switch (f) {
-        case VK_FORMAT_R8_UNORM: return 1; case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16_UNORM: return 2;
-        case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
-        case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R8G8B8A8_SNORM: return 4;
-        case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32G32_SFLOAT: return 8; case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+static int rt_bpp(VkFormat format) {
+    // Core Vulkan numeric families have consecutive format enums, with each
+    // family's normalized, scaled, integer and floating variants the same size.
+    static const struct { VkFormat first,last; int bytes; } families[]={
+        {VK_FORMAT_R8_UNORM,VK_FORMAT_R8_SRGB,1},
+        {VK_FORMAT_R8G8_UNORM,VK_FORMAT_R8G8_SRGB,2},
+        {VK_FORMAT_R8G8B8_UNORM,VK_FORMAT_B8G8R8_SRGB,3},
+        {VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_A2B10G10R10_SINT_PACK32,4},
+        {VK_FORMAT_R16_UNORM,VK_FORMAT_R16_SFLOAT,2},
+        {VK_FORMAT_R16G16_UNORM,VK_FORMAT_R16G16_SFLOAT,4},
+        {VK_FORMAT_R16G16B16_UNORM,VK_FORMAT_R16G16B16_SFLOAT,6},
+        {VK_FORMAT_R16G16B16A16_UNORM,VK_FORMAT_R16G16B16A16_SFLOAT,8},
+        {VK_FORMAT_R32_UINT,VK_FORMAT_R32_SFLOAT,4},
+        {VK_FORMAT_R32G32_UINT,VK_FORMAT_R32G32_SFLOAT,8},
+        {VK_FORMAT_R32G32B32_UINT,VK_FORMAT_R32G32B32_SFLOAT,12},
+        {VK_FORMAT_R32G32B32A32_UINT,VK_FORMAT_R32G32B32A32_SFLOAT,16},
+    };
+    for (unsigned i=0;i<sizeof families/sizeof *families;i++)
+        if (format>=families[i].first && format<=families[i].last) return families[i].bytes;
+    switch (format) {
+        case VK_FORMAT_R4G4_UNORM_PACK8: case VK_FORMAT_S8_UINT: return 1;
+        case VK_FORMAT_R4G4B4A4_UNORM_PACK16: case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
+        case VK_FORMAT_R5G6B5_UNORM_PACK16: case VK_FORMAT_B5G6R5_UNORM_PACK16:
+        case VK_FORMAT_R5G5B5A1_UNORM_PACK16: case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
+        case VK_FORMAT_A1R5G5B5_UNORM_PACK16: case VK_FORMAT_D16_UNORM: return 2;
+        case VK_FORMAT_B10G11R11_UFLOAT_PACK32: case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
+        case VK_FORMAT_X8_D24_UNORM_PACK32: case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_D24_UNORM_S8_UINT: case VK_FORMAT_D32_SFLOAT_S8_UINT: return 4;
         default: return 0;
     }
 }
@@ -4730,6 +4752,7 @@ static void rt_dump(uint64_t n) {
 static double g_fps_shown;
 static pthread_mutex_t g_present_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_presents, g_present_done, g_dropped_ticket[64];
+#include "diagnostics.inc"
 
 static _Atomic uint64_t g_layer_shape, g_screen_shape;
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, vk_present_shape(w, h)); }
@@ -4976,6 +4999,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
                             atomic_exchange(&g_rec_ns, 0) / 600e6, atomic_exchange(&g_wait_ns, 0) / 600e6, atomic_exchange(&g_pwait_ns, 0) / 600e6); }
     if (t) shot(t, n);
     rt_dump(n);
+    diagnostic_present(t,n,crop);
     if (n % 1800 == 0) pcache_save();
     { static int64_t pl = -2; static int on; if (pl == -2) { const char *e = getenv("DM_VK_PASSLOG"); pl = e ? atoll(e) : -1; on = e && strchr(e, '+'); }   // <frame>+: every frame from there on
       long request = atomic_exchange(&g_passdump_request, 0);
@@ -5144,22 +5168,13 @@ unsigned mtl_cpu_tex_count(void) {
     pthread_mutex_unlock(&g_rmu); return n;
 }
 
-// Capture-file parsing is portable; live capture and the Metal texture inspection
-// tools still require a Vulkan implementation. Report requests rather than writing
-// empty files or claiming a capture succeeded. Native Vulkan dumps remain available.
+// Capture-file parsing is portable. Live command capture still needs resource
+// serialization. Image inspection uses the Vulkan diagnostic controls above.
 void nvn_cap_submit(int n, const uint64_t *handles) {
     (void)n; (void)handles;
     if (getenv("DM_NVN_CAPTURE")) RED_ONCE(90, "live NVN capture is not implemented; use DM_VK_SHOTS / DM_VK_RTDUMP for images");
 }
 void nvn_cap_present(const tex_t *t, const int crop[4]) { (void)t; (void)crop; }
-void dm_gfx_shot_at(long k, const char *path) {
-    (void)k; (void)path; LOG("[RED] vk: DM_CTL shot is unavailable; use DM_VK_SHOTS and DM_VK_SHOT_DIR");
-}
 void dm_gfx_texdump_next(const char *path) { (void)path; LOG("[RED] vk: DM_CTL texdump is unavailable; use DM_VK_RTDUMP"); }
 void dm_gfx_passdump_next(long n) { if (n > 0) atomic_store(&g_passdump_request, n); }
-void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; LOG("[RED] vk: DM_CTL texraw is not implemented"); }
-void dm_gfx_texlist(int target) {
-    (void)target;
-    LOG("[RED] vk: DM_CTL texlist filtering is not implemented; use DM_VK_TEXCOUNT");
-}
 void dm_gfx_restop(void) { LOG("vk: no Metal residency set; Vulkan image-memory totals are logged every 600 presents"); }
