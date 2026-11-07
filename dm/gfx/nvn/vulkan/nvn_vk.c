@@ -5278,8 +5278,9 @@ void mtl_alias_drop_pool(const void *pool) {
 // This backend has no shared sparse-tile heap to release. Sparse residency and
 // physical-tile aliasing remain open parity items; ordinary images own storage.
 void mtl_sp_phys_gone(const void *mem, uint64_t size) { (void)mem; (void)size; }
-// Vulkan textures already own image storage. The shared recorder still marks GPU-written pools.
-void mtl_pool_gpu_written(const void *pool) { if (pool) atomic_store(&((pool_t *)pool)->gpu_written, 1); }
+// Vulkan transfers image ownership when each recorded write executes.
+// Recording a future write must not suppress uploads before that write.
+void mtl_tex_gpu_written(const tex_t *t) { (void)t; }
 
 // statistics the NVN layer prints
 void mtl_stats(uint64_t *passes, uint64_t *draws) { *passes = 0; *draws = g_stat_draws; }

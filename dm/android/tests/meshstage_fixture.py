@@ -25,9 +25,9 @@ def main():
         if kind == 'ms': info.update(task=task, max_v=33, max_p=35,
             vertex=[[None, c] for c in range(4)] + [[2, 0]], primitive=[[0, 1]])
         # Literal layouts independently calculated from the shared ABI:
-        # 16-byte header,32-byte payload; mesh has two32-element blocks of
-        # six components, then4+35*3 primitive bytes rounded to a word.
-        offsets, words = ([0, 16, 48, 80], 20) if kind == 'ts' else ([0, 16, 48, 1584], 424)
+        # 16-byte header and 32-byte payload. Mesh has two 32-element blocks
+        # of six components, then 4 + 64 * 3 primitive bytes for two lane blocks.
+        offsets, words = ([0, 16, 48, 80], 20) if kind == 'ts' else ([0, 16, 48, 1584], 445)
         key = f'00000000feed001{variant}'
         raw = work / (key + '.spv')
         if variant == 4:

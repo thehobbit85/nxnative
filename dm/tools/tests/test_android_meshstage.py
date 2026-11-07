@@ -20,7 +20,7 @@ class MeshMetadata(unittest.TestCase):
     def test_invalid_output_maps_and_allocations_fail_before_lowering(self):
         mesh = dict(kind='ms', threads=32, payload=32, task=True, max_v=33, max_p=35,
                     vertex=[[None, c] for c in range(4)] + [[2, 0]], primitive=[[0, 1]])
-        self.assertEqual(vk.spv_meshstage.layout(mesh), ([0, 16, 48, 1584], 1696))
+        self.assertEqual(vk.spv_meshstage.layout(mesh), ([0, 16, 48, 1584], 1780))
         for key, value in (('threads', 0), ('threads', True), ('threads', 1025), ('payload', -1),
                            ('payload', 65536), ('payload', 0), ('task', 1), ('max_v', 257), ('max_p', 513),
                            ('vertex', [[0, 0]]), ('vertex', [[None, 4]]), ('vertex', [[None, 0], [None, 0]]),

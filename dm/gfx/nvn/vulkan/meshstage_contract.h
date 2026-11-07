@@ -61,7 +61,9 @@ static const char *dm_vk_meshstage_validate(const dm_vk_meshstage *m, int task_s
             !m->vertex_count || m->vertex_map[0] >= 4 || (m->task && m->payload < 4)) return "invalid mesh output limits";
         uint32_t count = m->vertices > m->primitives ? m->vertices : m->primitives;
         primitive = output + ((count + 31) / 32) * (m->vertex_count + m->primitive_count) * 32;
-        words = primitive + (4 + 3 * m->primitives + 3) / 4;
+        // The shared exporter reserves complete 32-lane primitive blocks.
+        uint32_t primitive_blocks = (m->primitives + 31) / 32;
+        words = primitive + (4 + 3 * primitive_blocks * 32 + 3) / 4;
     }
     return m->output == output && m->primitive == primitive && m->words == words ? NULL : "mesh stage memory differs from layout";
 }

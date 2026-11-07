@@ -6,7 +6,7 @@
 #include <string.h>
 #include "../../gfx/nvn/vulkan/shader_contract.h"
 #define INPUT_WORDS 400u
-#define OUTPUT_WORDS (13u + 35u * 424u + 17u)
+#define OUTPUT_WORDS (13u + 35u * 445u + 17u)
 #define CHECK(call) do { VkResult r_ = (call); if (r_) { fprintf(stderr, "%s: %d\n", #call, r_); return 1; } } while (0)
 static VkResult load_shader(VkDevice device, const char *directory, unsigned variant, VkShaderModule *shader, dm_vk_meshstage *mesh) {
     char path[1024], text[8192];
