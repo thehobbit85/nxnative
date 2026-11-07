@@ -196,12 +196,36 @@ $(B)/shaders/0000000000000081.spv: REDUCTION_FLAGS = -DGRADIENTS -DOFFSET
 $(B)/shaders/0000000000000082.spv: REDUCTION_FLAGS = -DSEPARATE -DGRADIENTS -DOFFSET
 $(B)/shaders/0000000000000083.spv: REDUCTION_FLAGS = -DARRAY -DGRADIENTS -DOFFSET
 $(B)/shaders/0000000000000084.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE -DGRADIENTS -DOFFSET
-REDUCTION_SHADERS = $(B)/shaders/0000000000000075.spv $(B)/shaders/0000000000000076.spv $(B)/shaders/0000000000000077.spv $(B)/shaders/0000000000000078.spv $(B)/shaders/0000000000000079.spv $(B)/shaders/000000000000007a.spv $(B)/shaders/000000000000007b.spv $(B)/shaders/000000000000007c.spv $(B)/shaders/000000000000007d.spv $(B)/shaders/000000000000007e.spv $(B)/shaders/000000000000007f.spv $(B)/shaders/0000000000000080.spv $(B)/shaders/0000000000000081.spv $(B)/shaders/0000000000000082.spv $(B)/shaders/0000000000000083.spv $(B)/shaders/0000000000000084.spv
+$(B)/shaders/0000000000000085.spv: REDUCTION_FLAGS = -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/0000000000000086.spv: REDUCTION_FLAGS = -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/0000000000000087.spv: REDUCTION_FLAGS = -DARRAY -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/0000000000000088.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/0000000000000089.spv: REDUCTION_FLAGS = -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/000000000000008a.spv: REDUCTION_FLAGS = -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/000000000000008b.spv: REDUCTION_FLAGS = -DARRAY -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/000000000000008c.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/000000000000008d.spv: REDUCTION_FLAGS = -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/000000000000008e.spv: REDUCTION_FLAGS = -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/000000000000008f.spv: REDUCTION_FLAGS = -DARRAY -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/0000000000000090.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/0000000000000091.spv: REDUCTION_FLAGS = -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/0000000000000092.spv: REDUCTION_FLAGS = -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/0000000000000093.spv: REDUCTION_FLAGS = -DARRAY -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/0000000000000094.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+REDUCTION_SHADERS = $(B)/shaders/0000000000000075.spv $(B)/shaders/0000000000000076.spv $(B)/shaders/0000000000000077.spv $(B)/shaders/0000000000000078.spv \
+    $(B)/shaders/0000000000000079.spv $(B)/shaders/000000000000007a.spv $(B)/shaders/000000000000007b.spv $(B)/shaders/000000000000007c.spv \
+    $(B)/shaders/000000000000007d.spv $(B)/shaders/000000000000007e.spv $(B)/shaders/000000000000007f.spv $(B)/shaders/0000000000000080.spv \
+    $(B)/shaders/0000000000000081.spv $(B)/shaders/0000000000000082.spv $(B)/shaders/0000000000000083.spv $(B)/shaders/0000000000000084.spv \
+    $(B)/shaders/0000000000000085.spv $(B)/shaders/0000000000000086.spv $(B)/shaders/0000000000000087.spv $(B)/shaders/0000000000000088.spv \
+    $(B)/shaders/0000000000000089.spv $(B)/shaders/000000000000008a.spv $(B)/shaders/000000000000008b.spv $(B)/shaders/000000000000008c.spv \
+    $(B)/shaders/000000000000008d.spv $(B)/shaders/000000000000008e.spv $(B)/shaders/000000000000008f.spv $(B)/shaders/0000000000000090.spv \
+    $(B)/shaders/0000000000000091.spv $(B)/shaders/0000000000000092.spv $(B)/shaders/0000000000000093.spv $(B)/shaders/0000000000000094.spv
 fixture: $(REDUCTION_SHADERS)
 $(REDUCTION_SHADERS): tests/sampler_reduction.comp
 	mkdir -p $(@D)
 	$(GLSLC) --target-env=vulkan1.1 $(REDUCTION_FLAGS) $< -o $@
-	printf 'stage cs\ntg 1 1 1\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+	$(if $(findstring -DFRAGMENT,$(REDUCTION_FLAGS)),printf 'stage ps\n',printf 'stage cs\ntg 1 1 1\nb 2 ssbo 1 sbuf 0 -1 - -1\n') > $(@:.spv=.vk.txt)
+	printf 'b 1 ubo 1 cbuf 0 -1 - -1\n' >> $(@:.spv=.vk.txt)
 	$(if $(findstring -DSEPARATE,$(REDUCTION_FLAGS)),printf 'b 0 tex 1 tex 0 -1 - -1\nb 3 samp 1 samp 1 -1 - -1\n',printf 'b 0 cis 1 tex 0 -1 samp_tex 0\n') >> $(@:.spv=.vk.txt)
 $(B)/t_replay: tests/one_row_guest.inc ../../../android/tests/texture_coordinates_cases.h
 fixture: $(B)/shaders/0000000000000072.spv $(B)/shaders/0000000000000073.spv $(B)/shaders/0000000000000074.spv

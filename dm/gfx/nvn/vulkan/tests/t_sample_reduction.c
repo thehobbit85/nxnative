@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
             } else i += len;
         }
     }
-    sample_reduction filter = {.binding=(uint32_t)strtoul(argv[3],NULL,10), .minimum=1, .min_linear=1, .mag_linear=1, .max_lod=10};
+    sample_reduction filter = {.binding=(uint32_t)strtoul(argv[3],NULL,10), .minimum=1, .min_linear=1, .mag_linear=1, .max_lod=10, .max_bias=16};
     size_t count = 0; const char *reason;
     assert(!spv_sample_reduction(input, 4, &filter, 1, &count, &reason) && reason);
     uint32_t *output = spv_sample_reduction(input, bytes / 4, &filter, 1, &count, &reason);

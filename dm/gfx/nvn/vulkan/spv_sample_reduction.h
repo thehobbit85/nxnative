@@ -5,7 +5,7 @@
 
 typedef struct {
     uint32_t binding, minimum, min_linear, mag_linear;
-    float min_lod, max_lod, bias;
+    float min_lod, max_lod, bias, max_bias;
 } sample_reduction;
 typedef struct { uint32_t type, scalar, lanes, image, binding, dimension, array; unsigned is_type:1; } reduction_id;
 typedef struct {
@@ -117,14 +117,23 @@ static uint32_t reduction_gradient_lod(reduction_module *m, uint32_t image, uint
 static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len, const sample_reduction *filter) {
     // Other sample forms are diagnosed before their sampler can become point
     // filtered. Offsets stay in texel units and use native sampler addressing.
-    if (len < 7 || p[1] != m->float4 || p[3] >= m->bound || p[4] >= m->bound) return 0;
-    unsigned operands = p[5], gradient = operands & 4, offset_mask = operands & (8 | 16);
-    if ((operands & ~(2u | 4u | 8u | 16u)) || (operands & 6) != (gradient ? 4u : 2u) || offset_mask == (8 | 16)) return 0;
-    if (len != 7u + !!gradient + !!offset_mask) return 0;
+    if (len < 5 || p[1] != m->float4 || p[3] >= m->bound || p[4] >= m->bound) return 0;
+    int implicit = (p[0] & 0xffff) == 87;
+    unsigned operands = len > 5 ? p[5] : 0, gradient = operands & 4, offset_mask = operands & (8 | 16);
+    unsigned allowed = (implicit ? 1u : 6u) | 8u | 16u;
+    if ((operands & ~allowed) || offset_mask == (8 | 16) ||
+        (!implicit && (operands & 6) != (gradient ? 4u : 2u))) return 0;
+    unsigned next = len > 5 ? 6 : 5;
+    unsigned required = (implicit ? !!(operands & 1) : 1u + !!gradient) + !!offset_mask;
+    if (len - next != required) return 0;
     for (unsigned arg = 6; arg < len; arg++) if (p[arg] >= m->bound) return 0;
-    if (m->ids[p[6]].type != (gradient ? m->float2 : m->floating) ||
-        (gradient && m->ids[p[7]].type != m->float2)) return 0;
-    uint32_t offset = offset_mask ? p[len - 1] : 0;
+    uint32_t shader_bias = implicit && (operands & 1) ? p[next++] : 0;
+    uint32_t explicit_lod = implicit ? 0 : p[next++];
+    uint32_t dy = gradient ? p[next++] : 0;
+    uint32_t offset = offset_mask ? p[next++] : 0;
+    if (shader_bias && m->ids[shader_bias].type != m->floating) return 0;
+    if (!implicit && (m->ids[explicit_lod].type != (gradient ? m->float2 : m->floating) ||
+        (gradient && m->ids[dy].type != m->float2))) return 0;
     if (offset && m->ids[offset].type != m->int2) return 0;
     uint32_t sampled_type = m->ids[p[3]].type;
     uint32_t image_type = m->ids[sampled_type].image;
@@ -137,8 +146,21 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t zero = reduction_float(m, 0), one = reduction_float(m, 1);
     last = REDUCTION_VALUE(m, 131, m->floating, last, one);
     uint32_t lower = reduction_float(m, filter->min_lod), upper = reduction_float(m, filter->max_lod);
-    uint32_t lod = gradient ? reduction_gradient_lod(m, image, p[6], p[7], array) : p[6];
-    lod = REDUCTION_VALUE(m, 129, m->floating, lod, reduction_float(m, filter->bias));
+    uint32_t lod = explicit_lod;
+    if (implicit) {
+        uint32_t xy = array ? REDUCTION_VALUE(m, 79, m->float2, p[4], p[4], 0, 1) : p[4];
+        uint32_t query = REDUCTION_VALUE(m, 105, m->float2, p[3], xy);
+        // QueryLod.y gives the driver's unclamped derivative LOD. The point
+        // sampler has zero bias, so the original sampler and instruction bias
+        // can be applied exactly once before selecting the contributing mips.
+        lod = reduction_component(m, query, 1);
+    } else if (gradient) lod = reduction_gradient_lod(m, image, explicit_lod, dy, array);
+    uint32_t bias = reduction_float(m, filter->bias);
+    if (shader_bias) {
+        bias = REDUCTION_VALUE(m, 129, m->floating, bias, shader_bias);
+        bias = REDUCTION_EXT(m, m->floating, 43, bias, reduction_float(m, -filter->max_bias), reduction_float(m, filter->max_bias));
+    }
+    lod = REDUCTION_VALUE(m, 129, m->floating, lod, bias);
     lod = REDUCTION_EXT(m, m->floating, 43, lod, lower, upper);
     uint32_t minify = REDUCTION_VALUE(m, 186, m->code.boolean, lod, zero);
     uint32_t min_filter = reduction_float(m, filter->min_linear), mag_filter = reduction_float(m, filter->mag_linear);
@@ -208,8 +230,8 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
         }
         uint32_t binding = len >= 4 && p[3] < m.bound ? m.ids[p[3]].binding : 0;
         if (binding && ((op >= 87 && op <= 94) || op == 96 || op == 97 || op == 105 || (op >= 305 && op <= 315))) {
-            *reason = "reduction currently needs a direct 2D float sample with explicit LOD or gradients";
-            if (op != 88 || !reduction_sample(&m, p, len, filters + binding - 1)) goto fail;
+            *reason = "reduction currently needs a direct 2D float sample";
+            if ((op != 87 && op != 88) || !reduction_sample(&m, p, len, filters + binding - 1)) goto fail;
         } else if (!texel_append(&m.code.body, p, len)) goto fail;
         i += len;
     }

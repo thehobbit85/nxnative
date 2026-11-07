@@ -1,13 +1,15 @@
 #version 450
+#ifndef FRAGMENT
 layout(local_size_x=1) in;
+#endif
 #ifdef ARRAY
 #define TEXTURE texture2DArray
 #define SAMPLER sampler2DArray
-#define COORDINATE vec3(coordinate.xy, coordinate.w)
+#define COORDINATE vec3(position, coordinate.w)
 #else
 #define TEXTURE texture2D
 #define SAMPLER sampler2D
-#define COORDINATE coordinate.xy
+#define COORDINATE position
 #endif
 #ifdef SEPARATE
 layout(binding=0) uniform TEXTURE source;
@@ -17,8 +19,35 @@ layout(binding=3) uniform sampler filtering;
 layout(binding=0) uniform SAMPLER sampled;
 #endif
 layout(binding=1, std140) uniform Coordinates { vec4 coordinate; };
+#ifdef FRAGMENT
+layout(location=0) out vec4 value;
+#else
 layout(binding=2, std430) buffer Results { vec4 value; };
+#endif
 void main() {
+    vec2 position = coordinate.xy;
+#ifdef FRAGMENT
+#ifdef BIAS
+    const float bias = 1;
+#else
+    const float bias = 0;
+#endif
+    vec2 scale = exp2(coordinate.z - bias) / vec2(textureSize(sampled, 0).xy);
+    position += (gl_FragCoord.xy - vec2(.5)) * scale;
+#ifdef OFFSET
+#ifdef BIAS
+    value = textureOffset(sampled, COORDINATE, ivec2(1,-1), bias);
+#else
+    value = textureOffset(sampled, COORDINATE, ivec2(1,-1));
+#endif
+#else
+#ifdef BIAS
+    value = texture(sampled, COORDINATE, bias);
+#else
+    value = texture(sampled, COORDINATE);
+#endif
+#endif
+#else
 #ifdef GRADIENTS
     vec2 scale = exp2(coordinate.z) / vec2(textureSize(sampled, 0).xy);
 #ifdef OFFSET
@@ -31,6 +60,7 @@ void main() {
     value = textureLodOffset(sampled, COORDINATE, coordinate.z, ivec2(1,-1));
 #else
     value = textureLod(sampled, COORDINATE, coordinate.z);
+#endif
 #endif
 #endif
 }

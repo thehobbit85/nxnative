@@ -28,6 +28,9 @@ static void sampler_reduction(void) {
     };
     const NVNformat formats[] = {NVN_FORMAT_R32F,NVN_FORMAT_RGBA32F,NVN_FORMAT_RGBA8,NVN_FORMAT_DEPTH32F};
     mtl_queue_activate(slot);
+    tex_t target = {.serial=0x17600, .d={.width=2,.height=2,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA32F}};
+    nvn_tex_layout(&target.d,&target.L);
     unsigned checks = 0;
     for (int array = 0; array < 2; array++) for (int format = 0; format < 4; format++) {
         tex_t texture = {.serial=0x17500+4*array+format, .d={.width=4,.height=4,.depth=array ? 2 : 1,.levels=2,
@@ -51,28 +54,38 @@ static void sampler_reduction(void) {
             put(&upload,OP_COPY_B2T,&copy,sizeof copy);
         }
         put(&upload,OP_END,NULL,0); mtl_sub_begin();mtl_exec(upload.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
-        for (int form=0;form<4;form++) for (int separate=0;separate<2;separate++) {
-          const sample_case *table = form >= 2 ? offset_cases : cases;
-          unsigned count = form >= 2 ? sizeof offset_cases/sizeof *offset_cases : sizeof cases/sizeof *cases;
-          prog_t *program = &sampler_reduction_program[form][array][separate]; program->nstage=1;
+        for (int form=0;form<8;form++) for (int separate=0;separate<2;separate++) {
+          const sample_case *table = (form & 2) ? offset_cases : cases;
+          unsigned count = (form & 2) ? sizeof offset_cases/sizeof *offset_cases : sizeof cases/sizeof *cases;
+          int fragment = form >= 4, stage = fragment ? 1 : 5;
+          prog_t *program = &sampler_reduction_program[form][array][separate]; program->nstage=fragment ? 2 : 1;
           for (unsigned test=0;test<count;test++) for (int mode=0;mode<3;mode++) {
             const sample_case *c=table+test;
             // Native gradient LOD may be approximated. Exact powers of two
             // check averaging, while fractional footprints check both extrema.
-            if ((form & 1) && mode == 0 && c->lod != floorf(c->lod)) continue;
+            if ((fragment || (form & 1)) && mode == 0 && c->lod != floorf(c->lod)) continue;
             float green_border = format == 1 ? 120 : format == 2 ? 120.0f/255 : 0;
             samp_par sampler={.ws=c->border ? NVN_WRAP_MODE_CLAMP_TO_BORDER : NVN_WRAP_MODE_REPEAT,
                 .wt=NVN_WRAP_MODE_REPEAT,.wr=NVN_WRAP_MODE_REPEAT,.border={0,green_border,0,1},
                 .minf=c->filter,.magf=c->mag,.lod_bias=c->bias,.lod_max=10,.reduction=mode};
             mtl_reg_samp(slot,&sampler);
-            float coordinate[]={c->u,c->v,c->lod,array}, result[4]; memset(result,0xcc,sizeof result);
+            float coordinate[]={c->u,c->v,c->lod,array}, result[16]; memset(result,0xcc,sizeof result);
             list_t list={0};
-            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=program,.stages=0x20);
-            RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=0,.h=((uint64_t)slot<<20)|slot);
-            RECORD(OP_BIND_SAMP,p_bind_handles,.stage=5,.first=1,.n=1,.h={(uint64_t)slot<<20});
-            RECORD(OP_BIND_UBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)coordinate,.size=sizeof coordinate);
-            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result,.size=sizeof result);
-            RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=program,.stages=fragment ? 3 : 0x20);
+            RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=stage|BIND_TEX1_NOBASE,.slot=0,.h=((uint64_t)slot<<20)|slot);
+            RECORD(OP_BIND_SAMP,p_bind_handles,.stage=stage,.first=1,.n=1,.h={(uint64_t)slot<<20});
+            RECORD(OP_BIND_UBO,p_bind_buf,.stage=stage,.index=0,.addr=(uintptr_t)coordinate,.size=sizeof coordinate);
+            if (fragment) {
+                RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
+                RECORD(OP_VIEWPORTS,p_viewports,.n=1,.v={{0,0,2,2}});
+                RECORD(OP_SCISSOR,p_scissor,.w=2,.h=2);
+                RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={-100,-100,-100,-100});
+                RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+                RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)result,.r={.width=2,.height=2,.depth=1});
+            } else {
+                RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result,.size=sizeof result);
+                RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+            }
             put(&list,OP_END,NULL,0); mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
             float expected[]={c->expected[mode],0,0,1};
             if (format == 1 || format == 2) { expected[1]=120-c->expected[mode ? 3-mode : 0]; expected[2]=2*expected[0]; }
@@ -85,6 +98,6 @@ static void sampler_reduction(void) {
         }
         mtl_reg_tex(slot,NULL,NULL);mtl_tex_release(&texture);
     }
-    mtl_queue_forget(slot);
+    mtl_tex_release(&target); mtl_queue_forget(slot);
     printf("Guest sampler average/min/max passed %u format, independent binding, mip and spatial footprint cases\n",checks);
 }
