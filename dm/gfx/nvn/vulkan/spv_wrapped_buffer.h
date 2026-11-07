@@ -113,6 +113,96 @@ fail:
     return 0;
 }
 
+// Descriptor parameters retain their identity across calls. Propagate through
+// return values and joins before rewriting any type, including loop backedges.
+static int wrapped_flow(wrapped_module *m, size_t functions, size_t count) {
+    int changed;
+    do {
+        changed=0;
+        uint32_t function=0;
+        for (size_t i=functions;i<count;i+=m->words[i]>>16) {
+            const uint32_t *p=m->words+i;
+            unsigned length=p[0]>>16,op=p[0]&0xffff;
+            uint32_t result=0;
+            int affected=0;
+            if (op==54) function=p[2];
+            if ((op==61 || op==65 || op==66 || op==83 || op==86 || op==100) && length>=4 && p[2]<m->bound && p[3]<m->bound) {
+                result=p[2];affected=m->ids[p[3]].affected;
+            } else if (op==169 || op==245) {
+                result=p[2];
+                unsigned first=op==169 ? 4 : 3,step=op==169 ? 1 : 2;
+                for (unsigned j=first;j<length;j+=step)
+                    if (p[j]<m->bound) affected|=m->ids[p[j]].affected;
+            } else if (op==254 && length==2 && p[1]<m->bound) {
+                result=function;affected=m->ids[p[1]].affected;
+            } else if (op==57 && length>=4) {
+                if (p[3]>=m->bound || !m->ids[p[3]].declaration) return 0;
+                size_t at=m->ids[p[3]].declaration+5;
+                for (unsigned j=4;j<length;j++,at+=3) {
+                    if (p[j]>=m->bound || at+3>count || m->words[at]!=(3u<<16|55) || m->words[at+2]>=m->bound) return 0;
+                    wrapped_id *parameter=&m->ids[m->words[at+2]];
+                    if (m->ids[p[j]].affected && !parameter->affected) { parameter->affected=1;changed=1; }
+                }
+                result=p[2];affected=m->ids[p[3]].affected;
+            }
+            if (result && result<m->bound && affected && !m->ids[result].affected) {
+                m->ids[result].affected=1;changed=1;
+            }
+        }
+    } while (changed);
+    uint32_t function=0;
+    for (size_t i=functions;i<count;i+=m->words[i]>>16) {
+        const uint32_t *p=m->words+i;
+        unsigned length=p[0]>>16,op=p[0]&0xffff;
+        if (op==54) function=p[2];
+        if (op==57) {
+            size_t at=m->ids[p[3]].declaration+5;
+            for (unsigned j=4;j<length;j++,at+=3)
+                if (m->ids[p[j]].affected!=m->ids[m->words[at+2]].affected) return 0;
+        } else if ((op==169 || op==245) && m->ids[p[2]].affected) {
+            unsigned first=op==169 ? 4 : 3,step=op==169 ? 1 : 2;
+            for (unsigned j=first;j<length;j+=step)
+                if (p[j]>=m->bound || !m->ids[p[j]].affected) return 0;
+        } else if (op==254 && m->ids[function].affected && !m->ids[p[1]].affected) return 0;
+    }
+    return 1;
+}
+
+static uint32_t wrapped_function_type(wrapped_module *m, const uint32_t *function, size_t count) {
+    size_t at=(size_t)(function-m->words)+5,parameters=0;
+    while (at+3<=count && m->words[at]==(3u<<16|55)) { parameters++;at+=3; }
+    if (parameters>65532) return 0;
+    uint32_t *type=malloc((parameters+3)*4);
+    if (!type) return 0;
+    type[0]=(uint32_t)(parameters+3)<<16|33;
+    type[1]=m->module.next++;
+    type[2]=m->ids[function[2]].affected ? wrapped_type(m,function[1]) : function[1];
+    if (!type[2]) { free(type);return 0; }
+    int changed=m->ids[function[2]].affected;
+    at=(size_t)(function-m->words)+5;
+    for (size_t i=0;i<parameters;i++,at+=3) {
+        int affected=m->ids[m->words[at+2]].affected;
+        changed|=affected;
+        type[3+i]=affected ? wrapped_type(m,m->words[at+1]) : m->words[at+1];
+        if (!type[3+i]) { free(type);return 0; }
+    }
+    uint32_t result=function[4];
+    if (changed) {
+        result=type[1];
+        // Function types with equal signatures must share their declaration.
+        for (uint32_t i=1;i<m->bound;i++) if (m->ids[i].declaration) {
+            const uint32_t *candidate=m->words+m->ids[i].declaration;
+            if (candidate[0]==type[0] && !memcmp(candidate+2,type+2,(parameters+1)*4)) { result=i;break; }
+        }
+        for (size_t i=0;result==type[1] && i<m->module.globals.n;i+=m->module.globals.w[i]>>16) {
+            const uint32_t *candidate=m->module.globals.w+i;
+            if (candidate[0]==type[0] && !memcmp(candidate+2,type+2,(parameters+1)*4)) result=candidate[1];
+        }
+        if (result==type[1] && !texel_append(&m->module.globals,type,parameters+3)) result=0;
+    }
+    free(type);return result;
+}
+
 static uint32_t *spv_wrapped_buffer(const uint32_t *words,size_t count,const uint32_t *bindings,size_t nb,
                                    size_t *out_count,const char **reason) {
     *reason="invalid wrapped buffer module";
@@ -141,21 +231,15 @@ static uint32_t *spv_wrapped_buffer(const uint32_t *words,size_t count,const uin
         if (op==59 && length>=4 && p[2]<m.bound && m.ids[p[2]].selected) {
             m.ids[p[2]].affected=1;found++;
         }
-        if (op==54 && functions==count) functions=i;
+        if (op==54 && length==5 && p[2]<m.bound) {
+            m.ids[p[2]].declaration=i;
+            if (functions==count) functions=i;
+        }
         i+=length;
     }
     if (functions==count || found!=nb) goto fail;
-    // Loads and copies retain the selected descriptor's identity. An image
-    // passed into a function or merged with an ordinary 2D image is rejected.
-    for (size_t i=functions;i<count;i+=words[i]>>16) {
-        const uint32_t *p=words+i;unsigned length=p[0]>>16,op=p[0]&0xffff;
-        if ((op==61 || op==65 || op==66 || op==83 || op==86 || op==100) && length>=4 && p[2]<m.bound && p[3]<m.bound)
-            m.ids[p[2]].affected=m.ids[p[3]].affected;
-        if (op==57) for (unsigned j=4;j<length;j++) if (p[j]<m.bound && m.ids[p[j]].affected) goto fail;
-        if (op==169 || op==245) {
-            unsigned start=op==169 ? 4 : 3, step=op==169 ? 1 : 2;
-            for (unsigned j=start;j<length;j+=step) if (p[j]<m.bound && m.ids[p[j]].affected) goto fail;
-        }
+    if (!wrapped_flow(&m,functions,count)) {
+        *reason="wrapped buffer helper mixes ordinary and buffer image interfaces";goto fail;
     }
     if (!texel_append(&output,words,5)) goto fail;
     if (!capability) WRAP_OP(&output,17,46); // SampledBuffer
@@ -172,7 +256,12 @@ static uint32_t *spv_wrapped_buffer(const uint32_t *words,size_t count,const uin
         const uint32_t *p=words+i;unsigned length=p[0]>>16,op=p[0]&0xffff;
         int result=length>=3 && p[2]<m.bound && m.ids[p[2]].affected;
         int image=length>=4 && p[3]<m.bound && m.ids[p[3]].affected;
-        if (result) {
+        if (op==54) {
+            uint32_t type=wrapped_function_type(&m,p,count);
+            uint32_t returned=result ? wrapped_type(&m,p[1]) : p[1];
+            if (!type || !returned) goto fail;
+            WRAP_OP(&m.module.body,54,returned,p[2],p[3],type);
+        } else if (result) {
             uint32_t type=wrapped_type(&m,p[1]);
             if (!type) goto fail;
             if (op==86 || op==100) WRAP_OP(&m.module.body,83,type,p[2],p[3]);

@@ -10,9 +10,19 @@ layout(binding=0) uniform usampler2D source[3];
 #define SOURCE(i) source[i]
 #endif
 layout(binding=1,std430) buffer Result { uvec4 values[]; } result;
+#ifdef HELPERS
+uvec4 read_wrapped(usampler2D value,ivec2 coordinate) {
+    return uvec4(texelFetch(value,coordinate,0).x,textureSize(value,0),textureQueryLevels(value));
+}
+uvec4 forward_wrapped(usampler2D value,ivec2 coordinate) { return read_wrapped(value,coordinate); }
+#endif
 void main() {
     uint lane=gl_GlobalInvocationID.x;
     uint index=lane==0 ? 16384 : lane==1 ? 16 : 0;
+#ifdef HELPERS
+    result.values[lane]=forward_wrapped(SOURCE(lane),ivec2(index%16384,index/16384));
+#else
     result.values[lane]=uvec4(texelFetch(SOURCE(lane),ivec2(index%16384,index/16384),0).x,
         textureSize(SOURCE(lane),0),textureQueryLevels(SOURCE(lane)));
+#endif
 }
