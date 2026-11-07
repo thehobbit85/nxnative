@@ -53,6 +53,7 @@ static uint64_t g_timestamp_mask;
 static int g_segment_timestamps, g_cut_draws;
 static PFN_vkGetCalibratedTimestampsEXT p_calibrated_timestamps;
 static int g_draw_parameters, g_descriptor_tables, g_texel_descriptor_tables;
+static int g_sampled_indexing,g_texel_indexing;
 static uint32_t g_vertex_divisor_limit = 1;
 static VkPhysicalDeviceTexelBufferAlignmentProperties g_texel_limits;
 static VkPhysicalDeviceSubgroupProperties g_subgroup;
@@ -589,12 +590,11 @@ static void vk_init_(void) {
     } else {
         border_swizzle.borderColorSwizzle = border_swizzle.borderColorSwizzleFromImage = VK_FALSE;
     }
-    g_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
-        f12.runtimeDescriptorArray && f12.shaderSampledImageArrayNonUniformIndexing :
-        indexing.runtimeDescriptorArray && indexing.shaderSampledImageArrayNonUniformIndexing;
-    g_texel_descriptor_tables = dv >= VK_API_VERSION_1_2 ?
-        f12.runtimeDescriptorArray && f12.shaderUniformTexelBufferArrayNonUniformIndexing :
-        indexing.runtimeDescriptorArray && indexing.shaderUniformTexelBufferArrayNonUniformIndexing;
+    g_sampled_indexing=dv>=VK_API_VERSION_1_2 ? f12.shaderSampledImageArrayNonUniformIndexing : indexing.shaderSampledImageArrayNonUniformIndexing;
+    g_texel_indexing=dv>=VK_API_VERSION_1_2 ? f12.shaderUniformTexelBufferArrayNonUniformIndexing : indexing.shaderUniformTexelBufferArrayNonUniformIndexing;
+    int runtime_arrays=dv>=VK_API_VERSION_1_2 ? f12.runtimeDescriptorArray : indexing.runtimeDescriptorArray;
+    g_descriptor_tables=runtime_arrays && g_sampled_indexing;
+    g_texel_descriptor_tables=runtime_arrays && g_texel_indexing;
     if (dv < VK_API_VERSION_1_2 && descriptor_indexing) ext[next++] = VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME;
     if (div_extension) {
         ext[next++]=div_extension;
@@ -1466,10 +1466,10 @@ static VkSampler samp_get(int sid, border_view view, int reduce_in_shader) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
-enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU, S_SAMP_SLOTS };
 static int sampler_source(const char *kind) {
-    return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
+    return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:!strcmp(kind,"samp_slots")?S_SAMP_SLOTS:S_NONE;
 }
 typedef struct { uint32_t binding, count, storage_image; uint8_t type, kind, skind, read_only, table, texel_atomic, multisample, depth_image; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 #include "spv_sampler_pairs.inc"
@@ -1489,7 +1489,7 @@ struct shader {
     shader_t *buffer_variants, *next_buffer_variant, *table_variants, *next_table_variant;
     shader_t *wrapped_variants, *next_wrapped_variant;
     uint8_t wrapped[DM_VK_MAX_BINDINGS];
-    int has_tables;
+    int has_tables,logical_slots;
     sampler_pairs *sampler_images;
     texel_bias *texel_biases; size_t ntexel_biases; // sparse per-element prefixes of writable aliases
     sample_reduction *reductions; size_t nreductions;
@@ -1818,7 +1818,7 @@ static VkDescriptorSetLayout shader_layout(const shader_t *s) {
     }
     VkDescriptorSetLayoutCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, (uint32_t)s->nb, bindings};
     VkDescriptorSetLayout layout;
-    if (s->has_tables) {
+    if (s->has_tables || s->logical_slots) {
         if (!table_descriptor_limits(s,NULL)) return VK_NULL_HANDLE;
         VkDescriptorSetLayoutSupport support = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_SUPPORT};
         vkGetDescriptorSetLayoutSupport(g_dev, &info, &support);
@@ -1862,9 +1862,6 @@ static shader_t *shader_by_key(const char *key) {
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
         else if (sscanf(ln, "vin %d %d", &l, &t) == 2 && l >= 0 && l < 32) { s->vin[l] = (uint8_t)t; s->vin_mask |= 1u << l; }
         else if (sscanf(ln, "b %d %7s %d %15s %d %d %15s %d %3s", &b, ty, &cnt, kind, &reg, &off, sk, &sreg, access) >= 8 && s->nb < DM_VK_MAX_BINDINGS) {
-            if (!strcmp(kind, "tex_slots") || !strcmp(kind, "samp_slots")) {
-                LOG("[RED] vk: shader %s requires logical slot array replay", key); free(txt); free(spv); return s;
-            }
             if (!strcmp(kind, "tex_c2a") || !strcmp(kind, "samp_c2a") || !strcmp(sk, "samp_c2a")) {
                 LOG("[RED] vk: shader %s requires driver-table descriptor array replay", key); free(txt); free(spv); return s;
             }
@@ -1891,8 +1888,17 @@ static shader_t *shader_by_key(const char *key) {
                       !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "sbuf_ubo") ? K_SBUFU : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : !strcmp(kind, "tex_ubo") ? K_TEXU : K_UNK;
             if (!strcmp(kind,"geometry") && reg>=0 && reg<5) e->kind=K_GEOMETRY;
             if (!strcmp(kind,"geometry") && reg == 5 && e->type == BT_UBO) e->kind=K_CAPTURE_CONTROL;
+            if (!strcmp(kind,"tex_slots")) e->kind=K_TEX_SLOTS;
             e->skind = sampler_source(sk);
             if (e->type == BT_SAMP) { e->kind = K_SAMPLER; e->skind = sampler_source(kind); e->sreg = (int16_t)reg; e->soff = off; }
+            if (e->kind==K_TEX_SLOTS || e->skind==S_SAMP_SLOTS) {
+                s->logical_slots=1;
+                int texel=e->type==BT_TBUF || e->type==BT_UTB;
+                if (!DM_GAME_TEX_DYN_SLOTS || !(texel ? g_texel_indexing : g_sampled_indexing)) {
+                    LOG("[RED] vk: shader %s logical slot arrays need tex_dyn_slots and nonuniform descriptor support",key);
+                    free(txt);free(spv);return s;
+                }
+            }
             if (!strcmp(kind, "htab_map")) {
                 if (e->type != BT_SSBO || cnt != 1 || reg < 0 || reg >= DM_VK_MAX_BINDINGS) goto bad_table;
                 e->kind = K_TABLE_MAP; e->slot = reg;
@@ -2072,7 +2078,7 @@ typedef struct { shader_t *vs, *fs; VkPipelineLayout pl; } prog_vk;
 static prog_vk *g_pl; static int g_npl;
 static VkPipelineLayout layout_get(shader_t *vs, shader_t *fs) {
     for (int i = 0; i < g_npl; i++) if (g_pl[i].vs == vs && g_pl[i].fs == fs) return g_pl[i].pl;
-    if ((vs->has_tables || (fs && fs->has_tables)) && !table_descriptor_limits(vs,fs)) {
+    if ((vs->has_tables || vs->logical_slots || (fs && (fs->has_tables || fs->logical_slots))) && !table_descriptor_limits(vs,fs)) {
         RED_ONCE(83, "combined graphics handle tables exceed the device descriptor limits"); return VK_NULL_HANDLE;
     }
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; VKCHECK(vkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_empty_dsl)); }
@@ -2594,6 +2600,10 @@ static uint32_t uniform_handle(int stage, int reg, int64_t off) {
 static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     uint64_t handle = 0;
     if ((b->kind == K_TEX || b->kind == K_TBUF) && b->reg >= 0 && (uint32_t)b->reg + element < NTEX) handle = dm_vk_texture_slot(S.tex[stage], S.img[stage], b->reg + element);
+    else if (b->kind==K_TEX_SLOTS && element<32) {
+        handle=S.tex[stage][element];
+        if (!handle) handle=S.tex[stage][DMSH_SEPTEX_SLOT0+element];
+    }
     else if (b->kind == K_TEXU && b->off >= 0) {
         uint32_t raw = uniform_handle(stage, b->reg, b->off + 8ll * element);
         if (b->count == 1) raw |= uniform_handle(stage, b->twin.texture.reg, b->twin.texture.off);
@@ -2606,6 +2616,10 @@ static uint64_t sampled_handle(int stage, const sbind *b, uint32_t element) {
     else if (b->skind == S_SAMP_TEX) {
         if (b->type == BT_SAMP && b->sreg >= 0 && (uint32_t)b->sreg + element < NTEX) sid = S.tex[stage][b->sreg + element] >> 20;
         else sid = handle >> 20;
+    }
+    else if (b->skind==S_SAMP_SLOTS && element<32) {
+        sid=S.samp[stage][element]>>20;
+        if (!sid) sid=S.tex[stage][element]>>20;
     }
     else if (b->skind == S_SAMP_ID && b->sreg >= 0) sid = b->sreg + (b->type == BT_SAMP ? element : 0);
     else if (b->skind == S_SAMPU && b->soff >= 0) {
@@ -3293,7 +3307,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
         if (b->type == BT_SAMP) has_separate = 1;
         if (b->type == BT_SIMG || b->table) continue;
         if (is_texel(b) && b->count <= 32) continue;
-        if ((b->type == BT_CIS || b->type == BT_TEX) && b->count <= 32 && (b->kind == K_TEXU || b->kind == K_TEX)) continue;
+        if ((b->type == BT_CIS || b->type == BT_TEX) && b->count <= 32 && (b->kind == K_TEXU || b->kind == K_TEX || b->kind==K_TEX_SLOTS)) continue;
         if (b->type == BT_SAMP && b->count <= 32 && b->skind != S_NONE) continue;
         if (b->count != 1 || (b->type != BT_UBO && b->type != BT_SSBO && b->type != BT_CIS)) {
             RED_ONCE(22, "cannot populate descriptor %u type %d count %u (shader %s)", b->binding, b->type, b->count, s->key);
@@ -3360,6 +3374,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
                 int nvn2 = stage == 5 && dm_sdk_ounce();
                 if (b->off == 2) {
                     dm_vk_c2_fill(seg, sizeof seg, S.tex[stage], S.img[stage], S.samp[stage]);
+                    if (s->logical_slots) dm_vk_c2_logical(seg,sizeof seg,S.tex[stage],S.img[stage],S.samp[stage]);
                 } else {
                     // Replay currently rasterizes at one sample per pixel.
                     // Multisample replay must supply its actual sample positions.

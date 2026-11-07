@@ -39,6 +39,7 @@ static prog_t wrapped_buffer_program={.nstage=1};
 static prog_t block_target_program={.nstage=2}, block_sample_program={.nstage=1};
 static prog_t wrapped_table_program={.nstage=1};
 static prog_t wrapped_array_program[2]={{.nstage=1},{.nstage=1}};
+static prog_t logical_slot_program[2]={{.nstage=1},{.nstage=1}};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -151,6 +152,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     if (p == &depth_clamp_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x53 : 0x5c; return 1; }
     if (p == &depth_range_program) { assert(stage < 2); memset(key, 0, 8); key[7] = 0x52 + stage; return 1; }
     for (int i = 0; i < 2; i++) if (p == &warp_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x52 + i; return 1; }
+    for (unsigned variant=0;variant<2;variant++) if (p==&logical_slot_program[variant]) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0xaa;key[7]=1+variant;return 1; }
     if (p == &resource_shapes_program) { assert(stage == 0); const uint8_t k[8]={0,0,0,0,0xfe,0xed,0x61,0};memcpy(key,k,8);return 1; }
     if (p == &c2_sample_program) { assert(stage < 2); memset(key, 0, 8); key[7] = stage ? 0x51 : 0x35; return 1; }
     if (p == &driver_c2_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x50; return 1; }
@@ -3251,6 +3253,7 @@ static void typed_graphics(void) {
 #include "split_handle.inc"
 #include "driver_c2.inc"
 #include "resource_shapes.inc"
+#include "logical_slots.inc"
 // Run with the maximum supported width on a known fixed- or selectable-size
 // driver. Verify both a legal quad exchange and a full-width exchange whose
 // conditional atomics must never execute when the driver cannot run it.
@@ -3297,6 +3300,7 @@ int main(void) {
         puts("Headless presents hand VI completed tickets without a compositor timestamp");
         return 0;
     }
+    if (getenv("DM_VK_TEST_LOGICAL_SLOTS")) { logical_buffer_slots();logical_image_slots();return 0; }
     if (getenv("DM_VK_TEST_DIAGNOSTICS")) { graphics_diagnostics(); return 0; }
     if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
     if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }

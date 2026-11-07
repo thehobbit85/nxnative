@@ -1,0 +1,14 @@
+#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+layout(local_size_x=32) in;
+layout(set=0,binding=0) uniform texture2D images[32];
+layout(set=0,binding=1) uniform sampler samplers[32];
+layout(set=0,binding=2,std430) buffer Result { uvec4 values[]; } result;
+layout(set=0,binding=3,std140) uniform Driver { uvec4 words[256]; } driver;
+uint word(uint offset) { return driver.words[offset/16u][offset/4u%4u]; }
+void main() {
+    uint slot=gl_LocalInvocationID.x;
+    float center=texture(sampler2D(images[nonuniformEXT(slot)],samplers[nonuniformEXT(slot)]),vec2(.5)).x;
+    float border=texture(sampler2D(images[nonuniformEXT(slot)],samplers[nonuniformEXT(slot)]),vec2(-1)).x;
+    result.values[slot]=uvec4(floatBitsToUint(center),floatBitsToUint(border),word(0x20u+8u*slot),word(0x568u+8u*slot));
+}
