@@ -992,7 +992,7 @@ struct vtex {
     int dirty;   // the CPU wrote its storage since the last upload (WriteTexels, a movie frame, a flushed pool range): uploaded again at its next use, unless the GPU renders into it
     const uint8_t *mem; uint64_t len;   // its storage in guest memory
     uint64_t stamp; const void *span;   // uploaded from a dirty-tracked pool (nvn_dirty.c): the write generation then and the tracked range, re-uploaded when the game writes it
-    int sparse; uint64_t sparse_submission, uploaded_mappings, seen_mappings, seen_writes;
+    int sparse; uint64_t uploaded_mappings, seen_mappings, seen_writes;
     vview *views; int nviews;
     VkImageView window_view; _Atomic unsigned present_refs;  // Window submissions have their own fences.
     block_view *block_views;
@@ -1122,18 +1122,23 @@ static vtex *tex_get(const tex_t *t, int for_rt) {
     pthread_mutex_unlock(&g_rmu);
     return v;
 }
-// Packaged texture: each level and layer deswizzled from the pool storage into the ring, then copied into the image by the upload command buffer (it runs before this submission's draws)
+static void pass_end(void);
+// Deswizzle each level into the ring. Initial uploads lead the submission,
+// while updates to an existing image preserve their command order.
 static void tex_upload(vtex *v, const tex_t *t) {
     if (vk_skip() & SK_UPLOAD) return;
     if (g_plog) LOG("plog:  upload %llu fmt %#x %ux%ux%u levels %u layers %u target %d", (unsigned long long)t->serial, t->d.format, v->w, v->h, v->d, v->levels, v->layers, t->d.target);
     int bw = 1, bh = 1, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { RED_ONCE(4, "texture format %#x: block size unknown, not uploaded", t->d.format); return; }
     if (v->sparse) {
-        v->sparse_submission=g_fence+1;
         v->uploaded_mappings=v->seen_mappings=nvn_sparse_gen();
         v->stamp=v->seen_writes=nvn_dirty_now();
         nvn_sparse_protect(t->pool,(uintptr_t)t->mem,t->L.size);
     }
+    // Re-uploads must follow commands that consumed the previous contents.
+    // Only the first upload can run in the submission's leading upload buffer.
+    VkCommandBuffer command=C->up;
+    if (v->uploaded) { pass_end();command=C->cb;barrier_all(command); }
     for (unsigned lv = 0; lv < v->levels; lv++) {
         uint32_t w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1, d = v->d >> lv ? v->d >> lv : 1;
         if (t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY) h = 1;
@@ -1161,20 +1166,21 @@ static void tex_upload(vtex *v, const tex_t *t) {
                 transfer_rows(v, ext, w, tmp, NULL, pitch, pitch * by, dst, planes.depth_bytes, planes.stencil);
             if (tmp != dst) free(tmp);
             for (unsigned i=0; i<planes.count; ++i) planes.copies[i].bufferOffset += o;
-            vkCmdCopyBufferToImage(C->up, C->ring, v->img, VK_IMAGE_LAYOUT_GENERAL, planes.count, planes.copies);
+            vkCmdCopyBufferToImage(command, C->ring, v->img, VK_IMAGE_LAYOUT_GENERAL, planes.count, planes.copies);
         }
     }
-    // The upload buffer precedes the draw buffer, but execution order alone does
-    // not expose the transferred texels to shaders. Publish the whole image after
+    // Execution order alone does not expose transferred texels to shaders.
+    // Publish the whole image after
     // its mip/layer copies, including CPU re-uploads (ASTC sampled as zero without it).
     // A later command can also copy the image or attach it as a render target.
     VkImageMemoryBarrier ready = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
         v->img, {v->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
-    vkCmdPipelineBarrier(C->up, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
                          0, NULL, 0, NULL, 1, &ready);
-    C->up_used = 1; v->uploaded = 1;
+    if (command==C->up) C->up_used=1;
+    v->uploaded=1;
     // As nvn_mtl.m does for packaged textures: the storage is write-protected after the upload, and a game write to it (streamed texture data arriving after the texture was
     // made, as Super Mario Odyssey's normal maps do; noise until then) brings a new upload at the texture's next use (tex_get)
     if (t->mem && !v->sparse && !v->gpu && nvn_dirty_tracked(t->mem, t->L.size)) { nvn_dirty_protect(t->mem, t->L.size); v->stamp = nvn_dirty_now(); v->span = nvn_dirty_span(t->mem, t->L.size); }
