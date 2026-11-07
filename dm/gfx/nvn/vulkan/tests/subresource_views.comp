@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x=1) in;
+#ifdef VOLUME
+layout(binding=0) uniform usampler3D sampledVolume;
+layout(binding=1, r32ui) uniform uimage3D storageVolume;
+layout(binding=2, std430) buffer Results { uvec4 values[2]; };
+void main() {
+    for (int z=0; z<4; z++) values[0][z] = texelFetch(sampledVolume, ivec3(1, 1, z), 0).r;
+    values[1] = uvec4(textureSize(sampledVolume, 0), textureQueryLevels(sampledVolume));
+    imageStore(storageVolume, ivec3(2, 2, 3), uvec4(0x91827364u));
+}
+#else
+layout(binding=0) uniform usampler1D sampledLine;
+layout(binding=1) uniform usampler1DArray sampledArray;
+layout(binding=2, r32ui) uniform uimage1DArray storageArray;
+layout(binding=3, std430) buffer Results { uvec4 values[2]; };
+void main() {
+    values[0] = uvec4(texelFetch(sampledLine, 1, 0).r, texelFetch(sampledArray, ivec2(2, 1), 0).r,
+        textureSize(sampledArray, 0));
+    values[1] = uvec4(textureSize(sampledLine, 0), textureQueryLevels(sampledLine), imageSize(storageArray));
+    imageStore(storageArray, ivec2(2, 1), uvec4(0x91827364u));
+}
+#endif

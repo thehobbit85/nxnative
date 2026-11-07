@@ -184,6 +184,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** a type mismatch when a Metal 1D texture is bound to a shader's `texture2d` argument.
 - **Cause:** translated shaders never declare `texture1d` (none of the five games' libraries did at the time).
 - **Fix:** NVN 1D and 1D-array textures are created as one-row 2D / 2D-array Metal textures.
+- **Vulkan validation.** Native 1D and 1D-array shader views preserve selected mips and layers through image writes. The replay fixture also checks 3D sampled/storage mip views and scissored attachment clears on three depth slices, with every neighbouring texel and the preceding mip retained. Matching Metal views and attachment selection provide the reference. Binding a native Vulkan 1D allocation to the translated one-row 2D shader interface remains open.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md): the material shaders sample 64×1 R32F lookup tables created as NVN 1D textures (and filled with `WriteTexels`).
 
 ### Cube textures held as 6-layer 2D arrays
