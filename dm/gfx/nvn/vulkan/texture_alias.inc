@@ -18,10 +18,11 @@ static void texture_bind_serial(uint64_t serial,vtex *v) {
     vtex *old=nvn_hm_put(&g_texture_serials,&serial,v);
     if (old && old!=v) die("Vulkan: texture serial changed storage without finalization");
     if (!old) v->serial_refs++;
+    v->alias_seen=g_fence+1;
 }
 static vtex *tex_find(uint64_t serial) {
     vtex *v=nvn_hm_get(&g_texture_serials,&serial);
-    if (v) return v;
+    if (v) { v->alias_seen=g_fence+1;return v; }
     const texture_alias_key *key=nvn_hm_get(&g_texture_keys,&serial);
     v=key ? nvn_hm_get(&g_texture_aliases,key) : NULL;
     if (v) texture_bind_serial(serial,v);
@@ -33,6 +34,28 @@ static vtex *texture_alias_find(const tex_t *t) {
     if (v) texture_bind_serial(t->serial,v);
     return v;
 }
+static void texture_retire_unused(vtex *v);
+// As in Metal's alias_take_over, an orphaned old shape can leave a long-lived
+// pool once different storage takes over its bytes. Recent or live descriptors
+// retain their image, and each allocation retires at most sixteen keys.
+static void texture_alias_take_over(const tex_t *t,const texture_alias_key *new_key) {
+    enum { IDLE_SUBMISSIONS=16,MAX_RETIRE=16 };
+    if (t->off<0 || !t->L.size || t->L.size>UINT64_MAX-(uint64_t)t->off) return;
+    uint64_t begin=(uint64_t)t->off,end=begin+t->L.size;
+    texture_alias_key keys[MAX_RETIRE];unsigned count=0;
+    for (uint32_t i=0;i<g_texture_aliases.cap && count<MAX_RETIRE;i++) {
+        vtex *v=g_texture_aliases.vals[i];if (!v || v->serial_refs || g_fence+1-v->alias_seen<IDLE_SUBMISSIONS) continue;
+        texture_alias_key key;memcpy(&key,g_texture_aliases.keys+(size_t)i*sizeof key,sizeof key);
+        if (key.pool!=new_key->pool || key.offset<0 || !memcmp(&key,new_key,sizeof key)) continue;
+        uint64_t old=(uint64_t)key.offset;
+        if (old>=end || v->len>UINT64_MAX-old || old+v->len<=begin) continue;
+        memcpy(&keys[count++],&key,sizeof key);
+    }
+    for (unsigned i=0;i<count;i++) {
+        vtex *v=nvn_hm_del(&g_texture_aliases,&keys[i]);
+        if (v) { v->alias_owned=0;texture_retire_unused(v); }
+    }
+}
 static void texture_alias_publish(const tex_t *t,vtex *v) {
     texture_alias_key key;
     if (v->alias_owned || !texture_key(t,&key)) return;
@@ -40,7 +63,8 @@ static void texture_alias_publish(const tex_t *t,vtex *v) {
     // A previously uploaded CPU image may coexist with the GPU storage owner.
     // Do not replace that owner merely because the CPU object became writable.
     if (old && old!=v) return;
-    nvn_hm_put(&g_texture_aliases,&key,v);v->alias_owned=1;
+    texture_alias_take_over(t,&key);
+    nvn_hm_put(&g_texture_aliases,&key,v);v->alias_owned=1;v->alias_seen=g_fence+1;
 }
 static void texture_retire_unused(vtex *v) {
     if (v->serial_refs || v->alias_owned) return;
