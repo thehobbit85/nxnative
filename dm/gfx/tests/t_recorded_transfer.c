@@ -522,6 +522,7 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 #include "recorded_draw_texture.h"
 #include "recorded_sampler_reduction.h"
 #include "recorded_sparse_texture.h"
+#include "recorded_sparse_write.h"
 #include "recorded_query_lifetime.h"
 #include "recorded_feedback_control.h"
 
@@ -569,6 +570,13 @@ int main(void) {
     API(nvnQueueBuilderSetDevice)(&qb, &device);
     API(nvnQueueBuilderSetDefaults)(&qb);
     assert(API(nvnQueueInitialize)(&queue, &qb));
+#ifdef __ANDROID__
+    if (getenv("DM_VK_TEST_SPARSE_WRITES")) {
+        check_sparse_textures(&device,&queue);
+        check_sparse_encoded_writes(&device,&queue);
+        API(nvnQueueFinalize)(&queue);API(nvnDeviceFinalize)(&device);return 0;
+    }
+#endif
 
     NVNmemoryPool pool;
     NVNmemoryPoolBuilder pb;

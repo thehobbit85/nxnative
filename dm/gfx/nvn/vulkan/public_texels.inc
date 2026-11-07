@@ -4,8 +4,11 @@
 int nvn_sparse_pool(const void *pool);
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t addr, uint64_t size);
 
+uint64_t nvn_sparse_write(const void *pool, const void *src, uint64_t addr, uint64_t size);
+
 static void storage_bytes(const tex_t *t, int sparse, size_t offset, uint8_t *linear, size_t n, int write) {
-    if (write) memcpy(t->mem + offset, linear, n);
+    if (write && sparse) nvn_sparse_write(t->pool,linear,(uintptr_t)t->mem+offset,n);
+    else if (write) memcpy(t->mem + offset, linear, n);
     else if (sparse) nvn_sparse_copy(t->pool, linear, (uintptr_t)t->mem + offset, n);
     else memcpy(linear, t->mem + offset, n);
 }
@@ -42,10 +45,7 @@ static int storage_texels(const tex_t *t, unsigned level, uint8_t *linear, size_
     uint32_t nz = ext.nz, layer = ext.layer;
     int volume = ext.volume;
     int sparse = t->pool && nvn_sparse_pool(t->pool);
-    if (write) {
-        if (sparse) return 0;
-        dm_guest_write_prepare(t->mem, t->L.size);
-    }
+    if (write && !sparse) dm_guest_write_prepare(t->mem,t->L.size);
     if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {
         size_t stride = t->L.layer_size / (t->d.height ? t->d.height : 1);
         if (level || layer || nz != 1 || x0 + width > stride) return 0;

@@ -2968,6 +2968,30 @@ uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     }
     pthread_mutex_unlock(&g_vp_mu); return miss;
 }
+// Encoded texture writes follow the same page table as sparse reads. Holes
+// discard their bytes. Hold the mapping lock through each physical write so a
+// concurrent remap cannot redirect a partial update to a retired page.
+uint64_t nvn_sparse_write(const void *pool, const void *src, uint64_t address, uint64_t size) {
+    if (size>UINT64_MAX-address) return size;
+    pthread_mutex_lock(&g_vp_mu);
+    struct vpool *v=vpool_at(pool,address);
+    uint64_t missing=0;
+    if (!v) { pthread_mutex_unlock(&g_vp_mu);return size; }
+    uint64_t offset=address-(uintptr_t)v->base;
+    for (uint64_t copied=0;copied<size;) {
+        uint64_t at=offset+copied,bytes=0x1000-(at&0xfff);
+        if (bytes>size-copied) bytes=size-copied;
+        const vpte *entry=at<v->size ? vpt_get(v,at) : NULL;
+        if (entry && entry->phys) {
+            void *physical=(uint8_t *)entry->phys+(at&0xfff);
+            dm_guest_write_prepare(physical,bytes);
+            memcpy(physical,(const uint8_t *)src+copied,bytes);
+        } else missing+=bytes;
+        copied+=bytes;
+    }
+    pthread_mutex_unlock(&g_vp_mu);
+    return missing;
+}
 // Runs of consecutive physical pages behind [a, a+n): fn on each (nonzero stops the walk and is returned), or 1 at the first page mapped after gen (gen ~0 = do not look)
 static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int (*fn)(const uint8_t *, uint64_t, uint64_t), uint64_t arg) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int r = 0;

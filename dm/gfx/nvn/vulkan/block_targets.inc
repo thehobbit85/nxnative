@@ -22,9 +22,8 @@ static vtex *block_target_prepare(unsigned slot,const tex_t *texture,const view_
     fmt_t format=has_view && view->set_format ? fmt_of(view->format) : (fmt_t){0};
     int pixel_bytes=has_view && view->set_format ? nvn_fmt_bpb(view->format,&pixel_width,&pixel_height) : 0;
     if (!format.f || format.dec || format.depth || pixel_bytes!=bytes || pixel_width!=1 || pixel_height!=1 ||
-        (!depth && (block_width!=4 || block_height!=4 || !texture->mem ||
-                    (texture->pool && nvn_sparse_pool(texture->pool)))) || texture->d.samples>1) {
-        RED_ONCE(122,"shadow attachment requires D16, D32F or ordinary BC storage and a block-sized color view");return NULL;
+        (!depth && (block_width!=4 || block_height!=4 || !texture->mem)) || texture->d.samples>1) {
+        RED_ONCE(122,"shadow attachment requires D16, D32F or BC storage and a block-sized color view");return NULL;
     }
     VkFormatProperties properties;vkGetPhysicalDeviceFormatProperties(g_pd,format.f,&properties);
     if (!(properties.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {

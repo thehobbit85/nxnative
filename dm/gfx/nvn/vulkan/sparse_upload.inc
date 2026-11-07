@@ -6,9 +6,7 @@ int nvn_sparse_since(const void *pool, uint64_t address, uint64_t size, uint64_t
 void nvn_sparse_protect(const void *pool, uint64_t address, uint64_t size);
 
 static int sparse_changed(vtex *v, const tex_t *t) {
-    uint64_t submission=g_fence+1;
-    if (!v->sparse || !v->uploaded || v->sparse_submission==submission) return 0;
-    v->sparse_submission=submission;
+    if (!v->sparse || !v->uploaded) return 0;
     uint64_t mappings=nvn_sparse_gen(), writes=nvn_dirty_now();
     if (mappings==v->seen_mappings && writes==v->seen_writes) return 0;
     v->seen_mappings=mappings; v->seen_writes=writes;

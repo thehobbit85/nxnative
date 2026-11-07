@@ -13,6 +13,9 @@ static int write_stored_image(const tex_t *t, vtex *v, VkBufferImageCopy region,
     uint8_t *raw=C->ringp+off;
     size_t slice=ext.bytes*ext.rows;
     if (!storage_texels(t,region.imageSubresource.mipLevel,raw,ext.bytes,slice,ext,1)) return 0;
+    // Unmapped sparse pages discard writes. Decode the bytes actually stored,
+    // including zero-filled holes and repeated physical-page aliases.
+    if (v->sparse && !storage_texels(t,region.imageSubresource.mipLevel,raw,ext.bytes,slice,ext,0)) return 0;
     g_wgen++;   // a subsequent buffer binding can alias the mirrored storage
     if (v->f.dec) {
         size_t decoded_slice=(size_t)region.imageExtent.width*region.imageExtent.height*dec_bpp(v->f.dec);
@@ -24,6 +27,11 @@ static int write_stored_image(const tex_t *t, vtex *v, VkBufferImageCopy region,
     } else {
         VkDescriptorBufferInfo guest={C->ring,off,slice*ext.nz};
         buffer_image_transfer(v,region,guest,1,transfer_alignment(v));
+    }
+    if (v->sparse) {
+        nvn_sparse_protect(t->pool,(uintptr_t)t->mem,t->L.size);
+        v->uploaded_mappings=v->seen_mappings=nvn_sparse_gen();
+        v->stamp=v->seen_writes=nvn_dirty_now();
     }
     if (v->span) {
         // This texture already received these bytes. Other views of the same
