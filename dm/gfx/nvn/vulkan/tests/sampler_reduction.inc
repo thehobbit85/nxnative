@@ -2,7 +2,8 @@
 // This path exercises an ordinary guest shader and separate texture/sampler slots.
 static void sampler_reduction(void) {
     enum { slot = 1512 };
-    static const struct { float u, v, lod; int filter, mag; float expected[3]; int border; float bias; } cases[] = {
+    typedef struct { float u, v, lod; int filter, mag; float expected[3]; int border; float bias; } sample_case;
+    static const sample_case cases[] = {
         {.25f,.25f,1, NVN_MIN_FILTER_LINEAR,1, {4,1,7}},
         {.5f,.5f,1, NVN_MIN_FILTER_LINEAR_MIPMAP_NEAREST,1, {12,9,15}},
         {.375f,.375f,0, NVN_MIN_FILTER_LINEAR,1, {7,7,7}},
@@ -16,6 +17,14 @@ static void sampler_reduction(void) {
         {.25f,.25f,-1, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,0, {7,7,7}},
         {.25f,.25f,1, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,0, {9,9,9}},
         {.5f,.5f,.5f, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {12,9,15},0,.5f},
+    };
+    static const sample_case offset_cases[] = {
+        {.125f,.125f,0, NVN_MIN_FILTER_LINEAR,1, {7,7,7}},
+        {.25f,.25f,0, NVN_MIN_FILTER_LINEAR,1, {4,1,7}},
+        {.25f,.25f,1, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {15,15,15}},
+        {-.25f,.125f,0, NVN_MIN_FILTER_LINEAR,1, {2.5f,0,5},1},
+        {-1,.125f,0, NVN_MIN_FILTER_LINEAR,1, {0,0,0},1},
+        {.5f,.5f,.5f, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {8,1,15}},
     };
     const NVNformat formats[] = {NVN_FORMAT_R32F,NVN_FORMAT_RGBA32F,NVN_FORMAT_RGBA8,NVN_FORMAT_DEPTH32F};
     mtl_queue_activate(slot);
@@ -42,8 +51,15 @@ static void sampler_reduction(void) {
             put(&upload,OP_COPY_B2T,&copy,sizeof copy);
         }
         put(&upload,OP_END,NULL,0); mtl_sub_begin();mtl_exec(upload.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
-        for (int separate=0;separate<2;separate++) for (unsigned test=0;test<sizeof cases/sizeof *cases;test++) for (int mode=0;mode<3;mode++) {
-            const typeof(cases[0]) *c=cases+test;
+        for (int form=0;form<4;form++) for (int separate=0;separate<2;separate++) {
+          const sample_case *table = form >= 2 ? offset_cases : cases;
+          unsigned count = form >= 2 ? sizeof offset_cases/sizeof *offset_cases : sizeof cases/sizeof *cases;
+          prog_t *program = &sampler_reduction_program[form][array][separate]; program->nstage=1;
+          for (unsigned test=0;test<count;test++) for (int mode=0;mode<3;mode++) {
+            const sample_case *c=table+test;
+            // Native gradient LOD may be approximated. Exact powers of two
+            // check averaging, while fractional footprints check both extrema.
+            if ((form & 1) && mode == 0 && c->lod != floorf(c->lod)) continue;
             float green_border = format == 1 ? 120 : format == 2 ? 120.0f/255 : 0;
             samp_par sampler={.ws=c->border ? NVN_WRAP_MODE_CLAMP_TO_BORDER : NVN_WRAP_MODE_REPEAT,
                 .wt=NVN_WRAP_MODE_REPEAT,.wr=NVN_WRAP_MODE_REPEAT,.border={0,green_border,0,1},
@@ -51,7 +67,7 @@ static void sampler_reduction(void) {
             mtl_reg_samp(slot,&sampler);
             float coordinate[]={c->u,c->v,c->lod,array}, result[4]; memset(result,0xcc,sizeof result);
             list_t list={0};
-            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&sampler_reduction_program[array][separate],.stages=0x20);
+            RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=program,.stages=0x20);
             RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=5|BIND_TEX1_NOBASE,.slot=0,.h=((uint64_t)slot<<20)|slot);
             RECORD(OP_BIND_SAMP,p_bind_handles,.stage=5,.first=1,.n=1,.h={(uint64_t)slot<<20});
             RECORD(OP_BIND_UBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)coordinate,.size=sizeof coordinate);
@@ -63,8 +79,9 @@ static void sampler_reduction(void) {
             if (format==2) for (int ch=0;ch<3;ch++) expected[ch]/=255;
             if (format==3) expected[0]/=128;
             for (int ch=0;ch<4;ch++) if (!isfinite(result[ch]) || fabsf(result[ch]-expected[ch])>0.00001f)
-                die("sampler reduction array%d format%d separate%d case%u mode%d channel%d: %g expected %g",array,format,separate,test,mode,ch,result[ch],expected[ch]);
+                die("sampler reduction form%d array%d format%d separate%d case%u mode%d channel%d: %g expected %g",form,array,format,separate,test,mode,ch,result[ch],expected[ch]);
             checks++;
+          }
         }
         mtl_reg_tex(slot,NULL,NULL);mtl_tex_release(&texture);
     }

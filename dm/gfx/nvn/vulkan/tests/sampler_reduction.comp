@@ -18,4 +18,19 @@ layout(binding=0) uniform SAMPLER sampled;
 #endif
 layout(binding=1, std140) uniform Coordinates { vec4 coordinate; };
 layout(binding=2, std430) buffer Results { vec4 value; };
-void main() { value = textureLod(sampled, COORDINATE, coordinate.z); }
+void main() {
+#ifdef GRADIENTS
+    vec2 scale = exp2(coordinate.z) / vec2(textureSize(sampled, 0).xy);
+#ifdef OFFSET
+    value = textureGradOffset(sampled, COORDINATE, vec2(scale.x,0), vec2(0,scale.y), ivec2(1,-1));
+#else
+    value = textureGrad(sampled, COORDINATE, vec2(scale.x,0), vec2(0,scale.y));
+#endif
+#else
+#ifdef OFFSET
+    value = textureLodOffset(sampled, COORDINATE, coordinate.z, ivec2(1,-1));
+#else
+    value = textureLod(sampled, COORDINATE, coordinate.z);
+#endif
+#endif
+}

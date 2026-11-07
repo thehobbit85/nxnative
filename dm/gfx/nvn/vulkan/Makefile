@@ -180,23 +180,29 @@ $(B)/t_replay: tests/empty_ms.inc
 $(B)/t_replay: tests/subresource_views.inc
 $(B)/t_replay: tests/sampler_reduction.inc
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sample_reduction.h
-fixture: $(B)/shaders/0000000000000075.spv $(B)/shaders/0000000000000076.spv $(B)/shaders/0000000000000077.spv $(B)/shaders/0000000000000078.spv
-$(B)/shaders/0000000000000077.spv: tests/sampler_reduction.comp
+$(B)/shaders/0000000000000075.spv: REDUCTION_FLAGS =
+$(B)/shaders/0000000000000076.spv: REDUCTION_FLAGS = -DSEPARATE
+$(B)/shaders/0000000000000077.spv: REDUCTION_FLAGS = -DARRAY
+$(B)/shaders/0000000000000078.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE
+$(B)/shaders/0000000000000079.spv: REDUCTION_FLAGS = -DGRADIENTS
+$(B)/shaders/000000000000007a.spv: REDUCTION_FLAGS = -DSEPARATE -DGRADIENTS
+$(B)/shaders/000000000000007b.spv: REDUCTION_FLAGS = -DARRAY -DGRADIENTS
+$(B)/shaders/000000000000007c.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE -DGRADIENTS
+$(B)/shaders/000000000000007d.spv: REDUCTION_FLAGS = -DOFFSET
+$(B)/shaders/000000000000007e.spv: REDUCTION_FLAGS = -DSEPARATE -DOFFSET
+$(B)/shaders/000000000000007f.spv: REDUCTION_FLAGS = -DARRAY -DOFFSET
+$(B)/shaders/0000000000000080.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE -DOFFSET
+$(B)/shaders/0000000000000081.spv: REDUCTION_FLAGS = -DGRADIENTS -DOFFSET
+$(B)/shaders/0000000000000082.spv: REDUCTION_FLAGS = -DSEPARATE -DGRADIENTS -DOFFSET
+$(B)/shaders/0000000000000083.spv: REDUCTION_FLAGS = -DARRAY -DGRADIENTS -DOFFSET
+$(B)/shaders/0000000000000084.spv: REDUCTION_FLAGS = -DARRAY -DSEPARATE -DGRADIENTS -DOFFSET
+REDUCTION_SHADERS = $(B)/shaders/0000000000000075.spv $(B)/shaders/0000000000000076.spv $(B)/shaders/0000000000000077.spv $(B)/shaders/0000000000000078.spv $(B)/shaders/0000000000000079.spv $(B)/shaders/000000000000007a.spv $(B)/shaders/000000000000007b.spv $(B)/shaders/000000000000007c.spv $(B)/shaders/000000000000007d.spv $(B)/shaders/000000000000007e.spv $(B)/shaders/000000000000007f.spv $(B)/shaders/0000000000000080.spv $(B)/shaders/0000000000000081.spv $(B)/shaders/0000000000000082.spv $(B)/shaders/0000000000000083.spv $(B)/shaders/0000000000000084.spv
+fixture: $(REDUCTION_SHADERS)
+$(REDUCTION_SHADERS): tests/sampler_reduction.comp
 	mkdir -p $(@D)
-	$(GLSLC) --target-env=vulkan1.1 -DARRAY $< -o $@
-	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
-$(B)/shaders/0000000000000078.spv: tests/sampler_reduction.comp
-	mkdir -p $(@D)
-	$(GLSLC) --target-env=vulkan1.1 -DARRAY -DSEPARATE $< -o $@
-	printf 'stage cs\ntg 1 1 1\nb 0 tex 1 tex 0 -1 - -1\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\nb 3 samp 1 samp 1 -1 - -1\n' > $(@:.spv=.vk.txt)
-$(B)/shaders/0000000000000075.spv: tests/sampler_reduction.comp
-	mkdir -p $(@D)
-	$(GLSLC) --target-env=vulkan1.1 $< -o $@
-	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
-$(B)/shaders/0000000000000076.spv: tests/sampler_reduction.comp
-	mkdir -p $(@D)
-	$(GLSLC) --target-env=vulkan1.1 -DSEPARATE $< -o $@
-	printf 'stage cs\ntg 1 1 1\nb 0 tex 1 tex 0 -1 - -1\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\nb 3 samp 1 samp 1 -1 - -1\n' > $(@:.spv=.vk.txt)
+	$(GLSLC) --target-env=vulkan1.1 $(REDUCTION_FLAGS) $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 1 ubo 1 cbuf 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+	$(if $(findstring -DSEPARATE,$(REDUCTION_FLAGS)),printf 'b 0 tex 1 tex 0 -1 - -1\nb 3 samp 1 samp 1 -1 - -1\n',printf 'b 0 cis 1 tex 0 -1 samp_tex 0\n') >> $(@:.spv=.vk.txt)
 $(B)/t_replay: tests/one_row_guest.inc ../../../android/tests/texture_coordinates_cases.h
 fixture: $(B)/shaders/0000000000000072.spv $(B)/shaders/0000000000000073.spv $(B)/shaders/0000000000000074.spv
 $(B)/shaders/0000000000000074.spv: tests/subresource_views.comp
@@ -558,14 +564,11 @@ $(B)/t_sample_reduction: tests/t_sample_reduction.c spv_sample_reduction.h spv_t
 	mkdir -p $(B)
 	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror -Wno-unused-function $(BUILD_CFLAGS) $< -o $@
 .PHONY: sampler-reduction-check
-sampler-reduction-check: $(B)/t_sample_reduction $(B)/shaders/0000000000000075.spv $(B)/shaders/0000000000000076.spv $(B)/shaders/0000000000000077.spv $(B)/shaders/0000000000000078.spv
-	$(B)/t_sample_reduction $(B)/shaders/0000000000000075.spv $(B)/reduction-combined.spv 0
-	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-combined.spv
-	$(B)/t_sample_reduction $(B)/shaders/0000000000000076.spv $(B)/reduction-separate.spv 3
-	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-separate.spv
-	$(B)/t_sample_reduction $(B)/shaders/0000000000000077.spv $(B)/reduction-array.spv 0
-	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-array.spv
-	$(B)/t_sample_reduction $(B)/shaders/0000000000000078.spv $(B)/reduction-array-separate.spv 3
-	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-array-separate.spv
+sampler-reduction-check: $(B)/t_sample_reduction $(REDUCTION_SHADERS)
+	@set -e; for input in $(REDUCTION_SHADERS); do \
+	  key=$${input##*/}; value=$${key%.spv}; binding=$$(( (0x$$value - 0x75) % 2 * 3 )); \
+	  $(B)/t_sample_reduction "$$input" "$(B)/reduction-$$key" "$$binding"; \
+	  $(SPIRV_VAL) --target-env vulkan1.1 "$(B)/reduction-$$key"; \
+	done
 	$(B)/t_sample_reduction $(B)/shaders/0000000000000075.spv $(B)/reduction-no-import.spv 0 no-import
 	$(SPIRV_VAL) --target-env vulkan1.1 $(B)/reduction-no-import.spv
