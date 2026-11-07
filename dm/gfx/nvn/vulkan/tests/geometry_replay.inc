@@ -73,3 +73,43 @@ static void geometry_replay(void) {
     mtl_pool_del(indices);mtl_tex_release(&target);mtl_queue_forget(target.serial);
     puts("Maxwell geometry replay passed direct/indexed/indirect instances, multi-block compaction, sparse capture IDs and ordered two-stream feedback with raster discard and whole-primitive clipping");
 }
+
+static void geometry_split_feedback(void) {
+    // The shared Maxwell fixture emits a triangle and a four-vertex strip,
+    // with raw primitive/invocation/vertex IDs in location 0. Its nine-vertex
+    // allocation emits seven vertices and expands to nine ordered records.
+    enum { PRIMITIVES=65, INSTANCES=2, INVOCATIONS=3, RECORDS=PRIMITIVES*INSTANCES*INVOCATIONS*9 };
+    struct { uint32_t guard[4], values[RECORDS][4], tail[4], control[8]; } *output=malloc(sizeof *output);
+    assert(output);memset(output,0xa5,sizeof *output);mtl_pool_add(output,sizeof *output);
+    float positions[PRIMITIVES*3][4];
+    for (unsigned i=0;i<PRIMITIVES*3;i++) memcpy(positions[i],(float[]){0,0,0,1},16);
+    list_t list={0};
+    RECORD(OP_SET_RT,p_set_rt,.n=0);
+    RECORD(OP_RAST_DISCARD,p_rast_discard,.on=1);
+    RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&geometry_explicit_program,.stages=7);
+    p_bind_vattr attributes={.n=1};va_st attribute={.fmt=NVN_FORMAT_RGBA32F};
+    memcpy(attributes.st,&attribute,sizeof attribute);put(&list,OP_BIND_VATTR,&attributes,sizeof attributes);
+    RECORD(OP_BIND_VSTREAM,p_bind_vstream,.n=1,.st={{.stride=16}});
+    RECORD(OP_BIND_VBUF1,p_bind_vbuf1,.index=0,.size=sizeof positions,.addr=(uintptr_t)positions);
+    RECORD(OP_TF_BIND,p_tf_bind,.index=0,.addr=(uintptr_t)output->values,.size=sizeof output->values);
+    RECORD(OP_TF_STATE,p_tf_state,.what=0);
+    RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=PRIMITIVES*3,.instances=INSTANCES,.base_instance=7);
+    RECORD(OP_TF_STATE,p_tf_state,.what=1,.ctl=(uintptr_t)output->control);
+    put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    const uint32_t expected_control[]={RECORDS*16,0,0,0,RECORDS,1,0,0};
+    assert(!memcmp(output->control,expected_control,sizeof expected_control));
+    const uint32_t emitted[]={0,1,2,3,4,5,5,4,6};
+    unsigned record=0;
+    for (unsigned instance=0;instance<INSTANCES;instance++)
+        for (unsigned primitive=0;primitive<PRIMITIVES;primitive++)
+            for (unsigned invocation=0;invocation<INVOCATIONS;invocation++)
+                for (unsigned vertex=0;vertex<9;vertex++,record++) {
+                    const uint32_t expected[]={primitive,invocation,emitted[vertex],0x3f800000};
+                    const uint32_t *actual=output->values[record];
+                    if (memcmp(actual,expected,sizeof expected)) die("geometry split record%u: %u,%u,%u,%x expected %u,%u,%u,%x",
+                        record,actual[0],actual[1],actual[2],actual[3],expected[0],expected[1],expected[2],expected[3]);
+                }
+    for (unsigned i=0;i<4;i++) assert(output->guard[i]==0xa5a5a5a5 && output->tail[i]==0xa5a5a5a5);
+    mtl_pool_del(output);free(output);
+    puts("Geometry split feedback preserved primitive/invocation IDs, strip winding, GPU emitted counts and stream state");
+}

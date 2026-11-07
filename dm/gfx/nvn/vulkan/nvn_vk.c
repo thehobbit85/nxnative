@@ -3414,7 +3414,8 @@ static void feedback_hold(feedback_control *control) {
 }
 #include "transform_feedback.inc"
 static int compute_pipeline(shader_t *cs);
-static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx *indexed, uint32_t draw_index);
+static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx *indexed,
+                          uint32_t draw_index, uint32_t primitive_base);
 
 static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_index) {
     g_nwb = 0;
@@ -3433,7 +3434,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     }
     if (G.phase) { vs=G.vertex; if (G.phase==1) fs=NULL; }
     if (vk_skip() & SK_DRAW) SKIP(4);
-    if (!G.phase && S.bst[2]) { geometry_draw(vs,dw,di,draw_index); return; }
+    if (!G.phase && S.bst[2]) { geometry_draw(vs,dw,di,draw_index,0); return; }
     if (S.bst[3] || S.bst[4]) { RED_ONCE(32,"tessellation replay remains unavailable"); SKIP(4); }
     if (!vs || !vs->mod || (fs && !fs->mod)) SKIP(1);
     uint32_t layers=vs->layer_output && G.phase!=1 ? P.max_layers : 1;

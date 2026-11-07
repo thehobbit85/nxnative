@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'dm/tools/tests'))
 from test_android_geometry_export import passthrough_shader
 from dm.android.tools import spv_android as vk
+from dm.android.tests.geometry_fixture import explicit_program
 
 
 def main():
@@ -28,7 +29,13 @@ def main():
         jobs = work / 'jobs.json'
         feedback = [dict(stride=16, outputs=[[0, 1], [1, 3]]), [],
                     dict(stride=8, outputs=[[0, 1], [0, 1]]), []]
-        jobs.write_text(json.dumps([dict(key=key, stage='gs', code=str(shader), tex={}, img={}, attr={}, fout={}, tf=feedback)]))
+        explicit = work / 'explicit.bin'
+        explicit.write_bytes(explicit_program(3))
+        explicit_key = '00000000feed9d02'
+        jobs.write_text(json.dumps([
+            dict(key=key, stage='gs', code=str(shader), tex={}, img={}, attr={}, fout={}, tf=feedback),
+            dict(key=explicit_key, stage='gs', code=str(explicit), tex={}, img={}, attr={}, fout={},
+                 tf=[dict(stride=16, outputs=[[0, 4]]), [], [], []])]))
         previous = os.environ.get('DMSH_SPV_CAPTURE')
         os.environ['DMSH_SPV_CAPTURE'] = str(captured)
         try:
@@ -38,7 +45,7 @@ def main():
                 os.environ.pop('DMSH_SPV_CAPTURE', None)
             else:
                 os.environ['DMSH_SPV_CAPTURE'] = previous
-        for name in vk.spv_geometry.product_family(key):
+        for name in vk.spv_geometry.product_family(key) + vk.spv_geometry.product_family(explicit_key):
             control = json.loads((captured / (name + '.control.json')).read_text())
             reflection = vk.spv_geometry.helper_reflection(dict(stage='gs', bindings=[], threadgroup_size=[32, 1, 1]), control)
             vk.write_stage(name, (captured / (name + '.spv')).read_bytes(), reflection, output, validator, optimizer)
