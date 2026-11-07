@@ -875,3 +875,5 @@ pipeline-cache-test: $(B)/t_pipeline_cache
 	$(B)/t_pipeline_cache
 
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: pipeline_cache.inc ../dmsh_chain.h
+
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: diagnostic_present.inc present_source.inc

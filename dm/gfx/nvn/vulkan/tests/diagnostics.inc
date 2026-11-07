@@ -50,6 +50,34 @@ static void graphics_diagnostics(void) {
         }
         stbi_image_free(image);
     }
+    // Match the present pass: square VI layer fitted inside a wide output,
+    // crop-edge clamping, bilinear interpolation and either raster origin.
+    assert(!setenv("DM_NVN_SHOT_OUT","8x4",1));mtl_present_layer(1,1);
+    for (int flipped=0;flipped<2;flipped++) {
+        unlink(png);mtl_set_origin_lower_left(flipped);dm_gfx_shot_at(1,png);mtl_present(&texture,0,crop);
+        int sw,sh,components;uint8_t *image=stbi_load(png,&sw,&sh,&components,4);assert(image && sw==8 && sh==4);
+        for (unsigned y=0;y<4;y++) for (unsigned x=0;x<8;x++) {
+            uint8_t *pixel=image+4*(y*8+x);int red=0,green=0;
+            if (x>=2 && x<6) {
+                float u=fminf(1,fmaxf(0,((x-2)+.5f)*.5f-.5f));
+                float v=fminf(1,fmaxf(0,(y+.5f)*.5f-.5f));if (flipped) v=1-v;
+                red=lroundf(40*(1+u));green=lroundf(60*(1+v));
+            }
+            assert(abs(pixel[0]-red)<=1 && abs(pixel[1]-green)<=1 && !pixel[2] && pixel[3]==255);
+        }
+        stbi_image_free(image);
+    }
+    unsetenv("DM_NVN_SHOT_OUT");mtl_present_layer(0,0);mtl_set_origin_lower_left(0);
+    tex_t hdr={.serial=0x17d02,.d={.width=2,.height=2,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA16F}};
+    nvn_tex_layout(&hdr.d,&hdr.L);list=(list_t){0};
+    RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&hdr});RECORD(OP_SCISSOR,p_scissor,.w=2,.h=2);
+    RECORD(OP_CLEAR_COLOR,p_clear_color,.index=0,.mask=15,.rgba={.25f,.5f,1,.75f});
+    put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    unlink(png);dm_gfx_shot_at(1,png);mtl_present(&hdr,0,NULL);
+    int hw,hh,hc;uint8_t *hi=stbi_load(png,&hw,&hh,&hc,4);assert(hi && hw==2 && hh==2);
+    for (unsigned i=0;i<4;i++) assert(hi[4*i]==64 && hi[4*i+1]==128 && hi[4*i+2]==255 && hi[4*i+3]==255);
+    stbi_image_free(hi);mtl_tex_release(&hdr);
     tex_t target={.serial=0x17d01,.d={.width=8,.height=8,.depth=2,.levels=2,
         .target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA16F}};
     nvn_tex_layout(&target.d,&target.L);
@@ -77,5 +105,5 @@ static void graphics_diagnostics(void) {
     mtl_reg_tex(1650,NULL,NULL);mtl_tex_release(&texture);mtl_pool_del(pixels);mtl_queue_forget(1650);
     mtl_set_origin_lower_left(0);unlink(png);
     assert(!chdir(previous) && !rmdir(directory));free(previous);
-    puts("Graphics controls preserve delayed PNG crops/origin, raw slices, canceled/released mip-layer targets and failed outputs");
+    puts("Graphics controls preserve delayed/scaled PNG crops, both origins, float conversion, raw slices, retained mip-layer targets and failed outputs");
 }

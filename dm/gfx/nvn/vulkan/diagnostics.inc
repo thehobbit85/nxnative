@@ -105,13 +105,29 @@ static void diagnostic_write_png(const char *path,const uint8_t *rgba,uint32_t w
     free(png);
 }
 
+#include "diagnostic_present.inc"
+
 static void diagnostic_png(const tex_t *texture,const int crop[4],const char *path) {
-    diagnostic_image image={0};
-    if (!texture || !diagnostic_read(texture->serial,0,&image)) return;
-    int bgr=image.format==VK_FORMAT_B8G8R8A8_UNORM || image.format==VK_FORMAT_B8G8R8A8_SRGB;
-    if (!bgr && image.format!=VK_FORMAT_R8G8B8A8_UNORM && image.format!=VK_FORMAT_R8G8B8A8_SRGB) {
-        LOG("[RED] vk: screenshot format %d needs a color conversion",image.format);free(image.data);return;
+    if (!texture || !g_dev) return;
+    const char *setting=getenv("DM_NVN_SHOT_OUT");int ow=0,oh=0;char sep=0,extra=0;
+    int scaled=setting && sscanf(setting,"%d%c%d%c",&ow,&sep,&oh,&extra)==3 && sep=='x' && ow>0 && oh>0;
+    diagnostic_image image={0};int converted=0,ok=0;
+    mtl_finish();pthread_mutex_lock(&g_rmu);
+    vtex *source=tex_find(texture->serial);
+    if (source) {
+        int rgba=source->f.f==VK_FORMAT_R8G8B8A8_UNORM || source->f.f==VK_FORMAT_R8G8B8A8_SRGB ||
+            source->f.f==VK_FORMAT_B8G8R8A8_UNORM || source->f.f==VK_FORMAT_B8G8R8A8_SRGB;
+        converted=scaled || !rgba;
+        if (converted) {
+            uint32_t w=scaled ? (uint32_t)ow : crop && crop[2]>0 ? (uint32_t)crop[2] : source->w;
+            uint32_t h=scaled ? (uint32_t)oh : crop && crop[3]>0 ? (uint32_t)crop[3] : source->h;
+            ok=diagnostic_render_locked(source,crop,w,h,scaled,&image);
+        } else ok=diagnostic_read_locked(source,0,0,1,source->f.f,&image);
     }
+    pthread_mutex_unlock(&g_rmu);
+    if (!ok) return;
+    if (converted) crop=NULL; // The present shader already applied crop and origin.
+    int bgr=image.format==VK_FORMAT_B8G8R8A8_UNORM || image.format==VK_FORMAT_B8G8R8A8_SRGB;
     uint32_t x0=0,y0=0,width=image.width,height=image.height;
     if (crop && (crop[2] || crop[3])) {
         if (crop[0]<0 || crop[1]<0 || crop[2]<=0 || crop[3]<=0 ||
@@ -124,7 +140,7 @@ static void diagnostic_png(const tex_t *texture,const int crop[4],const char *pa
     uint8_t *rgba=malloc((size_t)width*height*4);
     if (!rgba) { free(image.data);return; }
     for (uint32_t y=0;y<height;y++) for (uint32_t x=0;x<width;x++) {
-        uint32_t source_y=y0+(g_origin_ll ? height-1-y : y);
+        uint32_t source_y=y0+(!converted && g_origin_ll ? height-1-y : y);
         const uint8_t *source=image.data+source_y*image.row+(x0+x)*4;
         uint8_t *pixel=rgba+((size_t)y*width+x)*4;
         pixel[0]=source[bgr ? 2 : 0];pixel[1]=source[1];pixel[2]=source[bgr ? 0 : 2];pixel[3]=255;

@@ -4877,9 +4877,9 @@ static void rt_dump(uint64_t n) {
 static double g_fps_shown;
 static pthread_mutex_t g_present_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_presents, g_present_done, g_dropped_ticket[64];
-#include "diagnostics.inc"
-
 static _Atomic uint64_t g_layer_shape, g_screen_shape;
+#include "present_source.inc"
+#include "diagnostics.inc"
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, vk_present_shape(w, h)); }
 void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, vk_present_shape(w, h)); }
 
