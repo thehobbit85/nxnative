@@ -68,7 +68,7 @@ static void wrapped_buffer(void) {
     mtl_reg_tex(SLOT+2,&short_view,NULL);
     uint64_t handles[5]={0,0,SLOT,SLOT+2,0};
     mtl_pool_add(handles,sizeof handles);
-    for (unsigned form=0;form<2;form++) {
+    for (unsigned form=0;form<3;form++) {
         for (unsigned i=0;i<COUNT+2;i++) memory[i]=i+17;
         memset(result,0,sizeof result);list_t list={0};
         RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&wrapped_array_program[form],.stages=0x20);
@@ -87,5 +87,5 @@ static void wrapped_buffer(void) {
     mtl_reg_tex(SLOT+1,NULL,NULL);mtl_tex_release(&ordinary);
     mtl_pool_del(memory);mtl_pool_del(result);free(memory);
     wrapped_buffer_table();
-    puts("Wrapped buffer fetches preserve rows, aliases, uniform-handle arrays and compact nonuniform tables");
+    puts("Wrapped buffer fetches preserve rows, aliases, uniform-handle arrays, nested descriptor helpers and compact nonuniform tables");
 }

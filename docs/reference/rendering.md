@@ -1772,3 +1772,11 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check** — the focused public-NVN fixture passes dynamic and legacy replay for two virtual textures sharing physical pages, unmapped holes, untouched backing canaries, earlier draws, buffer uploads and encoder clears. The existing sparse sampling/remap fixture also passes.
 - **Open** — arbitrary sparse native render-target and storage-image GPU aliasing still requires its own ownership path and qualification.
 - **Found on** — `dm/gfx/tests/recorded_sparse_write.h`.
+
+### Android wrapped-buffer descriptors in helper functions
+
+- **Symptom** — a wrapped texture-buffer fetch failed lowering when its descriptor passed through shader helper parameters.
+- **Cause** — the runtime tracked descriptors through loads and copies but rejected function calls.
+- **Fix** — descriptor identity propagates to a fixed point through parameters, returns and homogeneous joins. Affected function signatures use the transformed buffer-image types, with matching call operands. A helper reached with incompatible ordinary-image and buffer-image interfaces is diagnosed pending function specialization.
+- **Check** — the focused wrapped-buffer fixture passes dynamic and legacy replay with two nested helper calls, descriptor arrays, row crossings, size queries, missing descriptors and existing storage aliases. The transformed helper module passes `spirv-val`, and the Android host compiles.
+- **Found on** — `dm/gfx/nvn/vulkan/tests/wrapped_buffer_array.comp` with `HELPERS`.

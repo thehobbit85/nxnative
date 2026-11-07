@@ -833,3 +833,9 @@ $(B)/t_replay: tests/mesh_replay.inc
 .PHONY: mesh-replay-fixture
 mesh-replay-fixture: fixture
 	GLSLC="$(GLSLC)" python3 tests/mesh_fixture.py "$(B)/shaders"
+
+fixture: $(B)/shaders/00000000feed9e05.spv
+$(B)/shaders/00000000feed9e05.spv: tests/wrapped_buffer_array.comp Makefile
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DHELPERS $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 3 tex_ubo 7 16 samp_tex 0 view=1 num=2\nb 1 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
