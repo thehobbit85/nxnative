@@ -2765,8 +2765,8 @@ static int shader_reductions(const shader_t *s, sample_reduction **edits, size_t
             pthread_mutex_unlock(&g_rmu);
             if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) continue;
             float anisotropy = fminf(g_max_anisotropy, fmaxf(1, floorf(p.aniso)));
-            if (p.cmp_mode || anisotropy > 1) {
-                RED_ONCE(121, "shader sampler reduction depth comparison and anisotropy remain unsupported");
+            if (anisotropy > 1) {
+                RED_ONCE(121, "shader sampler reduction anisotropy remains unsupported");
                 return 0;
             }
             float lo = p.minf >= 2 ? fmaxf(0, p.lod_min) : 0;

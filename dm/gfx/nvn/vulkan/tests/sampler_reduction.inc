@@ -244,3 +244,75 @@ static void sampler_reduction_arrays(void) {
     mtl_queue_forget(slot);
     printf("Mixed average/min/max sampler arrays passed %u constant/dynamic binding and filter-identity cases\n",checks);
 }
+
+static int sampler_compare_value(float reference, float depth, int function) {
+    const int answers[]={0,reference<depth,reference==depth,reference<=depth,
+        reference>depth,reference!=depth,reference>=depth,1};
+    return answers[function-1];
+}
+
+static void sampler_reduction_compare(void) {
+    enum { slot=1590 };
+    mtl_queue_activate(slot);
+    tex_t texture={.serial=0x17800,.d={.width=4,.height=4,.depth=1,.levels=2,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_DEPTH32F}};
+    tex_t target={.serial=0x17801,.d={.width=2,.height=2,.depth=1,.levels=1,
+        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA32F}};
+    nvn_tex_layout(&texture.d,&texture.L); nvn_tex_layout(&target.d,&target.L);
+    mtl_reg_tex(slot,&texture,NULL);
+    float texels[20];
+    for (int i=0; i<20; i++) texels[i]=(i<16 ? 1+2*(i%2)+4*(i/4%2) : 9+2*(i-16))/16.0f;
+    list_t upload={0};
+    for (int mip=0; mip<2; mip++) {
+        p_copy_b2t copy={.tex=&texture,.src=(uintptr_t)(texels+(mip ? 16 : 0)),.has_view=1,
+            .view={.set_levels=1,.base_level=mip},.r={.width=4>>mip,.height=4>>mip,.depth=1}};
+        put(&upload,OP_COPY_B2T,&copy,sizeof copy);
+    }
+    put(&upload,OP_END,NULL,0);mtl_sub_begin();mtl_exec(upload.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+    const float references[]={0,.0625f,.25f,.4375f,1,NAN};
+    unsigned checks=0;
+    for (int form=0; form<12; form++) for (int separate=0; separate<2; separate++)
+      for (int function=1; function<=8; function++) for (unsigned ref=0; ref<sizeof references/sizeof *references; ref++)
+      for (int level=0; level<3; level++) for (int mode=0; mode<3; mode++) {
+        int fragment=(form>=4 && form<8) || form>=10, offset=form<8 && (form&2), stage=fragment ? 1 : 5;
+        if ((fragment || (form&1)) && !mode && level==1) continue;
+        float coordinate[]={.25f,.25f,.5f*level,references[ref]}, result[16]={0};
+        float average=0, minimum=1, maximum=0;
+        for (int tap=0; tap<4; tap++) {
+            int compared=sampler_compare_value(references[ref],(1+2*tap)/16.0f,function);
+            average+=.25f*compared; minimum=fminf(minimum,compared); maximum=fmaxf(maximum,compared);
+        }
+        float mip=sampler_compare_value(references[ref],(offset ? 15 : 9)/16.0f,function);
+        float expected=mode==1 ? minimum : mode==2 ? maximum : average;
+        if (level==1) expected=mode==1 ? fminf(minimum,mip) : mode==2 ? fmaxf(maximum,mip) : .5f*(average+mip);
+        if (level==2) expected=mip;
+        samp_par sampler={.minf=NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,.magf=1,.lod_max=10,
+            .ws=NVN_WRAP_MODE_REPEAT,.wt=NVN_WRAP_MODE_REPEAT,.reduction=mode,
+            .cmp_mode=NVN_COMPARE_MODE_COMPARE_R_TO_TEXTURE,.cmp_func=function};
+        mtl_reg_samp(slot,&sampler);
+        prog_t *program=&sampler_compare_program[form][separate];program->nstage=fragment ? 2 : 1;
+        list_t list={0};
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=program,.stages=fragment ? 3 : 0x20);
+        RECORD(OP_BIND_TEX1,p_bind_tex1,.stage=stage|BIND_TEX1_NOBASE,.slot=0,.h=((uint64_t)slot<<20)|slot);
+        RECORD(OP_BIND_SAMP,p_bind_handles,.stage=stage,.first=1,.n=1,.h={(uint64_t)slot<<20});
+        RECORD(OP_BIND_UBO,p_bind_buf,.stage=stage,.index=0,.addr=(uintptr_t)coordinate,.size=sizeof coordinate);
+        if (fragment) {
+            RECORD(OP_SET_RT,p_set_rt,.n=1,.color={&target});
+            RECORD(OP_VIEWPORTS,p_viewports,.n=1,.v={{0,0,2,2}});
+            RECORD(OP_SCISSOR,p_scissor,.w=2,.h=2);
+            RECORD(OP_CLEAR_COLOR,p_clear_color,.mask=15,.rgba={-100,-100,-100,-100});
+            RECORD(OP_DRAW,p_draw,.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1);
+            RECORD(OP_COPY_T2B,p_copy_b2t,.tex=&target,.src=(uintptr_t)result,.r={.width=2,.height=2,.depth=1});
+        } else {
+            RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=0,.addr=(uintptr_t)result,.size=sizeof result);
+            RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
+        }
+        put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+        if (result[0]!=expected || result[1]!=0 || result[2]!=0 || result[3]!=1)
+            die("depth sampler form%d separate%d function%d ref%u level%d mode%d: %g expected %g",
+                form,separate,function,ref,level,mode,result[0],expected);
+        checks++;
+      }
+    mtl_reg_tex(slot,NULL,NULL);mtl_tex_release(&texture);mtl_tex_release(&target);mtl_queue_forget(slot);
+    printf("Depth-comparison sampler reductions passed %u comparison, mip and gradient cases\n",checks);
+}

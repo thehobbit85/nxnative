@@ -324,6 +324,39 @@ $(B)/shaders/00000000feed99c2.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragm
 $(B)/shaders/00000000feed99c3.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DQUERY -DCONSTANT_INDEX
 $(B)/shaders/00000000feed99c4.spv: ARRAY_FLAGS = -DFRAGMENT -fshader-stage=fragment -DQUERY -DCONSTANT_INDEX -DSEPARATE
 REDUCTION_ARRAY_SHADERS += $(B)/shaders/00000000feed99b9.spv $(B)/shaders/00000000feed99ba.spv $(B)/shaders/00000000feed99bb.spv $(B)/shaders/00000000feed99bc.spv $(B)/shaders/00000000feed99c1.spv $(B)/shaders/00000000feed99c2.spv $(B)/shaders/00000000feed99c3.spv $(B)/shaders/00000000feed99c4.spv
+$(B)/shaders/00000000feed9ab1.spv: COMPARISON_FLAGS =
+$(B)/shaders/00000000feed9ab2.spv: COMPARISON_FLAGS = -DSEPARATE
+$(B)/shaders/00000000feed9ab3.spv: COMPARISON_FLAGS = -DGRADIENTS
+$(B)/shaders/00000000feed9ab4.spv: COMPARISON_FLAGS = -DSEPARATE -DGRADIENTS
+$(B)/shaders/00000000feed9ab5.spv: COMPARISON_FLAGS = -DOFFSET
+$(B)/shaders/00000000feed9ab6.spv: COMPARISON_FLAGS = -DSEPARATE -DOFFSET
+$(B)/shaders/00000000feed9ab7.spv: COMPARISON_FLAGS = -DGRADIENTS -DOFFSET
+$(B)/shaders/00000000feed9ab8.spv: COMPARISON_FLAGS = -DSEPARATE -DGRADIENTS -DOFFSET
+$(B)/shaders/00000000feed9ab9.spv: COMPARISON_FLAGS = -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed9aba.spv: COMPARISON_FLAGS = -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed9abb.spv: COMPARISON_FLAGS = -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed9abc.spv: COMPARISON_FLAGS = -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed9abd.spv: COMPARISON_FLAGS = -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/00000000feed9abe.spv: COMPARISON_FLAGS = -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DOFFSET
+$(B)/shaders/00000000feed9abf.spv: COMPARISON_FLAGS = -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+$(B)/shaders/00000000feed9ac0.spv: COMPARISON_FLAGS = -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS -DOFFSET
+REDUCTION_COMPARISON_SHADERS = $(B)/shaders/00000000feed9ab1.spv $(B)/shaders/00000000feed9ab2.spv $(B)/shaders/00000000feed9ab3.spv $(B)/shaders/00000000feed9ab4.spv $(B)/shaders/00000000feed9ab5.spv $(B)/shaders/00000000feed9ab6.spv $(B)/shaders/00000000feed9ab7.spv $(B)/shaders/00000000feed9ab8.spv $(B)/shaders/00000000feed9ab9.spv $(B)/shaders/00000000feed9aba.spv $(B)/shaders/00000000feed9abb.spv $(B)/shaders/00000000feed9abc.spv $(B)/shaders/00000000feed9abd.spv $(B)/shaders/00000000feed9abe.spv $(B)/shaders/00000000feed9abf.spv $(B)/shaders/00000000feed9ac0.spv
+$(B)/shaders/00000000feed9ac1.spv: COMPARISON_FLAGS = -DPROJECTED
+$(B)/shaders/00000000feed9ac2.spv: COMPARISON_FLAGS = -DPROJECTED -DSEPARATE
+$(B)/shaders/00000000feed9ac3.spv: COMPARISON_FLAGS = -DPROJECTED -DGRADIENTS
+$(B)/shaders/00000000feed9ac4.spv: COMPARISON_FLAGS = -DPROJECTED -DSEPARATE -DGRADIENTS
+$(B)/shaders/00000000feed9ac5.spv: COMPARISON_FLAGS = -DPROJECTED -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed9ac6.spv: COMPARISON_FLAGS = -DPROJECTED -DSEPARATE -DFRAGMENT -fshader-stage=fragment
+$(B)/shaders/00000000feed9ac7.spv: COMPARISON_FLAGS = -DPROJECTED -DFRAGMENT -fshader-stage=fragment -DBIAS
+$(B)/shaders/00000000feed9ac8.spv: COMPARISON_FLAGS = -DPROJECTED -DSEPARATE -DFRAGMENT -fshader-stage=fragment -DBIAS
+REDUCTION_COMPARISON_SHADERS += $(B)/shaders/00000000feed9ac1.spv $(B)/shaders/00000000feed9ac2.spv $(B)/shaders/00000000feed9ac3.spv $(B)/shaders/00000000feed9ac4.spv $(B)/shaders/00000000feed9ac5.spv $(B)/shaders/00000000feed9ac6.spv $(B)/shaders/00000000feed9ac7.spv $(B)/shaders/00000000feed9ac8.spv
+fixture: $(REDUCTION_COMPARISON_SHADERS)
+$(REDUCTION_COMPARISON_SHADERS): tests/sampler_reduction_compare.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $(COMPARISON_FLAGS) $< -o $@
+	$(if $(findstring -DFRAGMENT,$(COMPARISON_FLAGS)),printf 'stage ps\n',printf 'stage cs\ntg 1 1 1\nb 2 ssbo 1 sbuf 0 -1 - -1\n') > $(@:.spv=.vk.txt)
+	printf 'b 1 ubo 1 cbuf 0 -1 - -1\n' >> $(@:.spv=.vk.txt)
+	$(if $(findstring -DSEPARATE,$(COMPARISON_FLAGS)),printf 'b 0 tex 1 tex 0 -1 - -1\nb 3 samp 1 samp 1 -1 - -1\n',printf 'b 0 cis 1 tex 0 -1 samp_tex 0\n') >> $(@:.spv=.vk.txt)
 fixture: $(REDUCTION_ARRAY_SHADERS)
 $(B)/shaders/00000000feed99b1.spv: ARRAY_FLAGS =
 $(B)/shaders/00000000feed99b2.spv: ARRAY_FLAGS = -DSEPARATE
@@ -695,8 +728,8 @@ $(B)/t_sample_reduction: tests/t_sample_reduction.c spv_sample_reduction.h spv_o
 	mkdir -p $(B)
 	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror -Wno-unused-function $(BUILD_CFLAGS) $< -o $@
 .PHONY: sampler-reduction-check
-sampler-reduction-check: $(B)/t_sample_reduction $(REDUCTION_SHADERS) $(REDUCTION_ARRAY_SHADERS)
-	@set -e; for input in $(REDUCTION_SHADERS) $(REDUCTION_ARRAY_SHADERS); do \
+sampler-reduction-check: $(B)/t_sample_reduction $(REDUCTION_SHADERS) $(REDUCTION_ARRAY_SHADERS) $(REDUCTION_COMPARISON_SHADERS)
+	@set -e; for input in $(REDUCTION_SHADERS) $(REDUCTION_ARRAY_SHADERS) $(REDUCTION_COMPARISON_SHADERS); do \
 	  key=$${input##*/}; value=$${key%.spv}; binding=$$(( (0x$$value - 0x75) % 2 * 3 )); \
 	  case $$key in *feed99*) option=array ;; *) option= ;; esac; \
 	  $(B)/t_sample_reduction "$$input" "$(B)/reduction-$$key" "$$binding" $$option; \
