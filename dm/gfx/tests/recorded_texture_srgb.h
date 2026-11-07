@@ -1,6 +1,6 @@
 // The same bytes can be a linear render target and an sRGB sampling object.
 // Both directions must retain storage while each descriptor supplies its view.
-static void check_texture_srgb_aliases_first(NVNdevice *device,NVNqueue *queue,int first) {
+static void check_texture_srgb_aliases_first(NVNdevice *device,NVNqueue *queue,int first,const NVNformat formats[2]) {
     enum { W=8,H=8,BYTES=W*H*4 };
     static _Alignas(16384) uint8_t storage[0x10000],commands[0x20000];
     NVNmemoryPoolBuilder pb;NVNmemoryPool pool,command_pool;
@@ -15,7 +15,7 @@ static void check_texture_srgb_aliases_first(NVNdevice *device,NVNqueue *queue,i
     API(nvnTextureBuilderSetTarget)(&tb,NVN_TEXTURE_TARGET_2D);API(nvnTextureBuilderSetSize2D)(&tb,W,H);
     API(nvnTextureBuilderSetStorage)(&tb,&pool,0);
     for (int i=0;i<2;i++) {
-        API(nvnTextureBuilderSetFormat)(&tb,i ? NVN_FORMAT_RGBA8_SRGB : NVN_FORMAT_RGBA8);
+        API(nvnTextureBuilderSetFormat)(&tb,formats[i]);
         assert(API(nvnTextureInitialize)(&textures[i],&tb));
     }
     API(nvnTextureBuilderSetStorage)(&tb,&pool,0x4000);API(nvnTextureBuilderSetFormat)(&tb,NVN_FORMAT_RGBA8);
@@ -30,9 +30,14 @@ static void check_texture_srgb_aliases_first(NVNdevice *device,NVNqueue *queue,i
     NVNcommandBuffer cb;assert(API(nvnCommandBufferInitialize)(&cb,device));
     API(nvnCommandBufferAddCommandMemory)(&cb,&command_pool,0,0x3000);
     NVNcopyRegion full={0,0,0,W,H,1};NVNdrawTextureRegion rectangle={0,0,W,H};
-    const float values[]={.25f,.5f,.75f,1};
+    int noalpha[2];
+    for (int i=0;i<2;i++) noalpha[i]=formats[i]==NVN_FORMAT_RGBX8 || formats[i]==NVN_FORMAT_RGBX8_SRGB ||
+        formats[i]==NVN_FORMAT_BGRX8 || formats[i]==NVN_FORMAT_BGRX8_SRGB;
     for (int phase=0;phase<4;phase++) {
         int writer=(phase+first)%2; // repeat to exercise cached views after the opposite alias writes
+        // X storage's unused alpha is unspecified; use one on writes, while
+        // an X reader must return one even when an A writer stored another value.
+        float values[]={.25f,.5f,.75f,noalpha[writer] ? 1 : .375f};
         API(nvnCommandBufferBeginRecording)(&cb);
         API(nvnCommandBufferSetTexturePool)(&cb,&tp);API(nvnCommandBufferSetSamplerPool)(&cb,&sp);
         const NVNtexture *target[]={&textures[writer]};
@@ -47,7 +52,7 @@ static void check_texture_srgb_aliases_first(NVNdevice *device,NVNqueue *queue,i
         API(nvnQueueSubmitCommands)(queue,1,&list);API(nvnQueueFinish)(queue);
         uint8_t expected[4];
         for (int ch=0;ch<4;ch++) {
-            float x=values[ch];
+            float x=ch==3 && noalpha[1-writer] ? 1 : values[ch];
             if (ch<3) {
                 if (writer) x=x<=.0031308f ? x*12.92f : 1.055f*powf(x,1/2.4f)-.055f;
                 else { x=roundf(x*255)/255;x=x<=.04045f ? x/12.92f : powf((x+.055f)/1.055f,2.4f); }
@@ -56,7 +61,7 @@ static void check_texture_srgb_aliases_first(NVNdevice *device,NVNqueue *queue,i
         }
         for (int pixel=0;pixel<W*H;pixel++) for (int ch=0;ch<4;ch++) {
             int got=commands[0x4000+4*pixel+ch];
-            if (abs(got-expected[ch])>1) die("sRGB alias phase%d pixel%d channel%d: %d expected %u",phase,pixel,ch,got,expected[ch]);
+            if (abs(got-expected[ch])>1) die("sRGB alias formats%#x/%#x first%d phase%d pixel%d channel%d: %d expected %u",formats[0],formats[1],first,phase,pixel,ch,got,expected[ch]);
         }
     }
     API(nvnCommandBufferFinalize)(&cb);API(nvnTexturePoolFinalize)(&tp);API(nvnSamplerPoolFinalize)(&sp);
@@ -66,6 +71,16 @@ static void check_texture_srgb_aliases_first(NVNdevice *device,NVNqueue *queue,i
 }
 
 static void check_texture_srgb_aliases(NVNdevice *device,NVNqueue *queue) {
-    check_texture_srgb_aliases_first(device,queue,0);
-    check_texture_srgb_aliases_first(device,queue,1);
+    static const NVNformat pairs[][2]={
+        {NVN_FORMAT_RGBA8,NVN_FORMAT_RGBA8_SRGB},
+        {NVN_FORMAT_RGBA8,NVN_FORMAT_RGBX8_SRGB},
+        {NVN_FORMAT_RGBX8,NVN_FORMAT_RGBA8_SRGB},
+        {NVN_FORMAT_RGBX8,NVN_FORMAT_RGBX8_SRGB},
+        {NVN_FORMAT_BGRA8,NVN_FORMAT_BGRA8_SRGB},
+        {NVN_FORMAT_BGRA8,NVN_FORMAT_BGRX8_SRGB},
+        {NVN_FORMAT_BGRX8,NVN_FORMAT_BGRA8_SRGB},
+        {NVN_FORMAT_BGRX8,NVN_FORMAT_BGRX8_SRGB},
+    };
+    for (unsigned i=0;i<sizeof pairs/sizeof *pairs;i++) for (int first=0;first<2;first++)
+        check_texture_srgb_aliases_first(device,queue,first,pairs[i]);
 }

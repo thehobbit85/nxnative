@@ -7,10 +7,17 @@ static nvn_hmap g_texture_aliases={.klen=sizeof(texture_alias_key)};
 static nvn_hmap g_texture_serials={.klen=sizeof(uint64_t)};
 static nvn_hmap g_texture_keys={.klen=sizeof(uint64_t)};
 static void tex_free(vtex *v);
-// Keep a storage-capable linear allocation for this mutable-format pair.
-// Individual texture objects still select their own linear/sRGB image view.
+// Keep a storage-capable linear allocation for each mutable-format family.
+// X and A formats have identical storage; each descriptor retains its own
+// sampled alpha mapping and linear/sRGB conversion in its image view.
 static NVNformat texture_backing_format(NVNformat format) {
-    return format==NVN_FORMAT_RGBA8_SRGB ? NVN_FORMAT_RGBA8 : format;
+    switch (format) {
+        case NVN_FORMAT_RGBX8: case NVN_FORMAT_RGBX8_SRGB: case NVN_FORMAT_RGBA8_SRGB:
+            return NVN_FORMAT_RGBA8;
+        case NVN_FORMAT_BGRX8: case NVN_FORMAT_BGRX8_SRGB: case NVN_FORMAT_BGRA8_SRGB:
+            return NVN_FORMAT_BGRA8;
+        default: return format;
+    }
 }
 static int texture_key(const tex_t *t,texture_alias_key *key) {
     if (!t->pool || !t->mem || t->has_layout || (t->pool->flags&NVN_MEMORY_POOL_FLAGS_VIRTUAL) ||
