@@ -4,12 +4,21 @@ layout(binding=0) uniform usampler2D source;
 layout(binding=1,std430) buffer Result { uvec4 values[]; } result;
 layout(binding=2,std430) coherent buffer Raw { uint words[]; } raw;
 layout(binding=3) uniform usampler2D ordinary;
+#ifdef HELPERS
+uint read_component(usampler2D value,ivec2 coordinate) {
+    if (coordinate.x<0) return 0u;
+    return texelFetch(value,coordinate,0).x;
+}
+#define FETCH(texture,coordinate) read_component(texture,coordinate)
+#else
+#define FETCH(texture,coordinate) texelFetch(texture,coordinate,0).x
+#endif
 void main() {
     const uint positions[4]=uint[](0,16383,16384,16388);
     uint lane=gl_GlobalInvocationID.x, index=positions[lane];
     ivec2 coordinate=ivec2(index%16384,index/16384);
-    uint before=texelFetch(source,coordinate,0).x;
+    uint before=FETCH(source,coordinate);
     raw.words[index]=before+100+lane;
     result.values[lane]=uvec4(before,textureSize(source,0),
-        textureQueryLevels(source)+texelFetch(ordinary,ivec2(0),0).x);
+        textureQueryLevels(source)+FETCH(ordinary,ivec2(0)));
 }

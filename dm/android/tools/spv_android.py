@@ -390,6 +390,7 @@ def validate_topology(key, data, reflection):
 
 def write_stage(key, raw, refl, destination, validator, optimizer):
     binary = destination / (key + '.spv')
+    raw = spv_resources.specialize_image_helpers(raw, optimizer)
     # Compact pool bindings before wrappers allocate their helper bindings;
     # otherwise their control metadata would retain the old sparse numbers.
     raw, refl = spv_pool.lower(raw, refl)

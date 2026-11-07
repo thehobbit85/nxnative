@@ -42,11 +42,11 @@ static void wrapped_buffer(void) {
     nvn_tex_layout(&ordinary.d,&ordinary.L);mtl_reg_tex(SLOT+1,&ordinary,NULL);
     uint32_t pixel=42;
     const unsigned positions[]={0,16383,16384,16388};
-    for (unsigned run=0;run<2;run++) {
+    for (unsigned run=0;run<4;run++) {
         for (unsigned i=0;i<COUNT+2;i++) memory[i]=i+17;
         memset(result,0,sizeof result);list_t list={0};
         RECORD(OP_COPY_B2T,p_copy_b2t,.tex=&ordinary,.src=(uintptr_t)&pixel,.r={.width=1,.height=1,.depth=1});
-        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=&wrapped_buffer_program,.stages=0x20);
+        RECORD(OP_BIND_PROGRAM,p_bind_program,.prog=run>=2 ? &wrapped_mixed_program : &wrapped_buffer_program,.stages=0x20);
         RECORD(OP_BIND_TEX,p_bind_handles,.stage=5,.first=0,.n=2,.h={SLOT,SLOT+1});
         RECORD(OP_BIND_SSBO,p_bind_buf,.stage=5,.index=1,.addr=(uintptr_t)(memory+1),.size=COUNT*4);
         for (unsigned dispatch=0;dispatch<2;dispatch++) {

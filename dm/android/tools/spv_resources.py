@@ -1,11 +1,35 @@
 """Resource contracts whose guest source is not described by a scalar slot."""
 import re
 import struct
+import subprocess
 
 from dm.android.tools.spv_capture import Module, instruction
 from dm.android.tools.spv_module import opcode, string_operand, pointer_operands
 
 MAX_BINDINGS = 128
+
+
+def specialize_image_helpers(data, optimizer):
+    """Expose each descriptor argument before runtime image-type selection.
+
+    A shared helper can be called with both an ordinary image and an NVN buffer
+    presented through a 2D interface. The optimizer's structured inliner gives
+    each call its own resource operations while retaining descriptor numbers.
+    """
+    m = Module(data)
+    def descriptor(ty):
+        while ty in m.types:
+            instruction = m.types[ty]
+            op = opcode(instruction)
+            if op in (25, 26, 27): return True
+            if op not in (28, 29, 32): return False
+            ty = instruction[3 if op == 32 else 2]
+        return False
+    if not any(opcode(item) in (54, 55) and descriptor(item[1]) for item in m.code):
+        return data
+    return subprocess.run([optimizer, '--merge-return', '--inline-entry-points-exhaustive',
+                           '--eliminate-dead-functions', '-', '-o', '-'],
+                          input=data, stdout=subprocess.PIPE, check=True).stdout
 
 
 def nonuniform_slots(data, reflection):
