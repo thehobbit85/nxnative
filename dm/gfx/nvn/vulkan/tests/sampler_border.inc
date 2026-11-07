@@ -1,25 +1,31 @@
 // Use the same coordinates, texel pattern and analytic border filter as the
 // Metal t_border fixture. Native custom-border support can be disabled here.
-static void sampler_border(void) {
+static void sampler_border_view(int mapping,int channels) {
     enum { slot=1691 };
     const float coordinates[][2]={{-.1f,.5f},{.5f,1.05f},{1.2f,1.2f},{.06f,.94f},{.5f,.5f},
         {0,0},{1,.3f},{.97f,-.02f},{.3f,.6f}};
     const float borders[][4]={{.5f,.5f,.5f,.5f},{.25f,.5f,.75f,1},{.8f,.9f,.7f,.6f},
         {-.25f,1.25f,.1f,.3f},{0,0,0,1}};
+    const NVNformat formats[]={NVN_FORMAT_R32F,NVN_FORMAT_RG32F,NVN_FORMAT_RGBX32F,NVN_FORMAT_RGBA32F};
     tex_t source={.serial=0x19000,.d={.width=4,.height=4,.depth=1,.levels=1,
-        .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA32F}};
+        .target=NVN_TEXTURE_TARGET_2D,.format=formats[channels-1]}};
     tex_t target={.serial=0x19001,.d={.width=1,.height=1,.depth=1,.levels=1,
         .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA32F}};
     nvn_tex_layout(&source.d,&source.L);nvn_tex_layout(&target.d,&target.L);
-    mtl_queue_activate(slot);mtl_reg_tex(slot,&source,NULL);
+    mtl_queue_activate(slot);
+    const uint8_t maps[][4]={{2,3,4,5},{5,4,3,2},{2,2,2,2},{1,3,0,5}};
+    view_t view={.set_swizzle=mapping!=0};memcpy(view.swz,maps[mapping],4);
+    mtl_reg_tex(slot,&source,mapping ? &view : NULL);
     float pixels[4][4][4];
     for (int y=0;y<4;y++) for (int x=0;x<4;x++)
         memcpy(pixels[y][x],(float[]){x/4.0f,y/4.0f,(x+y)/8.0f,1-x/8.0f},16);
-    list_t upload={0};p_copy_b2t copy={.tex=&source,.src=(uintptr_t)pixels,.r={.width=4,.height=4,.depth=1}};
+    float packed[64];int stored=channels==3 ? 4 : channels;
+    for (int i=0;i<16;i++) memcpy(packed+i*stored,(float*)pixels+4*i,(size_t)stored*4);
+    list_t upload={0};p_copy_b2t copy={.tex=&source,.src=(uintptr_t)packed,.r={.width=4,.height=4,.depth=1}};
     put(&upload,OP_COPY_B2T,&copy,sizeof copy);put(&upload,OP_END,NULL,0);
     mtl_sub_begin();mtl_exec(upload.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
     unsigned checks=0;
-    for (int form=0;form<5;form++) for (int separate=0;separate<2;separate++) for (unsigned border=0;border<sizeof borders/sizeof borders[0];border++) for (int linear=0;linear<2;linear++) {
+    for (int form=0;form<(channels==4 ? 5 : 1);form++) for (int separate=0;separate<2;separate++) for (unsigned border=0;border<sizeof borders/sizeof borders[0];border++) for (int linear=0;linear<2;linear++) {
         samp_par sampler={.ws=NVN_WRAP_MODE_CLAMP_TO_BORDER,.wt=NVN_WRAP_MODE_CLAMP_TO_BORDER,
             .minf=linear,.magf=linear};memcpy(sampler.border,borders[border],16);mtl_reg_samp(slot,&sampler);
         for (unsigned sample=0;sample<sizeof coordinates/sizeof coordinates[0];sample++) {
@@ -51,11 +57,22 @@ static void sampler_border(void) {
                 RECORD(OP_DISPATCH,p_dispatch,.x=1,.y=1,.z=1);
             }
             put(&list,OP_END,NULL,0);mtl_sub_begin();mtl_exec(list.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
+            if (channels<4) expected[3]=1;
+            if (channels<3) expected[2]=0;
+            if (channels<2) expected[1]=0;
+            float mapped[4];
+            for (int ch=0;ch<4;ch++) mapped[ch]=maps[mapping][ch]<2 ? maps[mapping][ch] : expected[maps[mapping][ch]-2];
+            memcpy(expected,mapped,sizeof expected);
             for (int ch=0;ch<4;ch++) if (!isfinite(result[ch]) || fabsf(result[ch]-expected[ch])>.006f)
                 die("Guest border form%d separate%d border%u linear%d sample%u channel%d: %g expected %g",form,separate,border,linear,sample,ch,result[ch],expected[ch]);
             checks++;
         }
     }
     mtl_reg_tex(slot,NULL,NULL);mtl_tex_release(&source);mtl_tex_release(&target);mtl_queue_forget(slot);
-    printf("Guest custom border colors passed %u nearest, filtered edge/corner and interior cases\n",checks);
+    printf("Guest custom border colors: channels%d mapping%d passed %u cases\n",channels,mapping,checks);
+}
+
+static void sampler_border(void) {
+    for (int mapping=0;mapping<4;mapping++) sampler_border_view(mapping,4);
+    for (int channels=1;channels<4;channels++) sampler_border_view(0,channels);
 }

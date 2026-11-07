@@ -1,6 +1,6 @@
 // Select portable correction only for scalar ordinary float samplers. Keep
 // native custom colors for compatible views while the driver has capacity.
-static int border_image_view(const shader_t *shader,const sbind *binding,border_view *out) {
+static int border_image_view(const shader_t *shader,const sbind *binding,border_view *out,uint8_t map[4]) {
     if (binding->num || binding->multisample || binding->depth_image || binding->mixed_image || binding->count!=1) return 0;
     uint64_t handle=descriptor_handle(shader->guest_stage,binding,0);
     treg_t registration;vtex *image=registered_texture((int)(handle&0xfffff),&registration);
@@ -8,7 +8,9 @@ static int border_image_view(const shader_t *shader,const sbind *binding,border_
     fmt_t format=view_format(image,&registration.v,registration.has_v);
     if (format.depth || clear_color_type(format.f)!=CLEAR_FLOAT) return 0;
     *out=sampler_view(image,&registration);
-    return !(out->flags&BORDER_SWIZZLED);
+    memcpy(map,(uint8_t[]){2,3,4,5},4);
+    sampled_swizzle(map,format,&registration.t,&registration.v,registration.has_v);
+    return 1;
 }
 static int prepare_custom_borders(shader_t **selected) {
     shader_t *base=*selected;if (!base) return 1;
@@ -22,8 +24,9 @@ static int prepare_custom_borders(shader_t **selected) {
         pthread_mutex_lock(&g_rmu);
         samp_par sampler=id>0 && id<g_nsreg && g_sreg_ok[id] ? g_sreg[id] : (samp_par){0};
         pthread_mutex_unlock(&g_rmu);
-        int nearest,other;float factors[4];const uint8_t wrap[]={sampler.ws,sampler.wt,sampler.wr};
-        if (sampler.cmp_mode || !nvn_border(sampler.border,wrap,sampler.reduction,&nearest,&other,factors)) continue;
+        if (sampler.cmp_mode || sampler.reduction==NVN_SAMPLER_REDUCTION_MIN || sampler.reduction==NVN_SAMPLER_REDUCTION_MAX ||
+            !(sampler.ws==4 || sampler.ws==5 || sampler.wt==4 || sampler.wt==5 || sampler.wr==4 || sampler.wr==5)) continue;
+        int nearest,other;float factors[4];uint8_t mapping[4]={0};
         int compatible=1,found=0,native=g_custom_border_count<g_custom_border_limit;
         border_view first={0};
         const sampler_pairs *pairs=base->sampler_images ? &base->sampler_images[i] : NULL;
@@ -31,12 +34,15 @@ static int prepare_custom_borders(shader_t **selected) {
             const sbind *image=&base->b[j];
             if (binding->type==BT_CIS ? j!=i : image->type!=BT_TEX ||
                 (pairs && !(pairs->mask[j/64]&(UINT64_C(1)<<(j%64))))) continue;
-            border_view view;
-            if (!border_image_view(base,image,&view)) { compatible=0;break; }
-            if (found && first.format!=view.format) native=0;
-            first=view;found=1;
+            border_view view;uint8_t map[4];
+            if (!border_image_view(base,image,&view,map)) { compatible=0;break; }
+            // A scalar sampler shared by differently mapped images needs a
+            // per-image correction; do not bake one image's factors into both.
+            if (found && memcmp(mapping,map,4)) { compatible=0;break; }
+            if ((view.flags&BORDER_SWIZZLED) || (found && first.format!=view.format)) native=0;
+            first=view;memcpy(mapping,map,4);found=1;
         }
-        if (!compatible || !found) continue;
+        if (!compatible || !found || !border_correction(sampler,mapping,&nearest,&other,factors)) continue;
         if (native) {
             // Materialize it now so another binding cannot consume the last
             // custom-color slot before this descriptor is written.

@@ -53,11 +53,11 @@ _Static_assert(offsetof(draw_texture_params,border)==64,"DrawTexture border push
 // Reuse Metal's two-stock-color identity when native custom borders are absent
 // or exhausted. Weighted filtering is linear in the border color, so the two
 // filtered values reconstruct it without changing the interior texels.
-static VkSampler draw_texture_average_sampler(samp_par p,border_view sampled,draw_texture_params *params,VkSampler *twin) {
+static VkSampler draw_texture_average_sampler(samp_par p,border_view sampled,const uint8_t map[4],draw_texture_params *params,VkSampler *twin) {
     int native=sampled.format!=VK_FORMAT_UNDEFINED && !(sampled.flags&BORDER_SWIZZLED) &&
         g_custom_border_count<g_custom_border_limit;
-    int nearest,other;float factors[4];const uint8_t wrap[]={p.ws,p.wt,p.wr};
-    if (native || p.cmp_mode || (sampled.flags&BORDER_SWIZZLED) || !nvn_border(p.border,wrap,0,&nearest,&other,factors))
+    int nearest,other;float factors[4];
+    if (native || !border_correction(p,map,&nearest,&other,factors))
         return sampler_for(p,sampled);
     memcpy(p.border,nvn_mtl_border[nearest],sizeof p.border);
     VkSampler sampler=sampler_for(p,sampled);
@@ -71,8 +71,9 @@ static VkSampler draw_texture_average_sampler(samp_par p,border_view sampled,dra
 // once and let the shader combine the actual texels before any averaging.
 static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *tr, draw_texture_params *params,VkSampler *twin) {
     border_view sampled = sampler_view(v,tr);
+    uint8_t map[]={2,3,4,5};sampled_swizzle(map,view_format(v,&tr->v,tr->has_v),&tr->t,&tr->v,tr->has_v);
     if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX)
-        return draw_texture_average_sampler(p,sampled,params,twin);
+        return draw_texture_average_sampler(p,sampled,map,params,twin);
     float anisotropy=fminf(16,fmaxf(1,floorf(p.aniso)));
     if (g_minmax_filter && !p.cmp_mode && anisotropy<=g_max_anisotropy && native_reduction_view(v,tr,0,0)) return sampler_for(p,sampled);
     if (p.cmp_mode) {

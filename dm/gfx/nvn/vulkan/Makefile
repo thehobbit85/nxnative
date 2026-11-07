@@ -927,7 +927,7 @@ $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: pipelin
 
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: diagnostic_present.inc present_source.inc
 
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sample_border.h custom_border.inc
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sample_border.h custom_border.inc border_correction.inc
 
 $(B)/t_sample_border: tests/t_sample_border.c spv_sample_border.h spv_wrapped_buffer.h spv_texel_bias.h
 	mkdir -p $(B)

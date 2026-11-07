@@ -1475,6 +1475,8 @@ static VkSampler samp_get(int sid, border_view view, int reduce_in_shader,int bo
     return sampler_for(p,view);
 }
 
+#include "border_correction.inc"
+
 // ---------- Shaders and pipelines ----------
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
