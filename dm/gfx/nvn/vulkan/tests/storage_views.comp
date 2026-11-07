@@ -1,0 +1,26 @@
+#version 450
+layout(local_size_x=1) in;
+#ifdef FORMATLESS
+layout(binding=0) uniform writeonly uimage2D words;
+layout(binding=1) uniform writeonly iimage2DArray signedWords;
+#else
+layout(binding=0, r32ui) uniform uimage2D words;
+layout(binding=1, r32i) uniform iimage2DArray signedWords;
+#endif
+layout(binding=2, std430) writeonly buffer Result { uvec4 previous; };
+void main() {
+    ivec2 p = ivec2(1, 0);
+    ivec3 q = ivec3(0, 1, 1);
+#ifdef FORMATLESS
+    previous = uvec4(0, 0,
+#else
+    previous = uvec4(imageLoad(words, p).x, imageLoad(signedWords, q).x,
+#endif
+                     imageSize(words).x, imageSize(signedWords).z);
+#ifdef FORMATLESS
+    imageStore(words, p, uvec4(0x35a2u, 0x1890u, 0u, 0u));
+#else
+    imageStore(words, p, uvec4(0x91b3d572u));
+#endif
+    imageStore(signedWords, q, ivec4(-1875142321));
+}

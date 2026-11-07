@@ -1148,7 +1148,15 @@ static void sampled_swizzle(uint8_t swz[4], fmt_t f, const tex_t *t, const view_
     if (has_vw && vw->set_swizzle) memcpy(swz, vw->swz, 4);
     if (f.noalpha) for (int i = 0; i < 4; i++) if (swz[i] == 5) swz[i] = 1;
 }
-static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_vw, int want_type, int purpose) {
+static int compatible_dimension(const vtex *v, int view) {
+    if (view < 0) return 1;
+    int one = v->target == NVN_TEXTURE_TARGET_1D || v->target == NVN_TEXTURE_TARGET_1D_ARRAY;
+    int want_one = view == VK_IMAGE_VIEW_TYPE_1D || view == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+    if (one != want_one || (v->target == NVN_TEXTURE_TARGET_3D) != (view == VK_IMAGE_VIEW_TYPE_3D)) return 0;
+    return (view != VK_IMAGE_VIEW_TYPE_CUBE && view != VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) ||
+           (v->layers >= 6 && v->w == v->h && v->samples == VK_SAMPLE_COUNT_1_BIT);
+}
+static VkImageView tex_view_format(vtex *v, const tex_t *t, const view_t *vw, int has_vw, int want_type, int purpose, fmt_t f) {
     int rt = purpose == VIEW_ATTACHMENT, storage = purpose == VIEW_STORAGE;
     int target = has_vw && vw->set_target ? vw->target : t->d.target;
     uint32_t bl = has_vw && vw->set_levels ? vw->base_level : 0;
@@ -1164,7 +1172,7 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
     if (b0 >= total) return VK_NULL_HANDLE;
     uint32_t nly = has_vw && vw->set_layers ? vw->nlayers : 0;
     if (!nly || nly > total - b0) nly = total - b0;
-    if (purpose == VIEW_SAMPLED) {
+    if (!rt) {
         // Resolve the guest descriptor before fitting it to the shader. A
         // cube range that does not name whole faces may count entire cubes.
         int cube = target == NVN_TEXTURE_TARGET_CUBEMAP || target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
@@ -1172,7 +1180,6 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
         if (target == NVN_TEXTURE_TARGET_CUBEMAP && nly >= 6 && !(nly % 6)) nly = 6;
         if (target == NVN_TEXTURE_TARGET_2D || target == NVN_TEXTURE_TARGET_1D) nly = 1;
     }
-    fmt_t f = view_format(v, vw, has_vw);
     uint8_t swz[4] = {2, 3, 4, 5};
     if (!rt && !storage) sampled_swizzle(swz, f, t, vw, has_vw);
     if (purpose == VIEW_SAMPLED && depth_red_view(v, f)) {
@@ -1234,6 +1241,9 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
     if (r != VK_SUCCESS) { static int n; if (n++ < 8) LOG("[RED] vk: image view (format %d type %d levels %u+%u layers %u+%u) failed (%d)", f.f, vt, bl, nl, b0, nly, (int)r); return VK_NULL_HANDLE; }
     v->views = realloc(v->views, (v->nviews + 1) * sizeof *v->views); v->views[v->nviews++] = (vview){key, view};
     return view;
+}
+static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_vw, int want_type, int purpose) {
+    return tex_view_format(v, t, vw, has_vw, want_type, purpose, view_format(v, vw, has_vw));
 }
 
 // ---------- Registrations (game threads) ----------
@@ -2457,12 +2467,7 @@ static VkImageView tex_slot(uint64_t h, const sbind *b, int stage, border_view *
         RED_ONCE(24, "wrapped buffer fetch requires a 16384-texel row view"); return VK_NULL_HANDLE;
     }
     if (!v) { g_tex_miss[2]++; return dummy; }
-    if (b->view >= 0) {
-        int one = v->target == NVN_TEXTURE_TARGET_1D || v->target == NVN_TEXTURE_TARGET_1D_ARRAY;
-        int want_one = b->view == VK_IMAGE_VIEW_TYPE_1D || b->view == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
-        if (one != want_one || (v->target == NVN_TEXTURE_TARGET_3D) != (b->view == VK_IMAGE_VIEW_TYPE_3D)) return dummy;
-        if ((b->view == VK_IMAGE_VIEW_TYPE_CUBE || b->view == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) && (v->layers < 6 || v->w != v->h)) return dummy;
-    }
+    if (!compatible_dimension(v, b->view)) return dummy;
     int a = stage == 1 ? fb_slot(v, &tr, b, g_fb_mask) : -1;
     if (a >= 0) {
         // Recreate the sampled format and channel mapping on the copied
@@ -2850,6 +2855,16 @@ static int mark_image_writes(int stage) {
     }
     return written;
 }
+static VkFormat storage_register_format(int bytes, int is_uint) {
+    switch (bytes) {
+        case 1: return is_uint ? VK_FORMAT_R8_UINT : VK_FORMAT_R8_SINT;
+        case 2: return is_uint ? VK_FORMAT_R16_UINT : VK_FORMAT_R16_SINT;
+        case 4: return is_uint ? VK_FORMAT_R32_UINT : VK_FORMAT_R32_SINT;
+        case 8: return is_uint ? VK_FORMAT_R32G32_UINT : VK_FORMAT_R32G32_SINT;
+        case 16: return is_uint ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R32G32B32A32_SINT;
+        default: return VK_FORMAT_UNDEFINED;
+    }
+}
 static int bind_storage(VkDescriptorSet ds, const sbind *b, int stage) {
     if (b->kind != K_IMG || b->reg < 0 || b->reg >= 32 || !b->count || b->count > 32u - b->reg) return 0;
     VkDescriptorImageInfo images[32];
@@ -2858,7 +2873,31 @@ static int bind_storage(VkDescriptorSet ds, const sbind *b, int stage) {
         treg_t tr; vtex *v = registered_texture(tid, &tr);
         if (!tr.ok) return 0;
         if (!v || !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return 0;
-        VkImageView view = tex_view(v, &tr.t, &tr.v, tr.has_v, -1, VIEW_STORAGE);
+        if (!compatible_dimension(v, b->view)) return 0;
+        fmt_t f = view_format(v, &tr.v, tr.has_v);
+        int bw, bh, bytes = nvn_fmt_bpb(tr.t.d.format, &bw, &bh);
+        if (b->storage_image > 1) {
+            // The image instruction specifies the texel layout. For example,
+            // r32ui on an RGBA8 surface reads and writes one packed word.
+            storage_texel_format shader = spirv_texel_format(b->storage_image-1);
+            if (!shader.bytes || shader.bytes != bytes || bw != 1 || bh != 1 || v->f.depth) {
+                RED_ONCE(119, "storage image format %u does not fit NVN format %#x", b->storage_image-1, tr.t.d.format);
+                return 0;
+            }
+            f.f = shader.format;
+        } else if (b->storage_image == 1 && b->num &&
+                   clear_color_type(f.f) != (b->num == 2 ? CLEAR_UINT : CLEAR_SINT)) {
+            // Formatless int/uint instructions use the same register-width
+            // view as Metal img_fit when the descriptor is of another class.
+            if (bw != 1 || bh != 1 || v->f.depth) return 0;
+            f.f = storage_register_format(bytes, b->num == 2);
+            if (!f.f) return 0;
+        }
+        if (b->texel_atomic) {
+            VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_pd, f.f, &fp);
+            if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT)) return 0;
+        }
+        VkImageView view = tex_view_format(v, &tr.t, &tr.v, tr.has_v, b->view, VIEW_STORAGE, f);
         if (!view) return 0;
         images[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
         if (!b->read_only) g_bound_images[stage][slot] = v;
