@@ -5324,12 +5324,6 @@ unsigned mtl_cpu_tex_count(void) {
     pthread_mutex_unlock(&g_rmu); return n;
 }
 
-// Capture-file parsing is portable. Live command capture still needs resource
-// serialization. Image inspection uses the Vulkan diagnostic controls above.
-void nvn_cap_submit(int n, const uint64_t *handles) {
-    (void)n; (void)handles;
-    if (getenv("DM_NVN_CAPTURE")) RED_ONCE(90, "live NVN capture is not implemented; use DM_VK_SHOTS / DM_VK_RTDUMP for images");
-}
-void nvn_cap_present(const tex_t *t, const int crop[4]) { (void)t; (void)crop; }
+#include "capture.inc"
 void dm_gfx_passdump_next(long n) { if (n > 0) atomic_store(&g_passdump_request, n); }
 void dm_gfx_restop(void) { LOG("vk: no Metal residency set; Vulkan image-memory totals are logged every 600 presents"); }

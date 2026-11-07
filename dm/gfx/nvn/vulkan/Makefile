@@ -3,7 +3,7 @@
 HOST = ../../../host
 NVN = ..
 B ?= build
-$(B)/t_replay: tests/wrapped_buffer.inc
+$(B)/t_replay: tests/wrapped_buffer.inc tests/live_capture.inc
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: wrapped_buffer.inc spv_wrapped_buffer.h block_targets.inc block_targets_finish.inc native_reduction.inc diagnostics.inc diagnostic_targets.inc ../../../third_party/flip/tool/stb_image_write.h
 $(B)/t_wrapped_buffer: tests/t_wrapped_buffer.c spv_wrapped_buffer.h spv_texel_bias.h
 	mkdir -p $(B)
@@ -59,7 +59,9 @@ LIBS ?= -lvulkan -lpthread -lm
 CPPFLAGS += -D_GNU_SOURCE -I$(HOST) -I$(HOST)/gen/$(GAME) -I../../../games/$(GAME) -I$(NVN) -I$(NVN)/include
 CFLAGS += -O1 -Wall -Werror -Wno-unused-function
 REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
-SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
+CAPTURE_SRC = ../nvn_capture.c $(wildcard ../../../third_party/lzfse/*.c) ../../../android/compat/sha256.c
+SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c $(CAPTURE_SRC)
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: capture.inc capture_memory.inc capture_resources.inc capture_format.h ../nvn_capture.h ../nvn_hmap.h
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h ../../tests/recorded_sampler_reduction.h ../../tests/recorded_sparse_texture.h ../../tests/recorded_sparse_write.h ../../tests/recorded_query_lifetime.h ../../tests/recorded_feedback_control.h
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_storage_texels.inc spv_sampler_pairs.inc spv_one_row.h ../nvn_border.h spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
 $(B)/t_replay: ../../tests/packed_texel_corpus.h ../../tests/dlss_spatial_corpus.h ../../tests/dlss_temporal_corpus.h ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/depth_views.inc tests/cube_ranges.inc tests/logic.inc tests/feedback_capture.inc
@@ -616,7 +618,7 @@ $(B)/t_sampler_limits: $(B)/t_replay tests/sampler_limits.inc
 	$(CC) $(CPPFLAGS) $(REPLAY_CPPFLAGS) $(CFLAGS) -DDM_VK_TEST_SAMPLER_LIMITS $(SRC) -o $@ $(LIBS) $(foreach f,vkGetPhysicalDeviceProperties vkGetPhysicalDeviceFeatures2 vkCreateSampler,-Wl,--wrap=$(f))
 .PHONY: android-recorder
 android-recorder: RECORDER_CPPFLAGS = -I../../../android/compat
-android-recorder: RECORDER_EXTRA = ../../../android/compat/sha256.c
+android-recorder: RECORDER_EXTRA =
 android-recorder: CFLAGS += -fPIC -fvisibility=hidden -Wno-format -ffunction-sections -fdata-sections
 android-recorder: RECORDER_LDFLAGS = -Wl,--gc-sections -Wl,--no-undefined -Wl,-z,max-page-size=16384
 android-recorder: LIBS = -lvulkan -landroid -lm -ldl
@@ -842,3 +844,9 @@ $(B)/shaders/00000000feed9e05.spv: tests/wrapped_buffer_array.comp Makefile
 .PHONY: wrapped-helper-fixture
 wrapped-helper-fixture: fixture
 	GLSLC="$(GLSLC)" python3 tests/wrapped_helper_fixture.py "$(B)/shaders"
+
+.PHONY: capture-inspect
+capture-inspect: $(B)/capture-inspect
+$(B)/capture-inspect: tests/capture_inspect.c capture_format.h ../nvn_capture.c ../nvn_capture.h $(wildcard $(LZFSE)/*.[ch])
+	mkdir -p $(B)
+	$(CC) -D_GNU_SOURCE -O2 -I.. -I../include $< ../nvn_capture.c $(wildcard $(LZFSE)/*.c) -o $@
