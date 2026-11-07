@@ -90,6 +90,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** Vulkan rejects a cube view because the underlying image lacks `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT`.
 - **Cause:** NVN lets the game choose a cube view for a square 2D array with six faces. Vulkan requires the image to allow that view when the image is created.
 - **Fix:** enable cube-compatible views for eligible single-sample square 2D arrays with at least six layers. The Vulkan replay test clears a six-layer array, samples it through a cube view, draws with both NVN binding encodings, and checks the fenced pixel readback.
+- **Layer ranges:** resolve a guest cube range before fitting it to the shader. A range of whole faces selects those faces directly. A count that is not a multiple of six counts cubes if that range fits. Otherwise the remaining faces form an array, and fewer than six faces in a cube slot select the empty cube. The public recorder test selects the second cube in both units. Compute replay samples all 18 source faces through cube, cube-array and 2D-array slots and checks the reported dimensions and mip counts.
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#found-on-this-game), using the Android reference renderer.
 
 

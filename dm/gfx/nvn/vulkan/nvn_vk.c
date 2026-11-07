@@ -1151,11 +1151,27 @@ static void sampled_swizzle(uint8_t swz[4], fmt_t f, const tex_t *t, const view_
 static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_vw, int want_type, int purpose) {
     int rt = purpose == VIEW_ATTACHMENT, storage = purpose == VIEW_STORAGE;
     int target = has_vw && vw->set_target ? vw->target : t->d.target;
-    uint32_t bl = has_vw && vw->set_levels ? vw->base_level : 0, nl = has_vw && vw->set_levels ? vw->nlevels : v->levels - bl;
-    uint32_t b0 = has_vw && vw->set_layers ? vw->min_layer : 0, nly = has_vw && vw->set_layers ? vw->nlayers : v->layers - b0;
+    uint32_t bl = has_vw && vw->set_levels ? vw->base_level : 0;
+    if (bl >= v->levels) return VK_NULL_HANDLE;
+    uint32_t nl = has_vw && vw->set_levels ? vw->nlevels : 0;
+    if (!nl || nl > v->levels - bl) nl = v->levels - bl;
     if (rt || storage) nl = 1;
-    if (!nl || bl + nl > v->levels) nl = v->levels - (bl < v->levels ? bl : 0);
-    if (!nly || b0 + nly > v->layers) nly = v->layers - (b0 < v->layers ? b0 : 0);
+    // A 3D attachment selects a depth slice at this mip. A 3D sampled view
+    // exposes the volume through Vulkan's single array layer.
+    uint32_t total = rt && v->target == NVN_TEXTURE_TARGET_3D ? (v->d >> bl) : v->layers;
+    if (!total) total = 1;
+    uint32_t b0 = has_vw && vw->set_layers ? vw->min_layer : 0;
+    if (b0 >= total) return VK_NULL_HANDLE;
+    uint32_t nly = has_vw && vw->set_layers ? vw->nlayers : 0;
+    if (!nly || nly > total - b0) nly = total - b0;
+    if (purpose == VIEW_SAMPLED) {
+        // Resolve the guest descriptor before fitting it to the shader. A
+        // cube range that does not name whole faces may count entire cubes.
+        int cube = target == NVN_TEXTURE_TARGET_CUBEMAP || target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
+        if (cube && nly % 6 && b0 + nly <= total / 6) { b0 *= 6; nly *= 6; }
+        if (target == NVN_TEXTURE_TARGET_CUBEMAP && nly >= 6 && !(nly % 6)) nly = 6;
+        if (target == NVN_TEXTURE_TARGET_2D || target == NVN_TEXTURE_TARGET_1D) nly = 1;
+    }
     fmt_t f = view_format(v, vw, has_vw);
     uint8_t swz[4] = {2, 3, 4, 5};
     if (!rt && !storage) sampled_swizzle(swz, f, t, vw, has_vw);
@@ -1185,12 +1201,14 @@ static VkImageView tex_view(vtex *v, const tex_t *t, const view_t *vw, int has_v
     // from that face on, past the image's end for faces 1-5 (Super Mario Odyssey's environment probes, its first frame in a kingdom: the Mali-G57 lost the device). A 3D
     // texture's slice is a 2D view of the image made 2D-array compatible, its slice as the layer
     if (rt) {
-        if (target == NVN_TEXTURE_TARGET_3D) { uint32_t dd = v->d >> bl ? v->d >> bl : 1; if (b0 >= dd) b0 = 0; nly = 1; vt = VK_IMAGE_VIEW_TYPE_2D; }
+        if (v->target == NVN_TEXTURE_TARGET_3D) { nly = 1; vt = VK_IMAGE_VIEW_TYPE_2D; }
         else if (vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || vt == VK_IMAGE_VIEW_TYPE_2D_ARRAY) vt = nly > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     }
     if ((vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_2D) && nly > 1) nly = 1;
-    if (vt == VK_IMAGE_VIEW_TYPE_CUBE) { nly = 6; if (b0 + 6 > v->layers) b0 = v->layers >= 6 ? v->layers - 6 : 0; }
-    if (vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) { nly -= nly % 6; if (!nly) { vt = VK_IMAGE_VIEW_TYPE_CUBE; nly = 6; b0 = 0; } }
+    if (vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) {
+        if (nly < 6 || v->samples != VK_SAMPLE_COUNT_1_BIT || v->w != v->h) return VK_NULL_HANDLE;
+        nly = vt == VK_IMAGE_VIEW_TYPE_CUBE ? 6 : nly - nly % 6;
+    }
     VkImageAspectFlags asp = v->aspect;
     if (purpose == VIEW_SAMPLED && v->f.depth)
         asp = sampled_stencil(v, t, vw, has_vw) ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -2084,14 +2102,16 @@ static void set_rt(const p_set_rt *r) {
         if (!r->color[i]) continue;
         vtex *v = tex_get(r->color[i], 1); if (!v) continue;
         P.ct[i] = v; P.cv[i] = tex_view(v, r->color[i], &r->cview[i], r->has_cview[i], -1, 1);
-        if (P.cv[i]) P.cf[i] = view_format(v, &r->cview[i], r->has_cview[i]).f;
+        if (!P.cv[i]) { P.ct[i] = NULL; continue; }
+        P.cf[i] = view_format(v, &r->cview[i], r->has_cview[i]).f;
         uint32_t lv = r->has_cview[i] && r->cview[i].set_levels ? r->cview[i].base_level : 0, w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
         P.clv[i] = lv; P.cly[i] = r->has_cview[i] && r->cview[i].set_layers ? r->cview[i].min_layer : 0; P.cwr[i] = 1;
         if (w < P.w) P.w = w; if (h < P.h) P.h = h;
     }
     if (r->depth) {
         vtex *v = tex_get(r->depth, 1);
-        if (v && v->f.depth) { P.dt = v; P.dv = tex_view(v, r->depth, &r->dview, r->has_dview, -1, 1); uint32_t lv = r->has_dview && r->dview.set_levels ? r->dview.base_level : 0;
+        if (v && v->f.depth) P.dv = tex_view(v, r->depth, &r->dview, r->has_dview, -1, 1);
+        if (P.dv) { P.dt = v; uint32_t lv = r->has_dview && r->dview.set_levels ? r->dview.base_level : 0;
                                if ((v->w >> lv) < P.w) P.w = v->w >> lv ? v->w >> lv : 1; if ((v->h >> lv) < P.h) P.h = v->h >> lv ? v->h >> lv : 1; }
     }
     P.samples = P.dv ? P.dt->samples : 0;

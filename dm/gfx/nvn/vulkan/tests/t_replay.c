@@ -23,6 +23,7 @@ static prog_t table_program[2] = {{.nstage=2},{.nstage=2}};
 static prog_t warp_program[2] = {{.nstage = 1}, {.nstage = 1}};
 static prog_t driver_program = {.nstage = 1};
 static prog_t typed_border_program[] = {{.nstage=1},{.nstage=1}};
+static prog_t cube_ranges_program = {.nstage=1};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -69,6 +70,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p == &cube_ranges_program) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x6d; return 1; }
     for (int i=0;i<2;++i) if (p==&typed_border_program[i]) { assert(stage==0); memset(key,0,8); key[7]=0x69+i; return 1; }
     if (p==&capture_program) { assert(stage==0); const uint8_t k[8]={0xde,0x21,0x67,0x83,0xc4,0xf7,0x06,0x05}; memcpy(key,k,8); return 1; }
     if (p==&mixed_color_program) { assert(stage<2); memset(key,0,8); key[7]=stage ? 0x67 : 0x52; return 1; }
@@ -565,6 +567,7 @@ static void float_image_views(void) {
 }
 
 #include "depth_views.inc"
+#include "cube_ranges.inc"
 
 static void custom_borders(void) {
     int native;
@@ -3197,6 +3200,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_IMAGE_ORDER")) { image_order(); return 0; }
     if (getenv("DM_VK_TEST_FEEDBACK")) { attachment_feedback(); layered_feedback(); return 0; }
     if (getenv("DM_VK_TEST_DEPTH_VIEWS")) { depth_image_views(); return 0; }
+    if (getenv("DM_VK_TEST_CUBE_RANGES")) { cube_ranges(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
     if (getenv("DM_VK_TEST_CUSTOM_BORDER")) { custom_borders(); return 0; }
     if (getenv("DM_VK_TEST_POLYGON_FILL")) { polygon_fill(&fill_program,replay_features(NULL,NULL).fillModeNonSolid && !getenv("DM_VK_NO_WIREFRAME")); return 0; }
@@ -3252,6 +3256,7 @@ int main(void) {
     feedback_capture();
     float_image_views();
     depth_image_views();
+    cube_ranges();
     custom_borders();
     compute_driver_constants();
     many_resource_bindings();
