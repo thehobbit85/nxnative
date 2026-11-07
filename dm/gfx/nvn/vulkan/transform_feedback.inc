@@ -77,7 +77,7 @@ static void feedback_dispatch(shader_t *shader, const uint32_t *code, size_t byt
         VKCHECK(vkCreateComputePipelines(g_dev,g_pcache,1,&pipeline,NULL,&shader->cpp));
     }
     VkDescriptorSet set=allocate_shader_set(shader);
-    VkWriteDescriptorSet writes[4];
+    VkWriteDescriptorSet writes[DM_VK_MAX_BINDINGS];
     for (int i=0;i<shader->nb;i++) writes[i]=(VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,NULL,set,
         shader->b[i].binding,0,1,descriptor_type[shader->b[i].type],NULL,&buffers[i],NULL};
     vkUpdateDescriptorSets(g_dev,shader->nb,writes,0,NULL);

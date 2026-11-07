@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
         switch (test) {
             case 1: ctl[3] = 0; valid = 0; break;
             case 2: ctl[2] = UINT32_MAX; valid = 0; break;
-            case 3: ctl[7] = 1; valid = 0; break;
+            case 3: ctl[2] = OUTPUT_WORDS - 1; valid = 0; break;
             case 4: ctl[5] = 0; if (variant == 3) valid = 0; break;
             case 5: ctl[4] = UINT32_MAX; if (variant == 3) valid = 0; break;
             case 6: ctl[6] = 0; if (variant == 3) valid = 0; break;

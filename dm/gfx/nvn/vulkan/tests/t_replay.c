@@ -33,6 +33,7 @@ static prog_t sampler_reduction_program[13][5][2];
 static prog_t sampler_array_program[3][2][2];
 static prog_t sampler_compare_program[12][2];
 static prog_t layered_program[2]={{.nstage=2},{.nstage=2}};
+static prog_t task_mesh_program={.nstage=3};
 static prog_t mesh_program={.nstage=2};
 static prog_t geometry_program={.nstage=3};
 static prog_t geometry_explicit_program={.nstage=3};
@@ -101,6 +102,7 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     }
     if (p==&wrapped_table_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=4;return 1; }
     if (p==&wrapped_buffer_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=1;return 1; }
+    if (p==&task_mesh_program) { const uint8_t keys[]={3,4,2};assert(stage<3);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0xab;key[7]=keys[stage];return 1; }
     if (p==&mesh_program) { assert(stage<2);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0xab;key[7]=1+stage;return 1; }
     if (p==&geometry_program) { assert(stage<3);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9c;key[7]=1+stage;return 1; }
     if (p==&geometry_explicit_program) { assert(stage<3);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=stage==1 ? 0x9d : 0x9c;key[7]=1+stage;return 1; }
@@ -3350,7 +3352,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_SUBRESOURCES")) { subresource_views(); return 0; }
     if (getenv("DM_VK_TEST_LAYERED")) { layered_attachments(); return 0; }
     if (getenv("DM_VK_TEST_LAYERED_CLEAR")) { layered_clears(); return 0; }
-    if (getenv("DM_VK_TEST_MESH")) { mesh_replay(); return 0; }
+    if (getenv("DM_VK_TEST_MESH")) { mesh_replay(); task_mesh_replay(); return 0; }
     if (getenv("DM_VK_TEST_GEOMETRY")) { geometry_replay(); geometry_split_feedback(); return 0; }
     if (getenv("DM_VK_TEST_ONE_ROW_GUEST")) { one_row_guest(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_COMPARE")) { sampler_reduction_compare(); return 0; }

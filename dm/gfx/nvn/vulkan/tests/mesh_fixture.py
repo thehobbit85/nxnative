@@ -30,7 +30,7 @@ void main() {{
     memory[{vertex+32}+lane]=floatBitsToUint(p.y);
     memory[{vertex+64}+lane]=0u;
     memory[{vertex+96}+lane]=floatBitsToUint(1.0);
-    memory[{vertex+128}+lane]=floatBitsToUint(float(parameters.blue)/255.0);
+    memory[{vertex+128}+lane]=floatBitsToUint(float(gl_WorkGroupID.x==group-7u ? parameters.blue : 0u)/255.0);
     memory[{vertex+160}+lane]=floatBitsToUint(1.0);
     if (lane!=0) return;
     for (uint p=0;p<2;p++) {{
@@ -58,6 +58,41 @@ void main() { color=vec4(primitive.xy,vertex.x,vertex.y); }
         if stage == 'ms':
             reflection.update(bindings=[dict(msl_name='parameters', kind='cbuf', reg=0)],
                 threadgroup_size=[8, 1, 1], mesh_stage=info, stage_memory=offsets)
+        vk.write_stage(key, raw, reflection, output, validator, optimizer)
+
+    task_info = dict(kind='ts', threads=8, payload=12)
+    task_offsets, task_size = vk.spv_meshstage.layout(task_info)
+    task_output = task_offsets[2] // 4
+    task_source = f'''#version 450
+layout(local_size_x=8) in;
+layout(binding=0,std140) uniform Parameters {{ uint children; }} parameters;
+shared uint memory[{task_size // 4}];
+void main() {{
+    if (gl_LocalInvocationID.x!=0) return;
+    memory[{task_output}]=0xdeadbeefu;
+    memory[{task_output+1}]=memory[0]%3u==0u || gl_WorkGroupID.x!=memory[0]-7u ? 0u : parameters.children;
+    memory[{task_output+2}]=memory[0];
+}}
+'''
+    task_mesh = dict(info, task=True, payload=12)
+    mesh_offsets, mesh_size = vk.spv_meshstage.layout(task_mesh)
+    # Shift the standalone fixture's output section past its new input payload.
+    task_mesh_source = source.replace(f'memory[{size // 4}]', f'memory[{mesh_size // 4}]')
+    for word in range(size // 4 - 1, vertex - 1, -1):
+        task_mesh_source = task_mesh_source.replace(f'memory[{word}]', f'memory[{word + 4}]')
+        task_mesh_source = task_mesh_source.replace(f'memory[{word}+', f'memory[{word + 4}+')
+    task_mesh_source = task_mesh_source.replace('group=memory[0]', 'group=memory[6]')
+    task_mesh_source = task_mesh_source.replace('gl_WorkGroupID.x==group-7u', 'gl_WorkGroupID.x==memory[4]')
+    task_mesh_source = task_mesh_source.replace('float(group%251u)', 'float(memory[4]%251u)')
+    task_mesh_source = task_mesh_source.replace('float(p+1u)', 'float(group%251u)')
+    task_mesh_source = task_mesh_source.replace('(group%3u==0u ? 0u : 2u)<<24', '2u<<24')
+    for key, stage, code, mesh_info, stage_memory in [
+            ('00000000feedab03', 'ts', task_source, task_info, task_offsets),
+            ('00000000feedab04', 'ms', task_mesh_source, task_mesh, mesh_offsets)]:
+        raw = subprocess.check_output([os.environ.get('GLSLC', 'glslc'), '--target-env=vulkan1.1',
+            '-fshader-stage=compute', '-', '-o', '-'], input=code.encode())
+        reflection = dict(stage=stage, bindings=[dict(msl_name='parameters', kind='cbuf', reg=0)],
+            threadgroup_size=[8, 1, 1], mesh_stage=mesh_info, stage_memory=stage_memory)
         vk.write_stage(key, raw, reflection, output, validator, optimizer)
 
 

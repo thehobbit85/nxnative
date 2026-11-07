@@ -5,7 +5,7 @@ is the complete stage memory, in uint words. The renderer consumes the retained
 vertex/primitive maps and counts; a task/mesh module is not ordinary guest CS.
 
 Control words: first group, group count, output word offset, output capacity,
-input word offset, input capacity, input stride, reserved (zero). A task-fed
+input word offset, input capacity, input stride, draw-relative group base. A task-fed
 mesh input record is its child-group number followed by the task payload.
 """
 from pathlib import Path
@@ -156,7 +156,7 @@ def lower(data, info, offsets):
     length = value(68, destination, 0)
     checks = [value(176, gx, params[1], ty=m.boolean), value(176, gx, params[3], ty=m.boolean),
               value(170, value(81, group, 1), zero, ty=m.boolean), value(170, value(81, group, 2), zero, ty=m.boolean),
-              value(170, params[7], zero, ty=m.boolean), value(178, params[2], length, ty=m.boolean)]
+              value(178, params[2], length, ty=m.boolean)]
     available = value(130, length, params[2])
     checks.append(value(176, gx, value(134, available, words), ty=m.boolean))
     task = info['kind'] == 'ms' and info['task']
@@ -205,9 +205,9 @@ def lower(data, info, offsets):
     code += [instruction(249, group_done), instruction(248, group_done)]
     current = group_done
     barrier()
-    if task:
-        logical_group = body_workgroup(m, group_var)
-        code.append(instruction(62, logical_group, value(80, first, zero, zero, ty=m.ty(23, m.uint, 3))))
+    logical_group = body_workgroup(m, group_var)
+    logical_x = first if task else value(128, gx, params[7])
+    code.append(instruction(62, logical_group, value(80, logical_x, zero, zero, ty=m.ty(23, m.uint, 3))))
     value(57, old_entry, ty=void)  # Every early return rejoins the wrapper.
     barrier()
     base = value(128, params[2], value(132, gx, words))
