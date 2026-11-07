@@ -29,7 +29,7 @@ static prog_t empty_images_program = {.nstage=1};
 static prog_t empty_ms_program = {.nstage=1};
 static prog_t subresource_program[3] = {{.nstage=1}, {.nstage=1}, {.nstage=1}};
 static prog_t one_row_guest_program[2][2] = {{{.nstage=1},{.nstage=1}},{{.nstage=1},{.nstage=1}}};
-static prog_t sampler_reduction_program[13][3][2];
+static prog_t sampler_reduction_program[13][5][2];
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -77,12 +77,15 @@ int nvn_dpool_base(const void *pool, int texture) {
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (int i=0; i<3; i++) if (p == &subresource_program[i]) { assert(stage == 0); memset(key, 0, 8); key[7] = 0x72+i; return 1; }
-    for (int form=0; form<13; form++) for (int array=0; array<3; array++) for (int i=0; i<2; i++) if (p == &sampler_reduction_program[form][array][i]) {
+    for (int form=0; form<13; form++) for (int array=0; array<5; array++) for (int i=0; i<2; i++) if (p == &sampler_reduction_program[form][array][i]) {
         int fragment = (form >= 4 && form < 8) || form >= 10;
         assert(stage < (fragment ? 2u : 1u)); memset(key, 0, 8);
         if (fragment && !stage) key[7] = 0x35;
         else if (array == 2) { key[4]=0xfe; key[5]=0xed; key[6]=0x97; key[7]=0xb1+2*form+i; }
-        else key[7] = 0x75+4*form+2*array+i;
+        else {
+            key[7] = 0x75+4*form+2*(array%3)+i;
+            if (array >= 3) { key[4]=0xfe; key[5]=0xed; key[6]=0x98; }
+        }
         return 1;
     }
     for (int query=0; query<2; query++) for (int array=0; array<2; array++) if (p == &one_row_guest_program[query][array]) {

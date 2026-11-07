@@ -51,19 +51,45 @@ static void sampler_reduction(void) {
         {-1,.125f,0, NVN_MIN_FILTER_LINEAR,1, {0,0,0},1},
         {.5f,.5f,.5f, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {16,1,31}},
     };
+    static const sample_case row_cases[] = {
+        {.25f,0,1, NVN_MIN_FILTER_LINEAR,1, {2,1,3}},
+        {.5f,0,1, NVN_MIN_FILTER_LINEAR_MIPMAP_NEAREST,1, {10,9,11}},
+        {.375f,0,0, NVN_MIN_FILTER_LINEAR,1, {3,3,3}},
+        {.5f,0,.5f, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {6,1,11}},
+        {0,0,0, NVN_MIN_FILTER_LINEAR,1, {2,1,3}},
+        {.5f,0,1, NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST,0, {11,11,11}},
+        {.5f,0,.25f, NVN_MIN_FILTER_LINEAR_MIPMAP_NEAREST,1, {2,1,11}},
+        {.5f,0,.25f, NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST,0, {1,1,11}},
+        {0,0,0, NVN_MIN_FILTER_LINEAR,1, {.5f,0,1},1},
+        {-1,0,0, NVN_MIN_FILTER_LINEAR,1, {0,0,0},1},
+        {.25f,0,-1, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,0, {3,3,3}},
+        {.25f,0,1, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,0, {9,9,9}},
+        {.5f,0,.5f, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {10,9,11},0,.5f},
+    };
+    static const sample_case row_offset_cases[] = {
+        {.125f,0,0, NVN_MIN_FILTER_LINEAR,1, {3,3,3}},
+        {.25f,0,0, NVN_MIN_FILTER_LINEAR,1, {2,1,3}},
+        {.25f,0,1, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {11,11,11}},
+        {-.25f,0,0, NVN_MIN_FILTER_LINEAR,1, {.5f,0,1},1},
+        {-1,0,0, NVN_MIN_FILTER_LINEAR,1, {0,0,0},1},
+        {.5f,0,.5f, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR,1, {6,1,11}},
+    };
     const NVNformat formats[] = {NVN_FORMAT_R32F,NVN_FORMAT_RGBA32F,NVN_FORMAT_RGBA8,NVN_FORMAT_DEPTH32F};
     mtl_queue_activate(slot);
     tex_t target = {.serial=0x17600, .d={.width=2,.height=2,.depth=1,.levels=1,
         .target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA32F}};
     nvn_tex_layout(&target.d,&target.L);
     unsigned checks = 0;
-    for (int shape = 0; shape < 3; shape++) for (int format = 0; format < (shape == 2 ? 3 : 4); format++) {
-        int array = shape == 1, volume = shape == 2, base_texels = volume ? 64 : 16;
-        tex_t texture = {.serial=0x17500+4*shape+format, .d={.width=4,.height=4,.depth=volume ? 4 : array ? 2 : 1,.levels=2,
-            .target=volume ? NVN_TEXTURE_TARGET_3D : array ? NVN_TEXTURE_TARGET_2D_ARRAY : NVN_TEXTURE_TARGET_2D,.format=formats[format]}};
+    const NVNtextureTarget targets[] = {NVN_TEXTURE_TARGET_2D,NVN_TEXTURE_TARGET_2D_ARRAY,
+        NVN_TEXTURE_TARGET_3D,NVN_TEXTURE_TARGET_1D,NVN_TEXTURE_TARGET_1D_ARRAY};
+    for (int shape = 0; shape < 5; shape++) for (int format = 0; format < (shape == 2 ? 3 : 4); format++) {
+        int array = shape == 1 || shape == 4, volume = shape == 2, row = shape >= 3;
+        int base_texels = volume ? 64 : row ? 4 : 16, total_texels = volume ? 72 : row ? 6 : 20;
+        tex_t texture = {.serial=0x17500+4*shape+format, .d={.width=4,.height=row ? array+1 : 4,
+            .depth=volume ? 4 : array && !row ? 2 : 1,.levels=2,.target=targets[shape],.format=formats[format]}};
         nvn_tex_layout(&texture.d,&texture.L); mtl_reg_tex(slot,&texture,NULL);
         float rgba[2][72][4]; uint8_t bytes[2][72][4]; float red[2][72];
-        for (int layer = 0; layer <= array; layer++) for (int i = 0; i < (volume ? 72 : 20); i++) {
+        for (int layer = 0; layer <= array; layer++) for (int i = 0; i < total_texels; i++) {
             float value = i < base_texels ? 1+2*(i%2)+4*(i/4%2)+(volume ? 8*(i/16%2) : 0) :
                 (volume ? 17 : 9)+2*(i-base_texels);
             if (array && !layer) value += 100;
@@ -77,7 +103,7 @@ static void sampler_reduction(void) {
             uintptr_t source = format == 0 || format == 3 ? (uintptr_t)(red[layer]+offset) :
                 format == 1 ? (uintptr_t)(rgba[layer]+offset) : (uintptr_t)(bytes[layer]+offset);
             p_copy_b2t copy={.tex=&texture,.src=source,.has_view=1,.view={.set_levels=1,.base_level=mip},
-                .r={.width=4>>mip,.height=4>>mip,.zoffset=layer,.depth=volume ? 4>>mip : 1}};
+                .r={.width=4>>mip,.height=row ? 1 : 4>>mip,.zoffset=layer,.depth=volume ? 4>>mip : 1}};
             put(&upload,OP_COPY_B2T,&copy,sizeof copy);
         }
         put(&upload,OP_END,NULL,0); mtl_sub_begin();mtl_exec(upload.bytes);assert(mtl_wait(mtl_sub_commit(),UINT64_MAX));
@@ -85,6 +111,7 @@ static void sampler_reduction(void) {
           if (form >= 8 && form < 12 && array) continue; // SPIR-V projected sampling has no array form.
           int offset = form < 8 && (form & 2);
           const sample_case *table = volume ? (offset ? volume_offset_cases : volume_cases) : (offset ? offset_cases : cases);
+          if (row) table = offset ? row_offset_cases : row_cases;
           unsigned count = offset ? sizeof offset_cases/sizeof *offset_cases : sizeof cases/sizeof *cases;
           int fragment = (form >= 4 && form < 8) || form >= 10, stage = fragment ? 1 : 5;
           prog_t *program = &sampler_reduction_program[form][shape][separate]; program->nstage=fragment ? 2 : 1;
