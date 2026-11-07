@@ -666,6 +666,7 @@ static void float_image_views(void) {
 #include "one_row_guest.inc"
 #include "sampler_reduction.inc"
 #include "cube_reduction.inc"
+#include "draw_texture_anisotropy.inc"
 #include "bc_views.inc"
 static void empty_sampled_slots(void) {
     enum { slot=1462 };
@@ -3313,6 +3314,7 @@ static void native_warp_width(unsigned available) {
 #endif
 int main(void) {
 #ifdef DM_VK_TEST_SAMPLER_LIMITS
+    if (getenv("DM_VK_TEST_DRAW_ANISOTROPY")) { draw_texture_anisotropy();return 0; }
     sampler_limits(); return 0;
 #endif
 #ifdef DM_VK_TEST_ANDROID_SURFACE
@@ -3379,6 +3381,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_SAMPLER_ARRAY")) { sampler_reduction_arrays(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_REDUCTION")) { sampler_reduction(); sampler_reduction_arrays(); sampler_reduction_compare(); return 0; }
     if (getenv("DM_VK_TEST_CUBE_REDUCTION")) { cube_reduction(); return 0; }
+    if (getenv("DM_VK_TEST_DRAW_ANISOTROPY")) { draw_texture_anisotropy(); return 0; }
     if (getenv("DM_VK_TEST_BC_VIEWS")) { compressed_color_views(); return 0; }
     if (getenv("DM_VK_TEST_EMPTY_SAMPLED")) { empty_sampled_slots(); return 0; }
     if (getenv("DM_VK_TEST_FLOAT_VIEWS")) { float_image_views(); float_word_texels(); return 0; }
@@ -3438,7 +3441,7 @@ int main(void) {
     feedback_capture();
     float_image_views();
     depth_image_views();
-    cube_ranges();cube_reduction();
+    cube_ranges();cube_reduction();draw_texture_anisotropy();
     storage_image_views();
     compressed_color_views();
     empty_sampled_slots();

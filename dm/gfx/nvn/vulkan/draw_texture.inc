@@ -43,6 +43,8 @@ static VkImageView draw_texture_source(vtex *v, const treg_t *tr) {
 typedef struct {
     float dst[2], src[2], scale[2];
     int32_t reduction, linear, level0, level1;
+    float span[2];
+    int32_t taps;
 } draw_texture_params;
 
 // The rectangle's texel-to-pixel ratio is constant. Select its mip footprint
@@ -50,9 +52,10 @@ typedef struct {
 static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *tr, draw_texture_params *params) {
     border_view sampled = sampler_view(v,tr);
     if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) return sampler_for(p,sampled);
-    if (g_minmax_filter && !p.cmp_mode && native_reduction_view(v,tr,0,0)) return sampler_for(p,sampled);
-    if (p.aniso > 1 || p.cmp_mode) {
-        RED_ONCE(103, "DrawTexture reduction with anisotropy or depth comparison is unavailable");
+    float anisotropy=fminf(16,fmaxf(1,floorf(p.aniso)));
+    if (g_minmax_filter && !p.cmp_mode && anisotropy<=g_max_anisotropy && native_reduction_view(v,tr,0,0)) return sampler_for(p,sampled);
+    if (p.cmp_mode) {
+        RED_ONCE(103, "DrawTexture reduction with depth comparison is unavailable");
         p.reduction=NVN_SAMPLER_REDUCTION_AVERAGE;
         return sampler_for(p,sampled);
     }
@@ -62,22 +65,28 @@ static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *t
         levels -= tr->v.base_level;
         if (tr->v.nlevels && tr->v.nlevels < levels) levels = tr->v.nlevels;
     }
-    float rho = fmaxf(fabsf(params->scale[0]), fabsf(params->scale[1]));
+    // A rectangle has axis-aligned derivatives. Spread point-filtered bilinear
+    // footprints along its major axis and select mips from their shorter scale.
+    // Anisotropic kernels vary between GPUs; this follows Vulkan's N-isotropic-
+    // sample model and works without the native samplerAnisotropy feature.
+    float x=fabsf(params->scale[0]),y=fabsf(params->scale[1]);
+    float major=fmaxf(x,y),minor=fminf(x,y);
+    params->taps=(int)fmaxf(1,fminf(anisotropy,ceilf(major/fmaxf(1,minor))));
+    params->span[x>=y ? 0 : 1]=params->scale[x>=y ? 0 : 1];
+    float rho=fmaxf(minor,major/params->taps);
     float lod = log2f(rho) + fminf(15.99f, fmaxf(-16, p.lod_bias));
-    if (p.minf >= NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST) lod = fminf(p.lod_max, fmaxf(p.lod_min, lod));
+    float lo=p.minf>=2 ? fmaxf(0,p.lod_min) : 0,hi=p.minf>=2 ? fmaxf(lo,p.lod_max) : 0;
+    lod=fminf(hi,fmaxf(lo,lod));
     params->reduction = p.reduction;
     params->linear = lod > 0 ? (p.minf & 1) : p.magf;
-    lod = p.minf < NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST ? 0 : fminf(levels-1, fmaxf(0,lod));
-    if (p.minf >= NVN_MIN_FILTER_NEAREST_MIPMAP_LINEAR) {
-        params->level0 = (int)floorf(lod);
-        params->level1 = (int)ceilf(lod);
-    } else {
-        params->level0 = params->level1 = (int)ceilf(lod - .5f);
-    }
+    lod=fminf(levels-1,fmaxf(0,lod));
+    // The Metal reference forces linear mip reduction even when the guest's
+    // minification filter selected a nearest mip. Non-mipped samplers clamp 0.
+    params->level0=(int)floorf(lod);params->level1=(int)ceilf(lod);
     // Point samples retain the registered sampler's addressing and border.
     p.minf = NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST; p.magf = NVN_MAG_FILTER_NEAREST;
     p.reduction = NVN_SAMPLER_REDUCTION_AVERAGE; p.lod_bias = 0;
-    p.lod_min = 0; p.lod_max = VK_LOD_CLAMP_NONE;
+    p.lod_min = 0; p.lod_max = VK_LOD_CLAMP_NONE; p.aniso=1;
     return sampler_for(p,sampled);
 }
 

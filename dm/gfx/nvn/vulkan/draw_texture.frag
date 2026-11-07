@@ -5,6 +5,8 @@ layout(push_constant) uniform DrawTexture {
     vec2 srcOrigin;
     vec2 texelsPerPixel;
     int reduction, linear, level0, level1;
+    vec2 span;
+    int taps;
 } region;
 layout(location=0) out vec4 color;
 
@@ -32,7 +34,12 @@ void main() {
     if (region.reduction == 0) {
         color = texture(sourceImage, uv);
     } else {
-        color = reduceLevel(uv, region.level0);
-        if (region.level1 != region.level0) color = combine(color, reduceLevel(uv, region.level1));
+        vec2 span=region.span/vec2(textureSize(sourceImage,0));
+        for (int tap=0;tap<region.taps;tap++) {
+            vec2 point=uv+span*((float(tap)+.5)/float(region.taps)-.5);
+            vec4 value=reduceLevel(point,region.level0);
+            if (region.level1!=region.level0) value=combine(value,reduceLevel(point,region.level1));
+            color=tap==0 ? value : combine(color,value);
+        }
     }
 }

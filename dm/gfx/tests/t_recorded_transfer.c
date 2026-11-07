@@ -571,6 +571,11 @@ int main(void) {
     API(nvnQueueBuilderSetDefaults)(&qb);
     assert(API(nvnQueueInitialize)(&queue, &qb));
 #ifdef __ANDROID__
+    if (getenv("DM_VK_TEST_PUBLIC_REDUCTION")) {
+        check_sampler_reduction(&device,&queue,NVN_FORMAT_R32F);
+        check_sampler_reduction(&device,&queue,NVN_FORMAT_RGBA8);
+        API(nvnQueueFinalize)(&queue);API(nvnDeviceFinalize)(&device);return 0;
+    }
     if (getenv("DM_VK_TEST_SPARSE_WRITES")) {
         check_sparse_textures(&device,&queue);
         check_sparse_encoded_writes(&device,&queue);

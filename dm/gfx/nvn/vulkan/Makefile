@@ -239,7 +239,7 @@ $(B)/t_replay: tests/storage_views.inc tests/bc_views.inc
 $(B)/t_replay: tests/empty_images.inc
 $(B)/t_replay: tests/empty_ms.inc
 $(B)/t_replay: tests/subresource_views.inc
-$(B)/t_replay: tests/sampler_reduction.inc tests/cube_reduction.inc
+$(B)/t_replay: tests/sampler_reduction.inc tests/cube_reduction.inc tests/draw_texture_anisotropy.inc
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_sample_reduction.h spv_reduction_cube.inc
 .PHONY: cube-reduction-fixture
 fixture: cube-reduction-fixture

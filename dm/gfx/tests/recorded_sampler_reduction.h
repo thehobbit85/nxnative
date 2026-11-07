@@ -54,7 +54,7 @@ static void check_sampler_reduction(NVNdevice *device, NVNqueue *queue, NVNforma
         NVNdrawTextureRegion region;
         NVNminFilter min_filter;
         NVNmagFilter mag_filter;
-        float lod, expected[3];
+        float lod, expected[3], anisotropy;
     } cases[] = {
         {{0,0,2,2}, NVN_MIN_FILTER_LINEAR, NVN_MAG_FILTER_LINEAR, 1, {4,1,7}},
         {{1,1,3,3}, NVN_MIN_FILTER_LINEAR_MIPMAP_NEAREST, NVN_MAG_FILTER_LINEAR, 1, {12,9,15}},
@@ -62,6 +62,8 @@ static void check_sampler_reduction(NVNdevice *device, NVNqueue *queue, NVNforma
         {{1,1,3,3}, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR, NVN_MAG_FILTER_LINEAR, .5f, {8,1,15}},
         {{-.5f,0,.5f,1}, NVN_MIN_FILTER_LINEAR, NVN_MAG_FILTER_LINEAR, 0, {2,1,3}},  // repeat across the left edge
         {{1,1,3,3}, NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST, NVN_MAG_FILTER_NEAREST, 1, {15,15,15}},
+        {{0,0,4,1}, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR, NVN_MAG_FILTER_LINEAR, 0, {2,1,3},4},
+        {{0,0,1,4}, NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR, NVN_MAG_FILTER_LINEAR, 0, {3,1,5},4},
     };
     API(nvnSamplerBuilderSetWrapMode)(&sb, NVN_WRAP_MODE_REPEAT, NVN_WRAP_MODE_REPEAT, NVN_WRAP_MODE_REPEAT);
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
@@ -81,6 +83,7 @@ static void check_sampler_reduction(NVNdevice *device, NVNqueue *queue, NVNforma
             API(nvnSamplerBuilderSetMinMagFilter)(&sb, cases[i].min_filter, cases[i].mag_filter);
             API(nvnSamplerBuilderSetLodClamp)(&sb, cases[i].lod, cases[i].lod);
             API(nvnSamplerBuilderSetReductionFilter)(&sb, mode);
+            API(nvnSamplerBuilderSetMaxAnisotropy)(&sb, cases[i].anisotropy ? cases[i].anisotropy : 1);
             API(nvnSamplerPoolRegisterSamplerBuilder)(&sp, 256+mode, &sb);
             API(nvnCommandBufferDrawTexture)(&cb, API(nvnDeviceGetTextureHandle)(device,256,256+mode),
                                               &(NVNdrawTextureRegion){mode,0,mode+1,1}, &cases[i].region);
@@ -94,8 +97,9 @@ static void check_sampler_reduction(NVNdevice *device, NVNqueue *queue, NVNforma
         for (int mode = 0; mode < modes; ++mode) {
             float expected = cases[i].expected[mode];
             if (format == NVN_FORMAT_R32F) {
-                if (actual[mode] != expected)
-                    die("R32F sampler case %zu mode %d: got %g expected %g", i, mode, actual[mode], expected);
+                float error=actual[mode]-expected,tolerance=!mode && cases[i].anisotropy>1 ? .00001f : 0;
+                if (!(error>=-tolerance && error<=tolerance))
+                    die("R32F sampler case %zu mode %d: got %.9g expected %.9g", i, mode, actual[mode], expected);
             } else {
                 // Green falls as red rises, so their extrema come from different texels.
                 uint8_t rgba[] = {expected, 20-cases[i].expected[mode ? 3-mode : 0], 2*expected, 255};
@@ -111,6 +115,6 @@ static void check_sampler_reduction(NVNdevice *device, NVNqueue *queue, NVNforma
     API(nvnTextureFinalize)(&dst);
     API(nvnTextureFinalize)(&src);
     API(nvnMemoryPoolFinalize)(&pool);
-    puts(modes == 3 ? "Public NVN sampler reduction: average/min/max across mip levels, repeat edges, exact centers and nearest filtering"
-                    : "Public NVN sampler: average across six footprints; minimum and maximum require Apple GPU family 10");
+    puts(modes == 3 ? "Public NVN sampler reduction: average/min/max across mip levels, repeat edges, exact centers, anisotropic and nearest filtering"
+                    : "Public NVN sampler: average across eight footprints; minimum and maximum require Apple GPU family 10");
 }
