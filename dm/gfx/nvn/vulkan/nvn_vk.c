@@ -694,19 +694,13 @@ static VkFormat dummy_format(int num) {
     // An R32 dummy would synthesize alpha one even when cleared to zero.
     return num == 1 ? VK_FORMAT_R32G32B32A32_SINT : num == 2 ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
 }
-static VkImageView sampled_dummy(int view, int num) {
-    static VkImageView views[7][3];
-    if (view < 0) view = VK_IMAGE_VIEW_TYPE_2D;
-    if (view > VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || num < 0 || num > 2) return VK_NULL_HANDLE;
-    if (view == VK_IMAGE_VIEW_TYPE_2D && !num) return g_dummy_view;
-    if (views[view][num]) return views[view][num];
+static VkImageView empty_image(int view, VkFormat format, VkImageUsageFlags usage) {
     int one = view == VK_IMAGE_VIEW_TYPE_1D || view == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
     int cube = view == VK_IMAGE_VIEW_TYPE_CUBE || view == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-    VkFormat format = dummy_format(num);
     VkImageCreateInfo ii = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
         one ? VK_IMAGE_TYPE_1D : view == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
         format, {1, 1, 1}, 1, cube ? 6u : 1u, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+        usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
     VkImage image;
     if (vkCreateImage(g_dev, &ii, NULL, &image) != VK_SUCCESS) return VK_NULL_HANDLE;
     VkMemoryRequirements requirements; vkGetImageMemoryRequirements(g_dev, image, &requirements);
@@ -715,15 +709,24 @@ static VkImageView sampled_dummy(int view, int num) {
     VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, ii.arrayLayers};
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, image,
         (VkImageViewType)view, format, {0}, range};
-    VKCHECK(vkCreateImageView(g_dev, &vi, NULL, &views[view][num]));
+    VkImageView result;
+    VKCHECK(vkCreateImageView(g_dev, &vi, NULL, &result));
     VkCommandBuffer cb = once_begin(); to_general(cb, image, VK_IMAGE_ASPECT_COLOR_BIT);
     VkClearColorValue black = {0};
     vkCmdClearColorImage(cb, image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
     VkImageMemoryBarrier ready = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
-        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, image, range};
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &ready);
     once_end(cb);
+    return result;
+}
+static VkImageView sampled_dummy(int view, int num) {
+    static VkImageView views[7][3];
+    if (view < 0) view = VK_IMAGE_VIEW_TYPE_2D;
+    if (view > VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || num < 0 || num > 2) return VK_NULL_HANDLE;
+    if (view == VK_IMAGE_VIEW_TYPE_2D && !num) return g_dummy_view;
+    if (!views[view][num]) views[view][num] = empty_image(view, dummy_format(num), VK_IMAGE_USAGE_SAMPLED_BIT);
     return views[view][num];
 }
 
@@ -1405,7 +1408,7 @@ enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU };
 static int sampler_source(const char *kind) {
     return !strcmp(kind,"samp")?S_SAMP:!strcmp(kind,"samp_tex")?S_SAMP_TEX:!strcmp(kind,"samp_id")?S_SAMP_ID:!strcmp(kind,"samp_ubo")?S_SAMPU:S_NONE;
 }
-typedef struct { uint32_t binding, count, storage_image; uint8_t type, kind, skind, read_only, table, texel_atomic; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
+typedef struct { uint32_t binding, count, storage_image; uint8_t type, kind, skind, read_only, table, texel_atomic, storage_ms; int16_t slot, driver_sampler; int16_t reg, sreg; int32_t off, soff, view, num; dm_vk_split_handle twin; dm_vk_resource_shape shape; } sbind;
 #include "spv_sampler_pairs.inc"
 #include "spv_storage_texels.inc"
 typedef struct vin_module {
@@ -2863,13 +2866,13 @@ static int bind_texel(VkDescriptorSet ds, const sbind *b, int stage) {
 // The descriptor set is populated before the draw/dispatch. Only transfer ownership
 // to the GPU after a command using it has actually been recorded.
 static vtex *g_bound_images[6][32];
+static int g_bound_image_writes[6];
 static int mark_image_writes(int stage) {
-    int written = 0;
     for (int i = 0; i < 32; ++i) {
         vtex *v = g_bound_images[stage][i];
-        if (v) { v->gpu = 1; written = 1; }
+        if (v) v->gpu = 1;
     }
-    return written;
+    return g_bound_image_writes[stage];
 }
 static VkFormat storage_register_format(int bytes, int is_uint) {
     switch (bytes) {
@@ -2881,13 +2884,50 @@ static VkFormat storage_register_format(int bytes, int is_uint) {
         default: return VK_FORMAT_UNDEFINED;
     }
 }
+// Keep write sinks separate from sampled zeros and readonly image zeros. A
+// missing element in a descriptor array must not cancel its live neighbours.
+static VkImageView storage_dummy(const sbind *b) {
+    typedef struct empty_storage {
+        VkFormat format;
+        int dimension, read_only;
+        VkImageView view;
+        struct empty_storage *next;
+    } empty_storage;
+    static empty_storage *cache;
+    int dimension = b->view < 0 ? VK_IMAGE_VIEW_TYPE_2D : b->view;
+    if (dimension > VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || b->storage_ms) return VK_NULL_HANDLE;
+    VkFormat format = b->num ? dummy_format(b->num) : VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (b->texel_atomic) format = storage_register_format(4, b->num == 2);
+    if (b->storage_image > 1) format = spirv_texel_format(b->storage_image - 1).format;
+    if (!format) return VK_NULL_HANDLE;
+    VkFormatProperties properties;
+    vkGetPhysicalDeviceFormatProperties(g_pd, format, &properties);
+    VkFormatFeatureFlags required = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    if (b->texel_atomic) required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT;
+    if ((properties.optimalTilingFeatures & required) != required) return VK_NULL_HANDLE;
+    for (empty_storage *item = cache; item; item = item->next)
+        if (item->format == format && item->dimension == dimension && item->read_only == b->read_only)
+            return item->view;
+    VkImageView view = empty_image(dimension, format, VK_IMAGE_USAGE_STORAGE_BIT);
+    if (!view) return VK_NULL_HANDLE;
+    empty_storage *item = malloc(sizeof *item);
+    if (!item) die("Vulkan: cannot track an empty storage image");
+    *item = (empty_storage){format, dimension, b->read_only, view, cache};
+    cache = item;
+    return view;
+}
 static int bind_storage(VkDescriptorSet ds, const sbind *b, int stage) {
     if (b->kind != K_IMG || b->reg < 0 || b->reg >= 32 || !b->count || b->count > 32u - b->reg) return 0;
     VkDescriptorImageInfo images[32];
     for (uint32_t i = 0; i < b->count; ++i) {
         int slot = b->reg + i, tid = (int)(S.img[stage][slot] & 0xfffff);
         treg_t tr; vtex *v = registered_texture(tid, &tr);
-        if (!tr.ok) return 0;
+        if (!tr.ok) {
+            VkImageView view = storage_dummy(b);
+            if (!view) return 0;
+            images[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+            continue;
+        }
         if (!v || !(v->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return 0;
         if (!compatible_dimension(v, b->view)) return 0;
         fmt_t f = view_format(v, &tr.v, tr.has_v);
@@ -2921,6 +2961,7 @@ static int bind_storage(VkDescriptorSet ds, const sbind *b, int stage) {
     VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0,
                               b->count, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, images, NULL, NULL};
     vkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+    g_bound_image_writes[stage] |= !b->read_only;
     return 1;
 }
 static VkDescriptorSet allocate_shader_set(const shader_t *s) {
@@ -3020,6 +3061,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
         }
     }
     memset(g_bound_images[stage], 0, sizeof g_bound_images[stage]);
+    g_bound_image_writes[stage] = 0;
     VkDescriptorSet ds = allocate_shader_set(s);
     VkWriteDescriptorSet w[DM_VK_MAX_BINDINGS]; VkDescriptorBufferInfo bi[DM_VK_MAX_BINDINGS]; int nw = 0;
     int deferred_samplers[DM_VK_MAX_BINDINGS];

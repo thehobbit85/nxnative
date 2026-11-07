@@ -1,0 +1,9 @@
+stage cs
+tg 1 1 1
+b 0 simg 2 img 0 -1 - -1
+b 1 simg 1 img 2 -1 - -1
+b 2 simg 1 img 3 -1 - -1
+b 3 simg 1 img 4 -1 - -1
+b 4 simg 1 img 5 -1 - -1 ro
+b 5 cis 1 tex 0 -1 samp_tex 0 view=1 num=2
+b 6 ssbo 1 sbuf 0 -1 - -1
