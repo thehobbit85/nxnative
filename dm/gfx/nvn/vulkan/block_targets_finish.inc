@@ -9,9 +9,13 @@ static void block_targets_reload(void) {
         // A copy, another queue or a CPU update can replace the encoded
         // blocks while this attachment remains bound. Reload at command use.
         pass_end();
-        cpu_ready((uintptr_t)target->texture.mem,target->texture.L.size);
+        if (!target->base->f.depth) cpu_ready((uintptr_t)target->texture.mem,target->texture.L.size);
         VkDeviceSize offset=ring_alloc(target->bytes,16);
-        if (!storage_texels(&target->texture,target->region.imageSubresource.mipLevel,C->ringp+offset,
+        barrier_all(C->cb);
+        if (target->base->f.depth) {
+            VkBufferImageCopy source=target->region;source.bufferOffset=offset;
+            vkCmdCopyImageToBuffer(C->cb,target->base->img,VK_IMAGE_LAYOUT_GENERAL,C->ring,1,&source);
+        } else if (!storage_texels(&target->texture,target->region.imageSubresource.mipLevel,C->ringp+offset,
                             target->extent.bytes,target->bytes,target->extent,0))
             die("Vulkan: compressed attachment storage changed before drawing");
         VkBufferImageCopy copy={offset,0,0,{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{0,0,0},{P.ct[i]->w,P.ct[i]->h,1}};
@@ -21,22 +25,31 @@ static void block_targets_reload(void) {
     }
 }
 static void block_targets_finish(void) {
-    uint8_t *raw[8]={0};int any=0;
+    uint8_t *raw[8]={0};int any=0, decode=0;
     for (int i=0;i<P.n;i++) if (P.blocks[i].base && P.cv[i]) { any=1;break; }
     if (!any) return;
     pass_end();
     for (int i=0;i<P.n;i++) {
         const block_target *target=&P.blocks[i];
         if (!target->base || !P.cv[i]) continue;
+        VkDeviceSize offset=ring_alloc(target->bytes,16);
+        VkBufferImageCopy copy={offset,0,0,{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{0,0,0},{P.ct[i]->w,P.ct[i]->h,1}};
+        vkCmdCopyImageToBuffer(C->cb,P.ct[i]->img,VK_IMAGE_LAYOUT_GENERAL,C->ring,1,&copy);
+        if (target->base->f.depth) {
+            copy=target->region;copy.bufferOffset=offset;
+            barrier_all(C->cb);
+            vkCmdCopyBufferToImage(C->cb,C->ring,target->base->img,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+            barrier_all(C->cb);target->base->gpu=1;
+            continue;
+        }
         raw[i]=malloc(target->bytes);
         if (!raw[i]) die("Vulkan: compressed attachment readback allocation");
         atomic_fetch_add(&target->base->present_refs,1);
         atomic_fetch_add(&P.ct[i]->present_refs,1);
-        VkDeviceSize offset=ring_alloc(target->bytes,16);
-        VkBufferImageCopy copy={offset,0,0,{VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},{0,0,0},{P.ct[i]->w,P.ct[i]->h,1}};
-        vkCmdCopyImageToBuffer(C->cb,P.ct[i]->img,VK_IMAGE_LAYOUT_GENERAL,C->ring,1,&copy);
         post_add((post_t){.kind=3,.dst=raw[i],.src=C->ringp+offset,.n=target->bytes});
+        decode=1;
     }
+    if (!decode) return;
     mtl_wait(mtl_sub_commit(),UINT64_MAX);begin_segment();
     for (int i=0;i<P.n;i++) if (raw[i]) {
         block_target *target=&P.blocks[i];

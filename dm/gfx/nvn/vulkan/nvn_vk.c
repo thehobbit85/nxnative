@@ -2245,7 +2245,9 @@ static void set_rt(const p_set_rt *r) {
         int has_view=r->has_cview[i];
         tex_t shadow={.d={.target=NVN_TEXTURE_TARGET_2D}};
         vtex *v;
-        if (fmt_of(attachment->d.format).dec) {
+        fmt_t original=fmt_of(attachment->d.format);
+        int color_view=has_view && view->set_format && !fmt_of(view->format).depth;
+        if (original.dec || (original.depth && color_view)) {
             v=block_target_prepare(i,attachment,view,has_view);
             attachment=&shadow;has_view=0;
         } else v=tex_get(attachment,1);
