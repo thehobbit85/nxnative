@@ -11,7 +11,7 @@ typedef struct { uint32_t type, scalar, lanes, image, binding, dimension, array;
 typedef struct {
     texel_module code;
     reduction_id *ids;
-    uint32_t bound, glsl, floating, float2, float3, float4, sint, int2, int3, bool2;
+    uint32_t bound, glsl, floating, float2, float3, float4, sint, int2, int3, bool2, bool3;
     int failed;
 } reduction_module;
 
@@ -47,43 +47,51 @@ static uint32_t reduction_vector(reduction_module *m, uint32_t scalar, unsigned 
     REDUCTION_GLOBAL(m, 23, id, scalar, lanes);
     return id;
 }
+static uint32_t reduction_splat(reduction_module *m, uint32_t type, uint32_t value, unsigned lanes) {
+    uint32_t components[] = {value, value, value, value};
+    return reduction_value(m, 80, type, components, lanes);
+}
 static uint32_t reduction_mask(reduction_module *m, uint32_t condition, unsigned lanes) {
-    if (lanes == 2) return REDUCTION_VALUE(m, 80, m->bool2, condition, condition);
-    return REDUCTION_VALUE(m, 80, m->code.bool4, condition, condition, condition, condition);
+    uint32_t type = lanes == 2 ? m->bool2 : lanes == 3 ? m->bool3 : m->code.bool4;
+    return reduction_splat(m, type, condition, lanes);
 }
 static uint32_t reduction_component(reduction_module *m, uint32_t value, unsigned lane) {
     return REDUCTION_VALUE(m, 81, m->floating, value, lane);
 }
 
 static uint32_t reduction_level(reduction_module *m, uint32_t sampled, uint32_t image, uint32_t coordinate,
-                                uint32_t level, uint32_t linear, unsigned array, unsigned minimum,
+                                uint32_t level, uint32_t linear, unsigned dimensions, unsigned array, unsigned minimum,
                                 uint32_t offset_mask, uint32_t offset) {
+    uint32_t spatial = dimensions == 3 ? m->float3 : m->float2;
     uint32_t integer_level = REDUCTION_VALUE(m, 110, m->sint, level); // OpConvertFToS
-    uint32_t size = REDUCTION_VALUE(m, 103, array ? m->int3 : m->int2, image, integer_level);
+    uint32_t size = REDUCTION_VALUE(m, 103, array || dimensions == 3 ? m->int3 : m->int2, image, integer_level);
     if (array) size = REDUCTION_VALUE(m, 79, m->int2, size, size, 0, 1);
-    size = REDUCTION_VALUE(m, 111, m->float2, size); // OpConvertSToF
-    uint32_t xy = array ? REDUCTION_VALUE(m, 79, m->float2, coordinate, coordinate, 0, 1) : coordinate;
+    size = REDUCTION_VALUE(m, 111, spatial, size); // OpConvertSToF
+    uint32_t position = array ? REDUCTION_VALUE(m, 79, m->float2, coordinate, coordinate, 0, 1) : coordinate;
     uint32_t layer = array ? reduction_component(m, coordinate, 2) : 0;
     uint32_t zero = reduction_float(m, 0), half = reduction_float(m, .5f), one = reduction_float(m, 1);
-    uint32_t half2 = REDUCTION_VALUE(m, 80, m->float2, half, half);
-    uint32_t zero2 = REDUCTION_VALUE(m, 80, m->float2, zero, zero);
-    uint32_t scaled = REDUCTION_VALUE(m, 133, m->float2, xy, size);
-    uint32_t centred = REDUCTION_VALUE(m, 131, m->float2, scaled, half2);
-    uint32_t base = REDUCTION_EXT(m, m->float2, 8, centred); // GLSL Floor
-    uint32_t fraction = REDUCTION_VALUE(m, 131, m->float2, centred, base);
-    uint32_t nearest = REDUCTION_EXT(m, m->float2, 8, scaled);
-    uint32_t mask = reduction_mask(m, linear, 2);
-    base = REDUCTION_VALUE(m, 169, m->float2, mask, base, nearest);
-    fraction = REDUCTION_VALUE(m, 169, m->float2, mask, fraction, zero2);
-    uint32_t fx = reduction_component(m, fraction, 0), fy = reduction_component(m, fraction, 1);
-    uint32_t x_weight = REDUCTION_VALUE(m, 186, m->code.boolean, fx, zero);
-    uint32_t y_weight = REDUCTION_VALUE(m, 186, m->code.boolean, fy, zero);
-    base = REDUCTION_VALUE(m, 129, m->float2, base, half2);
+    uint32_t halves = reduction_splat(m, spatial, half, dimensions);
+    uint32_t zeros = reduction_splat(m, spatial, zero, dimensions);
+    uint32_t scaled = REDUCTION_VALUE(m, 133, spatial, position, size);
+    uint32_t centred = REDUCTION_VALUE(m, 131, spatial, scaled, halves);
+    uint32_t base = REDUCTION_EXT(m, spatial, 8, centred); // GLSL Floor
+    uint32_t fraction = REDUCTION_VALUE(m, 131, spatial, centred, base);
+    uint32_t nearest = REDUCTION_EXT(m, spatial, 8, scaled);
+    uint32_t mask = reduction_mask(m, linear, dimensions);
+    base = REDUCTION_VALUE(m, 169, spatial, mask, base, nearest);
+    fraction = REDUCTION_VALUE(m, 169, spatial, mask, fraction, zeros);
+    uint32_t weights[3];
+    for (unsigned axis = 0; axis < dimensions; axis++) {
+        uint32_t component = reduction_component(m, fraction, axis);
+        weights[axis] = REDUCTION_VALUE(m, 186, m->code.boolean, component, zero);
+    }
+    base = REDUCTION_VALUE(m, 129, spatial, base, halves);
     uint32_t result = 0;
-    for (unsigned tap = 0; tap < 4; tap++) {
-        uint32_t neighbor = REDUCTION_VALUE(m, 80, m->float2, tap & 1 ? one : zero, tap & 2 ? one : zero);
-        uint32_t point = REDUCTION_VALUE(m, 129, m->float2, base, neighbor);
-        point = REDUCTION_VALUE(m, 136, m->float2, point, size);
+    for (unsigned tap = 0; tap < (1u << dimensions); tap++) {
+        uint32_t components[] = {tap & 1 ? one : zero, tap & 2 ? one : zero, tap & 4 ? one : zero};
+        uint32_t neighbor = reduction_value(m, 80, spatial, components, dimensions);
+        uint32_t point = REDUCTION_VALUE(m, 129, spatial, base, neighbor);
+        point = REDUCTION_VALUE(m, 136, spatial, point, size);
         if (array) {
             uint32_t x = reduction_component(m, point, 0), y = reduction_component(m, point, 1);
             point = REDUCTION_VALUE(m, 80, m->float3, x, y, layer);
@@ -91,22 +99,25 @@ static uint32_t reduction_level(reduction_module *m, uint32_t sampled, uint32_t 
         uint32_t value = offset ? REDUCTION_VALUE(m, 88, m->float4, sampled, point, 2 | offset_mask, level, offset) :
                                  REDUCTION_VALUE(m, 88, m->float4, sampled, point, 2, level);
         if (!tap) { result = value; continue; }
-        uint32_t weight = tap == 1 ? x_weight : tap == 2 ? y_weight :
-            REDUCTION_VALUE(m, 167, m->code.boolean, x_weight, y_weight); // OpLogicalAnd
+        uint32_t weight = 0;
+        for (unsigned axis = 0; axis < dimensions; axis++) if (tap & (1u << axis))
+            weight = weight ? REDUCTION_VALUE(m, 167, m->code.boolean, weight, weights[axis]) : weights[axis];
         uint32_t reduced = REDUCTION_EXT(m, m->float4, minimum ? 37 : 40, result, value);
         result = REDUCTION_VALUE(m, 169, m->float4, reduction_mask(m, weight, 4), reduced, result);
     }
     return result;
 }
 
-static uint32_t reduction_gradient_lod(reduction_module *m, uint32_t image, uint32_t dx, uint32_t dy, unsigned array) {
+static uint32_t reduction_gradient_lod(reduction_module *m, uint32_t image, uint32_t dx, uint32_t dy,
+                                       unsigned dimensions, unsigned array) {
+    uint32_t spatial = dimensions == 3 ? m->float3 : m->float2;
     uint32_t zero = texel_constant(&m->code, m->sint, 0);
     if (!zero) m->failed = 1;
-    uint32_t size = REDUCTION_VALUE(m, 103, array ? m->int3 : m->int2, image, zero);
+    uint32_t size = REDUCTION_VALUE(m, 103, array || dimensions == 3 ? m->int3 : m->int2, image, zero);
     if (array) size = REDUCTION_VALUE(m, 79, m->int2, size, size, 0, 1);
-    size = REDUCTION_VALUE(m, 111, m->float2, size);
-    dx = REDUCTION_VALUE(m, 133, m->float2, dx, size);
-    dy = REDUCTION_VALUE(m, 133, m->float2, dy, size);
+    size = REDUCTION_VALUE(m, 111, spatial, size);
+    dx = REDUCTION_VALUE(m, 133, spatial, dx, size);
+    dy = REDUCTION_VALUE(m, 133, spatial, dy, size);
     uint32_t x = REDUCTION_VALUE(m, 148, m->floating, dx, dx); // OpDot
     uint32_t y = REDUCTION_VALUE(m, 148, m->floating, dy, dy);
     uint32_t squared = REDUCTION_EXT(m, m->floating, 40, x, y);
@@ -133,23 +144,27 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t dy = gradient ? p[next++] : 0;
     uint32_t offset = offset_mask ? p[next++] : 0;
     if (shader_bias && m->ids[shader_bias].type != m->floating) return 0;
-    if (!implicit && (m->ids[explicit_lod].type != (gradient ? m->float2 : m->floating) ||
-        (gradient && m->ids[dy].type != m->float2))) return 0;
-    if (offset && m->ids[offset].type != m->int2) return 0;
     uint32_t sampled_type = m->ids[p[3]].type;
     uint32_t image_type = m->ids[sampled_type].image;
-    if (!image_type || m->ids[image_type].dimension != 1 || m->ids[image_type].array > 1) return 0;
+    if (!image_type || m->ids[image_type].dimension < 1 || m->ids[image_type].dimension > 2 || m->ids[image_type].array > 1) return 0;
+    unsigned dimensions = m->ids[image_type].dimension + 1;
     unsigned array = m->ids[image_type].array;
+    if (dimensions == 3 && array) return 0;
+    uint32_t spatial = dimensions == 3 ? m->float3 : m->float2;
+    if (!implicit && (m->ids[explicit_lod].type != (gradient ? spatial : m->floating) ||
+        (gradient && m->ids[dy].type != spatial))) return 0;
+    if (offset && m->ids[offset].type != (dimensions == 3 ? m->int3 : m->int2)) return 0;
     uint32_t coordinate = p[4], coordinate_type = m->ids[coordinate].type;
     if (projected) {
-        if (array || m->ids[coordinate_type].scalar != m->floating || m->ids[coordinate_type].lanes < 3) return 0;
-        uint32_t xy = REDUCTION_VALUE(m, 79, m->float2, coordinate, coordinate, 0, 1);
+        if (array || m->ids[coordinate_type].scalar != m->floating || m->ids[coordinate_type].lanes <= dimensions) return 0;
+        uint32_t position = dimensions == 3 ? REDUCTION_VALUE(m, 79, m->float3, coordinate, coordinate, 0, 1, 2) :
+                                             REDUCTION_VALUE(m, 79, m->float2, coordinate, coordinate, 0, 1);
         // SPIR-V places q immediately after the spatial components. Any
         // extra components follow q and do not affect the projection.
-        uint32_t q = reduction_component(m, coordinate, 2);
-        uint32_t divisor = REDUCTION_VALUE(m, 80, m->float2, q, q);
-        coordinate = REDUCTION_VALUE(m, 136, m->float2, xy, divisor);
-    } else if (coordinate_type != (array ? m->float3 : m->float2)) return 0;
+        uint32_t q = reduction_component(m, coordinate, dimensions);
+        uint32_t divisor = reduction_splat(m, spatial, q, dimensions);
+        coordinate = REDUCTION_VALUE(m, 136, spatial, position, divisor);
+    } else if (coordinate_type != (array ? m->float3 : spatial)) return 0;
     uint32_t image = REDUCTION_VALUE(m, 100, image_type, p[3]);
     uint32_t levels = REDUCTION_VALUE(m, 106, m->sint, image);
     uint32_t last = REDUCTION_VALUE(m, 111, m->floating, levels);
@@ -164,7 +179,7 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
         // sampler has zero bias, so the original sampler and instruction bias
         // can be applied exactly once before selecting the contributing mips.
         lod = reduction_component(m, query, 1);
-    } else if (gradient) lod = reduction_gradient_lod(m, image, explicit_lod, dy, array);
+    } else if (gradient) lod = reduction_gradient_lod(m, image, explicit_lod, dy, dimensions, array);
     uint32_t bias = reduction_float(m, filter->bias);
     if (shader_bias) {
         bias = REDUCTION_VALUE(m, 129, m->floating, bias, shader_bias);
@@ -178,8 +193,8 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
     uint32_t linear = REDUCTION_VALUE(m, 186, m->code.boolean, selected, zero);
     lod = REDUCTION_EXT(m, m->floating, 43, lod, zero, last);
     uint32_t first = REDUCTION_EXT(m, m->floating, 8, lod), second = REDUCTION_EXT(m, m->floating, 9, lod);
-    uint32_t a = reduction_level(m, p[3], image, coordinate, first, linear, array, filter->minimum, offset_mask, offset);
-    uint32_t b = reduction_level(m, p[3], image, coordinate, second, linear, array, filter->minimum, offset_mask, offset);
+    uint32_t a = reduction_level(m, p[3], image, coordinate, first, linear, dimensions, array, filter->minimum, offset_mask, offset);
+    uint32_t b = reduction_level(m, p[3], image, coordinate, second, linear, dimensions, array, filter->minimum, offset_mask, offset);
     uint32_t value = REDUCTION_EXT(m, m->float4, filter->minimum ? 37 : 40, a, b);
     uint32_t copy[] = {m->float4, p[2], value};
     reduction_append(m, &m->code.body, 83, copy, 3);
@@ -187,9 +202,10 @@ static int reduction_sample(reduction_module *m, const uint32_t *p, unsigned len
 }
 
 static int reduction_query(reduction_module *m, const uint32_t *p, unsigned len, const sample_reduction *filter) {
-    if (len != 5 || p[1] != m->float2 || p[3] >= m->bound || p[4] >= m->bound || m->ids[p[4]].type != m->float2) return 0;
+    if (len != 5 || p[1] != m->float2 || p[3] >= m->bound || p[4] >= m->bound) return 0;
     uint32_t image_type = m->ids[m->ids[p[3]].type].image;
-    if (!image_type || m->ids[image_type].dimension != 1 || m->ids[image_type].array > 1) return 0;
+    if (!image_type || m->ids[image_type].dimension < 1 || m->ids[image_type].dimension > 2 || m->ids[image_type].array > 1) return 0;
+    if (m->ids[p[4]].type != (m->ids[image_type].dimension == 2 ? m->float3 : m->float2)) return 0;
     uint32_t query = REDUCTION_VALUE(m, 105, m->float2, p[3], p[4]);
     uint32_t raw = reduction_component(m, query, 1);
     raw = REDUCTION_VALUE(m, 129, m->floating, raw, reduction_float(m, filter->bias));
@@ -244,7 +260,8 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
     if (!m.glsl) { m.glsl = m.code.next++; needs_glsl = 1; }
     m.float2 = reduction_vector(&m, m.floating, 2); m.float3 = reduction_vector(&m, m.floating, 3); m.float4 = reduction_vector(&m, m.floating, 4);
     m.int2 = reduction_vector(&m, m.sint, 2); m.int3 = reduction_vector(&m, m.sint, 3);
-    m.bool2 = reduction_vector(&m, m.code.boolean, 2); m.code.bool4 = reduction_vector(&m, m.code.boolean, 4);
+    m.bool2 = reduction_vector(&m, m.code.boolean, 2); m.bool3 = reduction_vector(&m, m.code.boolean, 3);
+    m.code.bool4 = reduction_vector(&m, m.code.boolean, 4);
     for (size_t i = functions; i < count;) {
         const uint32_t *p = words + i; unsigned len = p[0] >> 16, op = p[0] & 0xffff;
         unsigned from = len, end = len;
@@ -261,7 +278,7 @@ static uint32_t *spv_sample_reduction(const uint32_t *words, size_t count, const
         }
         uint32_t binding = len >= 4 && p[3] < m.bound ? m.ids[p[3]].binding : 0;
         if (binding && ((op >= 87 && op <= 94) || op == 96 || op == 97 || op == 105 || (op >= 305 && op <= 315))) {
-            *reason = "reduction currently needs a direct 2D float sample or LOD query";
+            *reason = "reduction currently needs a direct 2D/3D float sample or LOD query";
             if (op == 105) {
                 if (!reduction_query(&m, p, len, filters + binding - 1)) goto fail;
             } else if ((op != 87 && op != 88 && op != 91 && op != 92) || !reduction_sample(&m, p, len, filters + binding - 1)) goto fail;
