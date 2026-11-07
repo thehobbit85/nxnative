@@ -33,7 +33,48 @@ static void geometry_pack(const dm_vk_geometry *geometry, uint32_t groups,
     }
 }
 
-static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx *indexed, uint32_t draw_index) {
+// Match the reference's list splitting. Each child keeps the guest draw ID,
+// first instance and primitive base while sizing its own capture/output data.
+static int geometry_split(shader_t *vertex, const p_draw *draw, const p_draw_idx *indexed,
+                          uint32_t draw_index, uint32_t primitive_base) {
+    int primitive=draw ? draw->prim : indexed->prim;
+    int width=primitive==0 ? 1 : primitive==1 ? 2 : primitive==4 ? 3 : primitive==10 ? 4 : primitive==12 ? 6 : 0;
+    if (!width || (indexed && S.restart.on)) return 0;
+    int count=draw ? draw->count : indexed->count;
+    int instances=draw ? draw->instances : indexed->instances;
+    if (count<width) return 0;
+    p_draw left=draw ? *draw : (p_draw){0}, right=left;
+    p_draw_idx indexed_left=indexed ? *indexed : (p_draw_idx){0}, indexed_right=indexed_left;
+    uint32_t right_base=primitive_base;
+    if (instances>1) {
+        int first=instances/2;
+        if (draw) {
+            left.instances=first;right.instances=instances-first;
+            right.base_instance=(uint32_t)draw->base_instance+(uint32_t)first;
+        } else {
+            indexed_left.instances=first;indexed_right.instances=instances-first;
+            indexed_right.base_instance=(uint32_t)indexed->base_instance+(uint32_t)first;
+        }
+    } else {
+        int primitives=count/width;
+        if (primitives<2) return 0;
+        int first=primitives/2*width;
+        right_base+=(uint32_t)(first/width);
+        if (draw) {
+            left.count=first;right.count=count-first;
+            right.first=(uint32_t)draw->first+(uint32_t)first;
+        } else {
+            indexed_left.count=first;indexed_right.count=count-first;
+            indexed_right.ibuf+=(uint64_t)first<<indexed->itype;
+        }
+    }
+    geometry_draw(vertex,draw ? &left : NULL,indexed ? &indexed_left : NULL,draw_index,primitive_base);
+    geometry_draw(vertex,draw ? &right : NULL,indexed ? &indexed_right : NULL,draw_index,right_base);
+    return 1;
+}
+
+static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx *indexed,
+                          uint32_t draw_index, uint32_t primitive_base) {
     if (!vertex || !vertex->mod || !g_vertex_stores || S.bst[3] || S.bst[4]) {
         RED_ONCE(122,"geometry capture needs a vertex shader with storage writes and no tessellation");
         return;
@@ -113,11 +154,18 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
             die("Vulkan: geometry topology refers to an uncaptured vertex");
     } else for (size_t i=0;i<map_words;i++) topology_map[i]-=lo;
     int64_t first=indexed ? (int64_t)lo+indexed->base_vertex : draw->first;
+    if (first<0 || (uint64_t)first+span>UINT64_C(0x100000000)) {
+        free(topology_map);free(order);
+        RED_ONCE(122,"geometry vertex range is outside 32-bit vertex IDs");return;
+    }
     uint64_t primitives=map_words/nvn_geo_width(topology);
     uint64_t groups=primitives*(uint64_t)instances*geometry.invocations;
     uint64_t records=capture_span*(uint64_t)instances;
     if (groups>UINT32_MAX || records>g_props.limits.maxStorageBufferRange/(GEO_CAPTURE_WORDS*4)) {
-        free(topology_map);free(order);RED_ONCE(122,"geometry capture exceeds the device's storage-buffer range");return;
+        free(topology_map);free(order);
+        if (!geometry_split(vertex,draw,indexed,draw_index,primitive_base))
+            RED_ONCE(122,"geometry capture exceeds the device's storage-buffer range");
+        return;
     }
     uint64_t emitted=groups*geometry.vertices;
     uint64_t output_width=geometry.output==1 ? 1 : geometry.output==6 ? 2 : 3;
@@ -142,19 +190,29 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
     if (alignment<g_props.limits.minUniformBufferOffsetAlignment) alignment=g_props.limits.minUniformBufferOffsetAlignment;
     if (alignment<g_props.limits.minTexelBufferOffsetAlignment) alignment=g_props.limits.minTexelBufferOffsetAlignment;
     VkDeviceSize total=0;
-    int bounded=first>=0 && (uint64_t)first+span<=UINT64_C(0x100000000) && records<=UINT32_MAX && groups<=UINT32_MAX &&
+    VkDeviceSize scratch_limit=getenv("DM_VK_TEST_GEOMETRY_LIMIT") ? 65536 : 256u<<20;
+    int bounded=records<=UINT32_MAX && groups<=UINT32_MAX &&
         (primitives+31)/32<=g_props.limits.maxComputeWorkGroupCount[0] &&
         (uint32_t)instances<=g_props.limits.maxComputeWorkGroupCount[1] && geometry.invocations<=g_props.limits.maxComputeWorkGroupCount[2] &&
         (groups+63)/64<=g_props.limits.maxComputeWorkGroupCount[0] && map_words<=g_props.limits.maxTexelBufferElements;
     for (unsigned i=0;i<sizeof sizes/sizeof *sizes;i++) {
         total=(total+alignment-1)/alignment*alignment;
-        if (total>(256u<<20) || sizes[i]>g_props.limits.maxStorageBufferRange || sizes[i]>(256u<<20)-total) { bounded=0; break; }
+        if (total>scratch_limit || sizes[i]>g_props.limits.maxStorageBufferRange || sizes[i]>scratch_limit-total) { bounded=0; break; }
         total+=sizes[i];
     }
-    if (!bounded) { free(topology_map);free(order); RED_ONCE(122,"geometry draw exceeds the current scratch/dispatch bounds"); return; }
+    if (!bounded) {
+        free(topology_map);free(order);
+        if (!geometry_split(vertex,draw,indexed,draw_index,primitive_base))
+            RED_ONCE(122,"geometry draw exceeds the current scratch/dispatch bounds");
+        return;
+    }
 
     // This buffer survives any guest/host synchronization inside the three
     // stages. Retire it with the last submission that references the draw.
+    // Complete prior children before their retained scratch exceeds the budget.
+    if (atomic_load(&g_extra_ring_bytes)>scratch_limit-total) {
+        mtl_wait(mtl_sub_commit(),UINT64_MAX);begin_segment();
+    }
     VkDeviceMemory memory;
     uint8_t *mapped;
     VkBuffer scratch=buf_new(total,ALL_BUF_USAGE,&memory,(void **)&mapped);
@@ -170,7 +228,7 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
     G.capture=(capture_draw){.records=ranges[0],.control=ranges[8]};
     G.capture.control.range=24;
     memcpy(mapped+ranges[4].offset,topology_map,map_words*4);free(topology_map);
-    uint32_t info[]={capture_span,(uint32_t)instances,0,0,(uint32_t)primitives,0,0,0};
+    uint32_t info[]={capture_span,(uint32_t)instances,0,0,(uint32_t)primitives,primitive_base,0,0};
     memcpy(mapped+ranges[3].offset,info,sizeof info);
     uint32_t control[]={(uint32_t)first,(uint32_t)capture_span,first_instance,(uint32_t)instances,0,(uint32_t)records};
     unsigned begin=0;
