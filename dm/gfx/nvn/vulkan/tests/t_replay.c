@@ -36,6 +36,7 @@ static prog_t layered_program[2]={{.nstage=2},{.nstage=2}};
 static prog_t geometry_program={.nstage=3};
 static prog_t geometry_explicit_program={.nstage=3};
 static prog_t wrapped_buffer_program={.nstage=1};
+static prog_t block_target_program={.nstage=2}, block_sample_program={.nstage=1};
 static prog_t wrapped_table_program={.nstage=1};
 static prog_t wrapped_array_program[2]={{.nstage=1},{.nstage=1}};
 static prog_t resource_shapes_program = {.nstage = 1};
@@ -86,6 +87,12 @@ int nvn_dpool_base(const void *pool, int texture) {
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
     for (unsigned form=0;form<2;form++) if (p==&wrapped_array_program[form]) {
         assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=2+form;return 1;
+    }
+    if (p==&block_target_program || p==&block_sample_program) {
+        memset(key,0,8);
+        if (p==&block_target_program && !stage) key[7]=0x35;
+        else { key[4]=0xfe;key[5]=0xed;key[6]=0x9f;key[7]=p==&block_target_program ? 1 : 2; }
+        return 1;
     }
     if (p==&wrapped_table_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=4;return 1; }
     if (p==&wrapped_buffer_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=1;return 1; }
@@ -3237,6 +3244,7 @@ static void typed_graphics(void) {
 #include "../../../tests/dlss_temporal_corpus.h"
 #include "feedback_capture.inc"
 #include "wrapped_buffer.inc"
+#include "block_targets.inc"
 #include "alpha.inc"
 #include "logic.inc"
 #include "split_handle.inc"
@@ -3290,6 +3298,7 @@ int main(void) {
     }
     if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
     if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }
+    if (getenv("DM_VK_TEST_BLOCK_TARGETS")) { block_targets(); return 0; }
     if (getenv("DM_VK_TEST_WRAPPED_BUFFER")) { wrapped_buffer(); return 0; }
     if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); sparse_mrt_outputs(); mixed_integer_outputs(); return 0; }
     if (getenv("DM_VK_TEST_ALPHA_COVERAGE")) { alpha_coverage(&logic_program[0],1); alpha_coverage(&logic_program[0],4); return 0; }
