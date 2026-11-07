@@ -179,10 +179,24 @@ static void closed_thread_wait(void) {
     assert(!pthread_join(pt, NULL));
     wait_finish(&w, 0, 0); event_close(replacement);
 }
+static void activity_retention(void) {
+    thr_t *target = new_thread(); sync_ref_t ref;
+    pthread_mutex_lock(&G);
+    assert(sync_open(target->handle, &ref));
+    target->activity_waiters = 1; target->exited = 1;
+    pthread_mutex_unlock(&G);
+    close_handle(target->handle);
+    pthread_mutex_lock(&G);
+    sync_close(ref);
+    int found = 0; for (thr_t *t = g_all; t; t = t->all) found |= t == target;
+    assert(found); // releasing a synchronization wait cannot free an active SetThreadActivity
+    target->activity_waiters = 0; thr_free(target);
+    pthread_mutex_unlock(&G);
+}
 int main(int argc, char **argv) {
     alarm(10); svc_thread_main_init();
-    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close"};
-    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait};
+    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close", "activity-retention"};
+    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait, activity_retention};
     for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
         if (argc > 1 && strcmp(argv[1], names[i])) continue;
         tests[i](); printf("PASS: %s\n", names[i]);

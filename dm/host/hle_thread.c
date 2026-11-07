@@ -689,7 +689,7 @@ static int sync_open(uint32_t h, sync_ref_t *ref) {   // holding G; no pseudo-ha
 static void sync_close(sync_ref_t ref) {   // holding G
     if (ref.type == O_THREAD) {
         thr_t *t = ref.obj;
-        if (!--t->sync_refs && t->closed && t->exited) thr_free(t);
+        if (!--t->sync_refs && t->closed && t->exited && !t->activity_waiters) thr_free(t);
     } else {
         event_t *e = ref.obj;
         if (!--e->refs) free(e);
@@ -1176,7 +1176,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
                 if (!warned && now_ns() - t0 > 1000000000ull) { warned = 1; LOG("[RED] thread %#x still not suspended after more than 1 second (stuck in host code?)", t->handle); }
             }
             if (!t->pause_req) r = R_BAD_STATE;   // a concurrent resume cancelled this request
-            if (!--t->activity_waiters && t->closed && t->exited) thr_free(t);
+            if (!--t->activity_waiters && t->closed && t->exited && !t->sync_refs) thr_free(t);
         } else {
             // The SVC may return through its fast path once bit 1 clears. Invalidate this
             // acknowledgement here so the next pause cannot return an empty, stale context.
