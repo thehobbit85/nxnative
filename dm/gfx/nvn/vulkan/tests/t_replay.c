@@ -677,6 +677,7 @@ static void float_image_views(void) {
 #include "sampler_reduction.inc"
 #include "cube_reduction.inc"
 #include "draw_texture_anisotropy.inc"
+#include "draw_texture_border.inc"
 #include "sampler_anisotropy.inc"
 #include "sampler_gather.inc"
 #include "bc_views.inc"
@@ -3395,6 +3396,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_SAMPLER_ARRAY")) { sampler_reduction_arrays(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_REDUCTION")) { sampler_reduction(); sampler_reduction_arrays(); sampler_reduction_compare(); return 0; }
     if (getenv("DM_VK_TEST_CUBE_REDUCTION")) { cube_reduction(); return 0; }
+    if (getenv("DM_VK_TEST_DRAW_BORDER")) { draw_texture_border();return 0; }
     if (getenv("DM_VK_TEST_DRAW_ANISOTROPY")) { draw_texture_anisotropy(); return 0; }
     if (getenv("DM_VK_TEST_GUEST_ANISOTROPY")) { sampler_anisotropy();return 0; }
     if (getenv("DM_VK_TEST_REDUCTION_GATHER")) { sampler_gather();return 0; }
@@ -3457,7 +3459,7 @@ int main(void) {
     feedback_capture();
     float_image_views();
     depth_image_views();
-    cube_ranges();cube_reduction();draw_texture_anisotropy();sampler_anisotropy();sampler_gather();
+    cube_ranges();cube_reduction();draw_texture_anisotropy();draw_texture_border();sampler_anisotropy();sampler_gather();
     storage_image_views();
     compressed_color_views();
     empty_sampled_slots();

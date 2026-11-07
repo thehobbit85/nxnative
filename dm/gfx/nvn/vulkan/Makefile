@@ -240,6 +240,7 @@ $(B)/t_replay: tests/empty_images.inc
 $(B)/t_replay: tests/empty_ms.inc
 $(B)/t_replay: tests/subresource_views.inc
 $(B)/t_replay: tests/sampler_reduction.inc tests/cube_reduction.inc tests/draw_texture_anisotropy.inc
+$(B)/t_replay: tests/draw_texture_border.inc
 $(B)/t_replay: tests/sampler_anisotropy.inc
 $(B)/t_replay: tests/sampler_gather.inc
 .PHONY: sampler-gather-fixture

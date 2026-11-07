@@ -45,13 +45,34 @@ typedef struct {
     int32_t reduction, linear, level0, level1;
     float span[2];
     int32_t taps;
+    float padding[3], border[4];
+    int32_t border_emu;
 } draw_texture_params;
+_Static_assert(offsetof(draw_texture_params,border)==64,"DrawTexture border push constant alignment");
+
+// Reuse Metal's two-stock-color identity when native custom borders are absent
+// or exhausted. Weighted filtering is linear in the border color, so the two
+// filtered values reconstruct it without changing the interior texels.
+static VkSampler draw_texture_average_sampler(samp_par p,border_view sampled,draw_texture_params *params,VkSampler *twin) {
+    int native=sampled.format!=VK_FORMAT_UNDEFINED && !(sampled.flags&BORDER_SWIZZLED) &&
+        g_custom_border_count<g_custom_border_limit;
+    int nearest,other;float factors[4];const uint8_t wrap[]={p.ws,p.wt,p.wr};
+    if (native || p.cmp_mode || (sampled.flags&BORDER_SWIZZLED) || !nvn_border(p.border,wrap,0,&nearest,&other,factors))
+        return sampler_for(p,sampled);
+    memcpy(p.border,nvn_mtl_border[nearest],sizeof p.border);
+    VkSampler sampler=sampler_for(p,sampled);
+    memcpy(p.border,nvn_mtl_border[other],sizeof p.border);
+    *twin=sampler_for(p,sampled);
+    memcpy(params->border,factors,sizeof factors);params->border_emu=1;
+    return sampler;
+}
 
 // The rectangle's texel-to-pixel ratio is constant. Select its mip footprint
 // once and let the shader combine the actual texels before any averaging.
-static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *tr, draw_texture_params *params) {
+static VkSampler draw_texture_sampler(samp_par p, const vtex *v, const treg_t *tr, draw_texture_params *params,VkSampler *twin) {
     border_view sampled = sampler_view(v,tr);
-    if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX) return sampler_for(p,sampled);
+    if (p.reduction != NVN_SAMPLER_REDUCTION_MIN && p.reduction != NVN_SAMPLER_REDUCTION_MAX)
+        return draw_texture_average_sampler(p,sampled,params,twin);
     float anisotropy=fminf(16,fmaxf(1,floorf(p.aniso)));
     if (g_minmax_filter && !p.cmp_mode && anisotropy<=g_max_anisotropy && native_reduction_view(v,tr,0,0)) return sampler_for(p,sampled);
     if (p.cmp_mode) {
@@ -94,7 +115,7 @@ static void draw_texture(const p_draw_tex *c) {
     static const uint32_t code[] =
 #include "draw_texture.frag.inc"
     ;
-    static shader_t fragment = {.key="draw-texture",.stage=1,.nb=1,.b={{.type=BT_CIS,.count=1}}};
+    static shader_t fragment = {.key="draw-texture",.stage=1,.nb=2,.b={{.type=BT_CIS,.count=1},{.binding=1,.type=BT_CIS,.count=1}}};
     static VkPipelineLayout layout;
     float dw = c->d.x1 - c->d.x0, dh = c->d.y1 - c->d.y0;
     if (!P.n || !dw || !dh) return;
@@ -103,8 +124,9 @@ static void draw_texture(const p_draw_tex *c) {
     vtex *v = registered_texture((int)(c->h & 0xfffff), &tr);
     int sid = (int)(c->h >> 20);
     draw_texture_params params = {{c->d.x0,c->d.y0}, {c->s.x0,c->s.y0}, {(c->s.x1-c->s.x0)/dw,(c->s.y1-c->s.y0)/dh}};
+    VkSampler twin=VK_NULL_HANDLE;
     pthread_mutex_lock(&g_rmu);
-    VkSampler sampler = v && sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? draw_texture_sampler(g_sreg[sid],v,&tr,&params) : VK_NULL_HANDLE;
+    VkSampler sampler = v && sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? draw_texture_sampler(g_sreg[sid],v,&tr,&params,&twin) : VK_NULL_HANDLE;
     pthread_mutex_unlock(&g_rmu);
     if (!v || !sampler) { RED_ONCE(102, "DrawTexture handle has no texture or sampler"); return; }
     int type = tr.has_v && tr.v.set_target ? tr.v.target : tr.t.d.target;
@@ -118,7 +140,12 @@ static void draw_texture(const p_draw_tex *c) {
     if (!source) return;
     if (!layout) layout = image_draw_layout(&fragment,sizeof params);
     clear_shader(&fragment,code,sizeof code);
-    VkDescriptorSet set = image_draw_set(&fragment,source,sampler);
+    VkDescriptorSet set=allocate_shader_set(&fragment);
+    VkDescriptorImageInfo images[]={{sampler,source,VK_IMAGE_LAYOUT_GENERAL},{twin ? twin : sampler,source,VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet writes[2];
+    for (int binding=0;binding<2;binding++) writes[binding]=(VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        NULL,set,binding,0,1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,images+binding};
+    vkUpdateDescriptorSets(g_dev,2,writes,0,NULL);
     if (S.color.blend_en) RED_ONCE(102, "DrawTexture with blending enabled draws without blending, as on Metal");
     for (int i = 0; i < P.n; ++i) {
         unsigned mask = S.chmask.mask >> (4*i) & 15;

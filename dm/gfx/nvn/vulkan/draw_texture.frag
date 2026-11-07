@@ -1,5 +1,6 @@
 #version 450
 layout(set=0, binding=0) uniform sampler2D sourceImage;
+layout(set=0, binding=1) uniform sampler2D borderTwin;
 layout(push_constant) uniform DrawTexture {
     vec2 dstOrigin;
     vec2 srcOrigin;
@@ -7,6 +8,8 @@ layout(push_constant) uniform DrawTexture {
     int reduction, linear, level0, level1;
     vec2 span;
     int taps;
+    vec4 border;
+    int borderEmulation;
 } region;
 layout(location=0) out vec4 color;
 
@@ -33,6 +36,7 @@ void main() {
     vec2 uv = texel / vec2(textureSize(sourceImage, 0));
     if (region.reduction == 0) {
         color = texture(sourceImage, uv);
+        if (region.borderEmulation!=0) color+=(texture(borderTwin,uv)-color)*region.border;
     } else {
         vec2 span=region.span/vec2(textureSize(sourceImage,0));
         for (int tap=0;tap<region.taps;tap++) {
