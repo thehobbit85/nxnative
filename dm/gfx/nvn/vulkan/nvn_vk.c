@@ -1491,7 +1491,7 @@ static VkSampler samp_get(int sid, border_view view, int reduce_in_shader) {
 enum { BT_UBO, BT_SSBO, BT_CIS, BT_TBUF, BT_UTB, BT_STB, BT_SIMG, BT_TEX, BT_SAMP };
 static const VkDescriptorType descriptor_type[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
-enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2, K_TEX_POOL, K_POOL_BOUNDS, K_GMEM_MAP, K_GMEM_LOG };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
+enum { K_UNK, K_CBUF, K_C1, K_SUPPORT, K_DRVCB, K_TEX, K_IMG, K_SBUF, K_TBUF, K_UBOP, K_TEXU, K_SAMPLER, K_SBUFU, K_TABLE_MAP, K_CAPTURE_RECORDS, K_CAPTURE_CONTROL, K_GEOMETRY, K_TEX_SLOTS, K_TEX_C2, K_TEX_POOL, K_POOL_BOUNDS, K_GMEM_MAP, K_GMEM_LOG, K_MESH };   // K_UBOP: a compute uniform buffer read through its address (dmsh_build.py ubo_ptr), bound as storage
 enum { S_NONE, S_SAMP, S_SAMP_TEX, S_SAMP_ID, S_SAMPU, S_SAMP_SLOTS, S_SAMP_C2, S_SAMP_POOL };
 static int sampler_source(const char *kind) {
     if (!strcmp(kind,"samp_pool")) return S_SAMP_POOL;
@@ -1526,6 +1526,7 @@ struct shader {
     dm_vk_feedback *feedback_layout;
     int capture_entry;
     dm_vk_geometry geometry;
+    dm_vk_meshstage mesh;
     char key[32]; int stage, guest_stage;   // 0 vertex, 1 fragment, 5 compute (NVN stage numbers)
     VkShaderModule mod; fragment_variant *fragment_variants; fragment_outputs outputs; VkDescriptorSetLayout dsl;
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup;
@@ -1876,7 +1877,7 @@ static shader_t *shader_by_key(const char *key) {
     dm_vk_capture capture = {0};
     for (char *ln = strtok(txt, "\n"); ln; ln = strtok(NULL, "\n")) {
         char a[16], ty[8], kind[16], sk[16], access[4] = ""; int b, cnt, reg, off, sreg, l, t;
-        if (sscanf(ln, "stage %15s", a) == 1) s->stage = !strcmp(a, "vs") ? 0 : !strcmp(a, "ps") ? 1 : !strcmp(a, "cs") ? 5 : !strcmp(a, "gs") ? 2 : -1;
+        if (sscanf(ln, "stage %15s", a) == 1) s->stage = !strcmp(a, "vs") ? 0 : !strcmp(a, "ps") ? 1 : !strcmp(a, "cs") ? 5 : !strcmp(a, "gs") ? 2 : !strcmp(a, "ts") ? 3 : !strcmp(a, "ms") ? 4 : -1;
         else if (!strncmp(ln,"tf ",3)) {
             if (!s->feedback_layout) s->feedback_layout = calloc(1, sizeof *s->feedback_layout);
             if (!s->feedback_layout) die("Vulkan: cannot allocate feedback layout");
@@ -1887,6 +1888,12 @@ static shader_t *shader_by_key(const char *key) {
         }
         else if (!strncmp(ln,"geometry ",9)) {
             if (dm_vk_geometry_line(ln,strlen(ln),s->stage,&s->geometry)) goto bad_capture;
+        }
+        else if (!strncmp(ln,"mesh ",5)) {
+            if (dm_vk_meshstage_line(ln,strlen(ln),&s->mesh)) goto bad_capture;
+        }
+        else if (!strncmp(ln,"meshv ",6) || !strncmp(ln,"meshp ",6)) {
+            if (dm_vk_meshstage_map(ln,strlen(ln),ln[4]=='v',&s->mesh)) goto bad_capture;
         }
         else if (sscanf(ln, "tg %u %u %u", &s->tg[0], &s->tg[1], &s->tg[2]) == 3) {}
         else if (!strncmp(ln, "c1 ", 3)) { size_t n = strlen(ln + 3) / 2; s->c1 = malloc(n + 16); s->c1_len = (uint32_t)n; for (size_t i = 0; i < n; i++) sscanf(ln + 3 + 2 * i, "%2hhx", &s->c1[i]); }
@@ -1910,6 +1917,10 @@ static shader_t *shader_by_key(const char *key) {
                       !strcmp(ty, "stb") ? BT_STB : !strcmp(ty, "simg") ? BT_SIMG : !strcmp(ty, "tex") ? BT_TEX : BT_SAMP;
             e->kind = !strcmp(kind, "cbuf") ? K_CBUF : !strcmp(kind, "c1") ? K_C1 : !strcmp(kind, "support") ? K_SUPPORT : !strcmp(kind, "drvcb") ? K_DRVCB : !strcmp(kind, "tex") ? K_TEX :
                       !strcmp(kind, "img") ? K_IMG : !strcmp(kind, "sbuf") ? K_SBUF : !strcmp(kind, "sbuf_ubo") ? K_SBUFU : !strcmp(kind, "tbuf") ? K_TBUF : !strcmp(kind, "ubo_ptr") ? K_UBOP : !strcmp(kind, "tex_ubo") ? K_TEXU : K_UNK;
+            if (!strcmp(kind,"mesh")) {
+                if (reg<0 || reg>2 || cnt!=1 || e->type!=(reg==2 ? BT_UBO : BT_SSBO)) goto bad_capture;
+                e->kind=K_MESH;
+            }
             if (!strcmp(kind,"geometry") && reg>=0 && reg<5) e->kind=K_GEOMETRY;
             if (!strcmp(kind,"geometry") && reg == 5 && e->type == BT_UBO) e->kind=K_CAPTURE_CONTROL;
             if (!strcmp(kind,"tex_slots")) e->kind=K_TEX_SLOTS;
@@ -2013,6 +2024,16 @@ static shader_t *shader_by_key(const char *key) {
     }
     free(txt);
     s->guest_stage=s->geometry.stride && !s->geometry.reader ? 2 : s->stage;
+    if (s->mesh.words) {
+        unsigned seen=0;
+        uint32_t bindings[]={s->mesh.input_binding,s->mesh.output_binding,s->mesh.control_binding};
+        for (int i=0;i<s->nb;i++) if (s->b[i].kind==K_MESH) {
+            if (s->b[i].binding!=bindings[s->b[i].reg]) goto bad_mesh;
+            seen|=1u<<s->b[i].reg;
+        }
+        if ((seen&6)!=6 || (s->mesh.task && !(seen&1))) goto bad_mesh;
+        s->stage=5;
+    }
     if (s->stage==2) { free(spv); return s; } // Its exported compute/reader family executes the draw.
     if (s->stage < 0) { LOG("[RED] vk: shader %s needs a stage the renderer does not execute", key); free(spv); return s; }
     VkShaderStageFlags sf = s->stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : s->stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
@@ -2058,6 +2079,9 @@ static shader_t *shader_by_key(const char *key) {
     s->dsl = shader_layout(s);
     if (!s->dsl) { LOG("[RED] vk: shader %s descriptor layout exceeds device support", key); s->mod=VK_NULL_HANDLE; }
     return s;
+bad_mesh:
+    LOG("[RED] vk: shader %s has invalid task/mesh helper bindings",key);
+    free(spv); return s;
 bad_capture:
     LOG("[RED] vk: shader %s has an invalid feedback capture interface",key);
     free(txt); free(spv); return s;
@@ -2994,7 +3018,7 @@ static int prepare_storage(shader_t **first, shader_t **second) {
         uint32_t texel_count=0;
         for (int i = 0; i < s->nb; i++) {
             const sbind *b = &s->b[i];
-            if (b->kind==K_GEOMETRY) continue;
+            if (b->kind==K_GEOMETRY || b->kind==K_MESH) continue;
             uint32_t count = is_texel(b) ? b->count : 1;
             if (is_texel(b)) {
                 if (count>MAX_STAGE_TEXELS-texel_count) {
@@ -3404,7 +3428,7 @@ static VkDescriptorSet write_set(shader_t *s, int stage, const capture_draw *cap
         const sbind *b = &s->b[i];
         if (b->type == BT_SAMP) { deferred_samplers[ndeferred++] = i; continue; }
         VkWriteDescriptorSet *x = &w[nw]; *x = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds, b->binding, 0, 1};
-        if (b->kind==K_GEOMETRY) { if (!write_geometry_binding(ds,b)) return VK_NULL_HANDLE; continue; }
+        if (b->kind==K_GEOMETRY || b->kind==K_MESH) { if (!write_geometry_binding(ds,b)) return VK_NULL_HANDLE; continue; }
         if (is_texel(b)) { if (!bind_texel(ds, b, stage)) return VK_NULL_HANDLE; continue; }
         if (b->type == BT_SIMG) {
             if (!bind_storage(ds, b, stage)) {
@@ -3612,7 +3636,7 @@ static void geometry_draw(shader_t *vertex, const p_draw *draw, const p_draw_idx
 static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_index) {
     g_nwb = 0;
     if (g_pass_shader_writes) pass_end(); // order prior vertex/fragment storage writes before the next command
-    if (!S.bst[0]) SKIP(0);
+    if (!G.phase && !S.bst[0]) SKIP(0);
     shader_t *vs = NULL, *fs = NULL;
     for (int st = 0; st < (S.rasterizer_discard ? 1 : 2); st++) {   // the vertex shader of the program bound to the vertex stage, the fragment shader of the one bound to the fragment stage (cached by program and serial)
         const prog_t *p = S.bst[st]; if (!p) continue;
@@ -3627,7 +3651,7 @@ static void draw_direct(const p_draw *dw, const p_draw_idx *di, uint32_t draw_in
     if (G.phase) { vs=G.vertex; if (G.phase==1) fs=NULL; }
     if (vk_skip() & SK_DRAW) SKIP(4);
     if (!G.phase && S.bst[2]) { geometry_draw(vs,dw,di,draw_index,0); return; }
-    if (S.bst[3] || S.bst[4]) { RED_ONCE(32,"tessellation replay remains unavailable"); SKIP(4); }
+    if (!G.phase && (S.bst[3] || S.bst[4])) { RED_ONCE(32,"tessellation replay remains unavailable"); SKIP(4); }
     if (!vs || !vs->mod || (fs && !fs->mod)) SKIP(1);
     uint32_t layers=vs->layer_output && G.phase!=1 ? P.max_layers : 1;
     if (P.layers!=layers) { pass_end(); P.layers=layers; }
@@ -3808,8 +3832,9 @@ static int read_draw_args(uint64_t address, void *out, size_t size) {
     memcpy(out,(const void *)(uintptr_t)address,size);
     return 1;
 }
+#include "mesh_replay.inc"
 static void draw(const p_draw *dw, const p_draw_idx *di) {
-    if (dw && dw->prim == DM_PRIM_MESH_TASKS) { RED_ONCE(31,"mesh task draws require mesh stage replay"); return; }
+    if (dw && dw->prim == DM_PRIM_MESH_TASKS) { mesh_draw(dw); return; }
     uint64_t args = dw ? dw->ind : di->ind;
     uint64_t counter = dw ? dw->mdi_cnt : di->mdi_cnt;
     uint32_t index = (uint32_t)(dw ? dw->mdi_i : di->mdi_i);
@@ -3919,7 +3944,7 @@ static void dispatch(const p_dispatch *d) {
     unsigned h = (unsigned)(((uintptr_t)p >> 4) ^ p->serial) % 256;
     if (pc[h].p != p || pc[h].ser != p->serial) {
         pc[h].p = p; pc[h].ser = p->serial; pc[h].cs = NULL;
-        for (unsigned i = 0; i < p->nstage; i++) { uint8_t md[8]; if (!prog_key(p, i, md)) continue; shader_t *sh = shader_get(md); if (sh->stage == 5) pc[h].cs = sh; }
+        for (unsigned i = 0; i < p->nstage; i++) { uint8_t md[8]; if (!prog_key(p, i, md)) continue; shader_t *sh = shader_get(md); if (sh->guest_stage == 5) pc[h].cs = sh; }
     }
     shader_t *cs = pc[h].cs; if (!cs || !cs->mod) { RED_ONCE(64, "compute program without a usable compute shader: dispatch skipped"); return; }
     pass_end();

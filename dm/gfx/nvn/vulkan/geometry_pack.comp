@@ -5,10 +5,20 @@ layout(binding=0,std430) readonly buffer Raw { uint raw[]; };
 layout(binding=1,std430) buffer Packed { uint packed[]; };
 layout(binding=2,std430) buffer Counts { uint counts[]; };
 layout(binding=3,std430) buffer Arguments { uint arguments[]; };
-layout(push_constant) uniform Parameters { uint groups, stride, topology, capacity; };
+layout(push_constant) uniform Parameters { uint groups, stride, topology, capacity;
+#if MESH
+    uint max_primitives;
+#endif
+};
 shared uint sums[64];
 
 uint group_vertices(uint group, bool write_output, uint offset) {
+#if MESH
+    uint count=min(raw[group*stride+topology]>>24,max_primitives)*3;
+    if (write_output && offset<=capacity && count<=capacity-offset)
+        for (uint i=0;i<count;i++) packed[offset+i]=group*max_primitives*3+i;
+    return count;
+#else
     uint a=0, b=0, vertices=0, written=0;
     for (uint i=0; i<stride; i++) {
         uint value=raw[group*stride+i];
@@ -26,6 +36,7 @@ uint group_vertices(uint group, bool write_output, uint offset) {
         a=b; b=value; vertices++;
     }
     return written;
+#endif
 }
 
 void inclusive_scan(uint lane) {
@@ -60,7 +71,11 @@ void main() {
         offset+=count;
     }
     if (lane==0) {
+#if MESH
+        uint width=3;
+#else
         uint width=topology==1 ? 1 : topology==6 ? 2 : 3;
+#endif
         arguments[0]=min(sums[63],capacity-capacity%width);
         arguments[1]=1; arguments[2]=0; arguments[3]=0; arguments[4]=0;
     }

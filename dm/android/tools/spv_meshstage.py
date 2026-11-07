@@ -236,3 +236,76 @@ def lower(data, info, offsets):
         packed.extend(i)
     for item in code: packed.extend(item)
     return struct.pack(f'<{len(packed)}I', *packed), dict(input_binding=binding, output_binding=binding + 1, control_binding=binding + 2)
+
+
+def reader(info):
+    """Expand triangle corners while retaining the shared stage-memory layout.
+
+    Each corner gets its primitive's attributes. This preserves flat attributes
+    even when neighboring triangles share all three mesh vertex indices.
+    """
+    lay, size = layout(info)
+    if info['kind'] != 'ms': raise ValueError('raster reader needs a mesh stage')
+    m = Module(struct.pack('<5I', 0x07230203, 0x10000, 0, 1, 0))
+    void = m.ty(19); function = m.ty(33, void); f32 = m.ty(22, 32)
+    vector = m.ty(23, f32, 4)
+    array = m.aggregate(29, m.uint); m.decorate(array, 6, 4)
+    block = m.aggregate(30, array); m.decorate(block, 3)
+    m.annotations.append(instruction(72, block, 0, 35, 0))
+    storage = m.variable(block, 2, 'dm_mesh_output')
+    m.decorate(storage, 34, 0); m.decorate(storage, 33, 0)
+    m.annotations.append(instruction(72, block, 0, 24))
+    vertex, vertex_type = m.builtin(42)
+    entry = m.ident()
+    code = [instruction(54, void, entry, 0, function), instruction(248, m.ident())]
+    def value(op, *args, ty=None):
+        return m.value(code, op, m.uint if ty is None else ty, *args)
+    def constant(number): return m.const(number)
+    def add(left, right): return value(128, left, right)
+    def multiply(left, right): return value(132, left, right)
+    pointer = m.ty(32, 2, m.uint)
+    def load(index):
+        return value(61, value(65, storage, constant(0), index, ty=pointer))
+    index = value(124, value(61, vertex, ty=vertex_type))
+    corners = info['max_p'] * 3
+    group = value(134, index, constant(corners))
+    corner = value(137, index, constant(corners))
+    primitive = value(134, corner, constant(3))
+    base = multiply(group, constant(size // 4))
+    byte = add(constant(lay[3] + 4), corner)
+    packed = load(add(base, value(194, byte, constant(2))))
+    shift = multiply(value(199, byte, constant(3)), constant(8))
+    mesh_vertex = value(199, value(194, packed, shift), constant(255))
+    valid = value(176, mesh_vertex, constant(info['max_v']), ty=m.boolean)
+    mesh_vertex = value(169, valid, mesh_vertex, constant(0))
+    stride = (len(info['vertex']) + len(info['primitive'])) * 32
+    def attribute_base(element):
+        offset = add(multiply(value(134, element, constant(32)), constant(stride)), value(137, element, constant(32)))
+        return add(add(base, constant(lay[2] // 4)), offset)
+    vertex_base, primitive_base = attribute_base(mesh_vertex), attribute_base(primitive)
+    outputs = {}
+    for per_primitive, components in ((False, info['vertex']), (True, info['primitive'])):
+        for component_index, (location, component) in enumerate(components):
+            existing = outputs.setdefault(location, (per_primitive, {}))
+            if existing[0] != per_primitive: raise ValueError('mesh vertex and primitive locations overlap')
+            word = component_index + (len(info['vertex']) if per_primitive else 0)
+            address = add(primitive_base if per_primitive else vertex_base, constant(word * 32))
+            existing[1][component] = value(124, load(address), ty=f32)
+    interfaces = list(m.interfaces)
+    for location, (per_primitive, components) in outputs.items():
+        output = m.variable(vector, 3)
+        interfaces.append(output)
+        m.decorate(output, 11 if location is None else 30, 0 if location is None else location)
+        if per_primitive: m.decorate(output, 14)  # Flat
+        values = [components.get(c, m.const(0x3f800000 if c == 3 else 0, f32)) for c in range(4)]
+        if location is None:
+            values = [value(169, valid, item, m.const(0x40000000 if c == 0 else 0x3f800000 if c == 3 else 0, f32), ty=f32)
+                      for c, item in enumerate(values)]
+        code.append(instruction(62, output, value(80, *values, ty=vector)))
+    code += [instruction(253), instruction(56)]
+    instructions = [instruction(17, 1), instruction(14, 0, 1),
+                    instruction(15, 0, entry, 0x6e69616d, 0, *interfaces)]
+    words = [0x07230203, 0x10000, 0, m.next_id, 0]
+    for item in instructions + m.names + m.annotations + m.declarations + code:
+        words.extend(item)
+    return struct.pack(f'<{len(words)}I', *words)
