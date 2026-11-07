@@ -177,6 +177,16 @@ fixture: $(B)/shaders/000000000000006e.spv $(B)/shaders/000000000000006f.spv
 $(B)/t_replay: tests/storage_views.inc tests/bc_views.inc
 $(B)/t_replay: tests/empty_images.inc
 $(B)/t_replay: tests/empty_ms.inc
+$(B)/t_replay: tests/subresource_views.inc
+fixture: $(B)/shaders/0000000000000072.spv $(B)/shaders/0000000000000073.spv
+$(B)/shaders/0000000000000072.spv: tests/subresource_views.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 cis 1 tex 1 -1 samp_tex 1\nb 2 simg 1 img 0 -1 - -1\nb 3 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
+$(B)/shaders/0000000000000073.spv: tests/subresource_views.comp
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 -DVOLUME $< -o $@
+	printf 'stage cs\ntg 1 1 1\nb 0 cis 1 tex 0 -1 samp_tex 0\nb 1 simg 1 img 0 -1 - -1\nb 2 ssbo 1 sbuf 0 -1 - -1\n' > $(@:.spv=.vk.txt)
 fixture: $(B)/shaders/0000000000000071.spv
 $(B)/shaders/0000000000000071.spv: tests/empty_ms.comp tests/empty_ms.vk.txt
 	mkdir -p $(@D)
