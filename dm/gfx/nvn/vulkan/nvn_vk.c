@@ -2186,9 +2186,9 @@ static void timestamp_cut(void) {
     post_add((post_t){.kind=POST_TIME_BOUNDARY,.samples=&page->samples[slot]});
     C->raster_draws=0; C->cut_copy=0;
 }
-static uint32_t attachment_layers(const vtex *v, VkImageView view) {
-    for (int i=0; i<v->nviews; i++) if (v->views[i].v==view) return v->views[i].key.range.layerCount;
-    return 1;
+static image_view_key attachment_key(const vtex *v, VkImageView view) {
+    for (int i=0; i<v->nviews; i++) if (v->views[i].v==view) return v->views[i].key;
+    return (image_view_key){.range={.layerCount=1}};
 }
 static void set_rt(const p_set_rt *r) {
     int timing=g_segment_timestamps && C->qp;
@@ -2204,7 +2204,7 @@ static void set_rt(const p_set_rt *r) {
         vtex *v = tex_get(r->color[i], 1); if (!v) continue;
         P.ct[i] = v; P.cv[i] = tex_view(v, r->color[i], &r->cview[i], r->has_cview[i], -1, 1);
         if (!P.cv[i]) { P.ct[i] = NULL; continue; }
-        uint32_t layers=attachment_layers(v,P.cv[i]);
+        uint32_t layers=attachment_key(v,P.cv[i]).range.layerCount;
         if (layers<P.max_layers) P.max_layers=layers;
         P.cf[i] = view_format(v, &r->cview[i], r->has_cview[i]).f;
         uint32_t lv = r->has_cview[i] && r->cview[i].set_levels ? r->cview[i].base_level : 0, w = v->w >> lv ? v->w >> lv : 1, h = v->h >> lv ? v->h >> lv : 1;
@@ -2218,7 +2218,7 @@ static void set_rt(const p_set_rt *r) {
                                if ((v->w >> lv) < P.w) P.w = v->w >> lv ? v->w >> lv : 1; if ((v->h >> lv) < P.h) P.h = v->h >> lv ? v->h >> lv : 1; }
     }
     P.samples = P.dv ? P.dt->samples : 0;
-    if (P.dv) { uint32_t layers=attachment_layers(P.dt,P.dv); if (layers<P.max_layers) P.max_layers=layers; }
+    if (P.dv) { uint32_t layers=attachment_key(P.dt,P.dv).range.layerCount; if (layers<P.max_layers) P.max_layers=layers; }
     for (int i = 0; i < P.n; i++) if (P.cv[i]) {
         if (P.samples && P.samples != P.ct[i]->samples) P.incompatible_samples = 1;
         P.samples = P.ct[i]->samples;
@@ -3805,13 +3805,36 @@ static void clear_masked_color(int slot, unsigned mask, VkClearColorValue value,
         P.cdrawn[slot] = 1;
     }
 }
+static VkExtent2D attachment_size(const vtex *v, image_view_key key) {
+    uint32_t w=v->w>>key.range.baseMipLevel, h=v->h>>key.range.baseMipLevel;
+    return (VkExtent2D){w ? w : 1,h ? h : 1};
+}
+static VkImageView attachment_slice(vtex *v, image_view_key key, uint32_t layer) {
+    tex_t texture={.d={.target=v->target}};
+    view_t view={.set_levels=1,.base_level=key.range.baseMipLevel,.nlevels=1,
+        .set_layers=1,.min_layer=key.range.baseArrayLayer+layer,.nlayers=1};
+    fmt_t format=v->f;format.f=key.format;
+    return tex_view_format(v,&texture,&view,1,-1,VIEW_ATTACHMENT,format);
+}
 static void clear_color(const p_clear_color *c) {
     if (P.incompatible_samples || c->index < 0 || c->index >= P.n || !P.cv[c->index] || !(c->mask & 15)) return;
-    VkClearRect r = {.rect = render_scissor(), .layerCount = 1};
+    vtex *texture=P.ct[c->index];
+    image_view_key key=attachment_key(texture,P.cv[c->index]);
+    VkExtent2D size=attachment_size(texture,key);
+    VkClearRect r = {.rect = S.has_sc ? clipped_rect(S.sc,size.width,size.height) : (VkRect2D){{0,0},size}, .layerCount = 1};
     if (!r.rect.extent.width || !r.rect.extent.height) return;
     P.cwr[c->index] = 1;
     enum clear_type type = clear_color_type(P.cf[c->index]);
     VkClearColorValue value = clear_value(c->rgba, type);
+    if (key.range.layerCount>1 || size.width!=P.w || size.height!=P.h) {
+        pass_end();
+        for (uint32_t layer=0;layer<key.range.layerCount;layer++) {
+            VkImageView view=attachment_slice(texture,key,layer);
+            if (view) clear_color_view(view,key.format,texture->samples,size,r.rect,c->mask&15,value);
+        }
+        if (texture->linrow && !P.clv[c->index] && !P.cly[c->index]) { lin_writeback(texture); barrier_all(C->cb); }
+        return;
+    }
     if ((c->mask & 15) != 15) {
         clear_masked_color(c->index, c->mask & 15, value, r.rect);
         return;
@@ -3826,21 +3849,21 @@ static void clear_color(const p_clear_color *c) {
 }
 // vkCmdClearAttachments replaces all eight stencil bits. A rasterized
 // REPLACE applies the guest's write mask and leaves every color target alone.
-static void clear_masked_stencil(const p_clear_ds *c, VkRect2D rect, float depth) {
+static void draw_clear_stencil(const p_clear_ds *c, VkRect2D rect, float depth, const rp_desc *pass) {
     static const uint32_t code[] =
 #include "clear_stencil.frag.inc"
     ;
     static shader_t fragment = {.key = "clear-stencil", .stage = 1};
     pso_key k = {.vs = clear_vertex(), .fs = clear_shader(&fragment, code, sizeof code),
-        .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .nc = P.n, .df = P.dt->f.f, .stencil = 1, .samples = P.samples};
-    memcpy(k.cf, P.cf, sizeof k.cf);
+        .prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .nc = pass->n, .df = pass->df, .stencil = 1, .samples = pass->samples};
+    memcpy(k.cf, pass->cf, sizeof k.cf);
     k.ds = (ds_st){.dt = !!c->depth_mask, .dw = !!c->depth_mask, .df = NVN_COMPARE_FUNC_ALWAYS,
         .st = 1, .sf_f = NVN_COMPARE_FUNC_ALWAYS, .sf_b = NVN_COMPARE_FUNC_ALWAYS,
         .zpass_f = NVN_STENCIL_OP_REPLACE, .zpass_b = NVN_STENCIL_OP_REPLACE};
     VkPipeline pipeline = pso_get(&k, clear_layout());
-    if (!pipeline || !pass_begin()) return;
+    if (!pipeline) return;
     VkCommandBuffer cb = C->cb;
-    clear_draw_state(pipeline, rect, (VkExtent2D){P.w, P.h}, depth);
+    clear_draw_state(pipeline, rect, (VkExtent2D){pass->w, pass->h}, depth);
     vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
     vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_AND_BACK, (uint32_t)c->stencil_mask & 0xff);
     vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_AND_BACK, (uint32_t)c->stencil & 0xff);
@@ -3848,12 +3871,35 @@ static void clear_masked_stencil(const p_clear_ds *c, VkRect2D rect, float depth
 }
 static void clear_ds(const p_clear_ds *c) {
     if (!P.dt) return;
-    VkClearRect r = {.rect = render_scissor(), .layerCount = 1};
+    image_view_key key=attachment_key(P.dt,P.dv);
+    VkExtent2D size=attachment_size(P.dt,key);
+    VkClearRect r = {.rect = S.has_sc ? clipped_rect(S.sc,size.width,size.height) : (VkRect2D){{0,0},size}, .layerCount = 1};
     VkImageAspectFlags asp = (c->depth_mask ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (P.dt->f.stencil && (c->stencil_mask & 0xff) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
     if (!asp || !r.rect.extent.width || !r.rect.extent.height) return;
     float depth = c->depth > 0 ? fminf(c->depth, 1) : 0;
+    if (key.range.layerCount>1 || size.width!=P.w || size.height!=P.h) {
+        pass_end();
+        for (uint32_t layer=0;layer<key.range.layerCount;layer++) {
+            VkImageView view=attachment_slice(P.dt,key,layer);
+            if (!view) continue;
+            rp_desc pass={.dv=view,.df=key.format,.stencil=P.dt->f.stencil,.dl=VK_ATTACHMENT_LOAD_OP_LOAD,
+                .sl=VK_ATTACHMENT_LOAD_OP_LOAD,.w=size.width,.h=size.height,.samples=P.dt->samples,.layout=VK_IMAGE_LAYOUT_GENERAL};
+            begin_tracked_pass(&pass);
+            if ((asp & VK_IMAGE_ASPECT_STENCIL_BIT) && (c->stencil_mask & 0xff)!=0xff) draw_clear_stencil(c,r.rect,depth,&pass);
+            else {
+                VkClearAttachment a={asp,0,{.depthStencil={depth,(uint32_t)c->stencil}}};
+                vkCmdClearAttachments(C->cb,1,&a,1,&r);
+            }
+            rp_end(C->cb);barrier_all(C->cb);
+        }
+        return;
+    }
     if ((asp & VK_IMAGE_ASPECT_STENCIL_BIT) && (c->stencil_mask & 0xff) != 0xff) {
-        clear_masked_stencil(c, r.rect, depth);
+        if (pass_begin()) {
+            rp_desc pass={.n=P.n,.df=P.dt->f.f,.w=P.w,.h=P.h,.samples=P.samples};
+            memcpy(pass.cf,P.cf,sizeof pass.cf);
+            draw_clear_stencil(c,r.rect,depth,&pass);
+        }
         return;
     }
     if (!P.open && r.rect.extent.width == P.w && r.rect.extent.height == P.h) {

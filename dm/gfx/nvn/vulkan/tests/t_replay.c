@@ -3302,6 +3302,7 @@ int main(void) {
     if (getenv("DM_VK_TEST_EMPTY_MS")) { empty_multisample_images(); return 0; }
     if (getenv("DM_VK_TEST_SUBRESOURCES")) { subresource_views(); return 0; }
     if (getenv("DM_VK_TEST_LAYERED")) { layered_attachments(); return 0; }
+    if (getenv("DM_VK_TEST_LAYERED_CLEAR")) { layered_clears(); return 0; }
     if (getenv("DM_VK_TEST_ONE_ROW_GUEST")) { one_row_guest(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_COMPARE")) { sampler_reduction_compare(); return 0; }
     if (getenv("DM_VK_TEST_SAMPLER_ARRAY")) { sampler_reduction_arrays(); return 0; }
@@ -3347,6 +3348,7 @@ int main(void) {
     attachment_feedback();
     layered_feedback();
     layered_attachments();
+    layered_clears();
     graphics_storage();
     readback_gpu_consumer();
     buffer_range_lifetime();
