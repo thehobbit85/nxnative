@@ -35,6 +35,7 @@ static prog_t sampler_compare_program[12][2];
 static prog_t layered_program[2]={{.nstage=2},{.nstage=2}};
 static prog_t geometry_program={.nstage=3};
 static prog_t geometry_explicit_program={.nstage=3};
+static prog_t wrapped_buffer_program={.nstage=1};
 static prog_t resource_shapes_program = {.nstage = 1};
 static prog_t driver_c2_program = {.nstage = 1};
 static prog_t c2_sample_program = {.nstage = 2};
@@ -81,6 +82,7 @@ int nvn_dpool_base(const void *pool, int texture) {
            !texture && pool == &sampler_pool ? 256 : !texture && pool == &alternate_sampler_pool ? 512 : 0;
 }
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) {
+    if (p==&wrapped_buffer_program) { assert(!stage);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9e;key[7]=1;return 1; }
     if (p==&geometry_program) { assert(stage<3);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=0x9c;key[7]=1+stage;return 1; }
     if (p==&geometry_explicit_program) { assert(stage<3);memset(key,0,8);key[4]=0xfe;key[5]=0xed;key[6]=stage==1 ? 0x9d : 0x9c;key[7]=1+stage;return 1; }
     for (int i=0; i<2; i++) if (p==&layered_program[i]) {
@@ -3228,6 +3230,7 @@ static void typed_graphics(void) {
 #include "../../../tests/dlss_spatial_corpus.h"
 #include "../../../tests/dlss_temporal_corpus.h"
 #include "feedback_capture.inc"
+#include "wrapped_buffer.inc"
 #include "alpha.inc"
 #include "logic.inc"
 #include "split_handle.inc"
@@ -3281,6 +3284,7 @@ int main(void) {
     }
     if (getenv("DM_VK_TEST_DLSS")) { dlss_spatial_corpus(1); dlss_temporal_corpus(); return 0; }
     if (getenv("DM_VK_TEST_TF_CAPTURE")) { feedback_capture(); return 0; }
+    if (getenv("DM_VK_TEST_WRAPPED_BUFFER")) { wrapped_buffer(); return 0; }
     if (getenv("DM_VK_TEST_LOGIC")) { logic_operations(); sparse_mrt_outputs(); mixed_integer_outputs(); return 0; }
     if (getenv("DM_VK_TEST_ALPHA_COVERAGE")) { alpha_coverage(&logic_program[0],1); alpha_coverage(&logic_program[0],4); return 0; }
     if (getenv("DM_VK_TEST_ALPHA")) { alpha_references(); return 0; }
