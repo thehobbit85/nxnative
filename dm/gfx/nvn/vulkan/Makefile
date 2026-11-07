@@ -71,7 +71,7 @@ REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 CAPTURE_SRC = ../nvn_capture.c $(wildcard ../../../third_party/lzfse/*.c) ../../../android/compat/sha256.c
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c $(CAPTURE_SRC)
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: capture.inc capture_memory.inc capture_resources.inc capture_format.h ../nvn_capture.h ../nvn_hmap.h
-$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h ../../tests/recorded_sampler_reduction.h ../../tests/recorded_sparse_texture.h ../../tests/recorded_sparse_write.h ../../tests/recorded_query_lifetime.h ../../tests/recorded_feedback_control.h
+$(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_texture_alias.h ../../tests/recorded_draw_texture.h ../../tests/recorded_sampler_reduction.h ../../tests/recorded_sparse_texture.h ../../tests/recorded_sparse_write.h ../../tests/recorded_query_lifetime.h ../../tests/recorded_feedback_control.h
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_storage_texels.inc spv_sampler_pairs.inc spv_one_row.h ../nvn_border.h spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
 $(B)/t_replay: ../../tests/packed_texel_corpus.h ../../tests/dlss_spatial_corpus.h ../../tests/dlss_temporal_corpus.h ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/depth_views.inc tests/cube_ranges.inc tests/logic.inc tests/feedback_capture.inc
 CLEAR_SRC := .
@@ -939,3 +939,5 @@ sampler-border-check: sampler-border-fixture $(B)/t_sample_border
 	  $(B)/t_sample_border "$$input" "$(B)/border-$$key" "$$binding"; \
 	  $(SPIRV_VAL) --target-env vulkan1.1 "$(B)/border-$$key"; \
 	done
+
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: texture_alias.inc

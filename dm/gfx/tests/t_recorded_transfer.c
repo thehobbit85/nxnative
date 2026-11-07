@@ -523,6 +523,7 @@ static void check_cpu_texture_storage(NVNdevice *device) {
 #include "recorded_sampler_reduction.h"
 #include "recorded_sparse_texture.h"
 #include "recorded_sparse_write.h"
+#include "recorded_texture_alias.h"
 #include "recorded_query_lifetime.h"
 #include "recorded_feedback_control.h"
 
@@ -570,6 +571,10 @@ int main(void) {
     API(nvnQueueBuilderSetDevice)(&qb, &device);
     API(nvnQueueBuilderSetDefaults)(&qb);
     assert(API(nvnQueueInitialize)(&queue, &qb));
+    if (getenv("DM_TEST_TEXTURE_ALIASES")) {
+        check_texture_object_aliases(&device,&queue);
+        API(nvnQueueFinalize)(&queue);API(nvnDeviceFinalize)(&device);return 0;
+    }
 #ifdef __ANDROID__
     if (getenv("DM_VK_TEST_PUBLIC_REDUCTION")) {
         check_sampler_reduction(&device,&queue,NVN_FORMAT_R32F);
@@ -718,6 +723,7 @@ int main(void) {
     check_sampler_reduction(&device, &queue, NVN_FORMAT_R32F);
     check_sampler_reduction(&device, &queue, NVN_FORMAT_RGBA8);
     check_sparse_textures(&device, &queue);
+    check_texture_object_aliases(&device,&queue);
     check_query_lifetimes(&device,&queue,&qb);
     check_feedback_controls(&device, &queue);
     check_dlss_network_identity(&device,&pool);

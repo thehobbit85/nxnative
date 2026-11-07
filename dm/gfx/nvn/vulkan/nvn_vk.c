@@ -970,6 +970,7 @@ typedef struct block_view block_view;
 struct vtex {
     uint64_t serial; VkImage img; VkSampleCountFlagBits samples; VkImageUsageFlags usage; VkDeviceMemory m; int blk; VkDeviceSize moff, msize; fmt_t f; int nvn_fmt, target;
     uint32_t w, h, d, levels, layers; VkImageAspectFlags aspect; int uploaded; _Atomic int gpu;
+    uint32_t serial_refs;int alias_owned;
     int dirty;   // the CPU wrote its storage since the last upload (WriteTexels, a movie frame, a flushed pool range): uploaded again at its next use, unless the GPU renders into it
     const uint8_t *mem; uint64_t len;   // its storage in guest memory
     uint64_t stamp; const void *span;   // uploaded from a dirty-tracked pool (nvn_dirty.c): the write generation then and the tracked range, re-uploaded when the game writes it
@@ -984,7 +985,7 @@ struct vtex {
 static vtex **g_gb; static int g_ngb, g_cgb; static pthread_mutex_t g_gbmu = PTHREAD_MUTEX_INITIALIZER;
 #define NHASH 4096
 static vtex *g_tex[NHASH];
-static vtex *tex_find(uint64_t ser) { for (vtex *v = g_tex[ser % NHASH]; v; v = v->next) if (v->serial == ser) return v; return NULL; }
+#include "texture_alias.inc"
 static uint64_t *g_cpu_written; static int g_ncpu, g_ccpu;   // serials WriteTexels wrote (mtl_tex_cpu_written)
 static int cpu_written(uint64_t ser) { for (int i = 0; i < g_ncpu; i++) if (g_cpu_written[i] == ser) return 1; return 0; }
 
@@ -1033,8 +1034,9 @@ static int storage_compatible(const VkImageCreateInfo *ii) {
 // from its live-ID check through this resolution.
 static vtex *tex_get_locked(const tex_t *t, int for_rt) {
     vtex *v = tex_find(t->serial);
+    if (!v) v=texture_alias_find(t);
     if (v) {
-        if (for_rt) v->gpu = 1;
+        if (for_rt) { v->gpu = 1;texture_alias_publish(t,v); }
         else if (!v->gpu && t->mem && (v->dirty || sparse_changed(v,t) || (v->span && nvn_dirty_since_span(v->span, t->mem, t->L.size, v->stamp)))) { v->dirty = 0; tex_upload(v, t); }   // never over what the GPU drew: a flush of the pool range around a render target is not new content
         return v;
     }
@@ -1090,6 +1092,8 @@ static vtex *tex_get_locked(const tex_t *t, int for_rt) {
     int sparse_sampled=v->sparse && !(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET |
                                                     NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE));
     int packaged = (t->has_layout || cpu_written(t->serial) || sparse_sampled || init_fill(t, &f)) && t->mem && !for_rt;
+    texture_bind_serial(t->serial,v);
+    if (!packaged) texture_alias_publish(t,v);
     if (packaged) tex_upload(v, t);
     else if (!for_rt) {   // contents come from the GPU (copies, render passes): start cleared, as a new texture's storage would read on hardware after a clear
         VkClearColorValue z = {{0}}; VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
@@ -1349,12 +1353,6 @@ void mtl_reg_samp(int id, const samp_par *p) {
     pthread_mutex_unlock(&g_rmu);
 }
 void mtl_set_tex_pool_n(int n) { (void)n; }
-void mtl_tex_init(const tex_t *t) { (void)t; }
-void mtl_tex_release(tex_t *t) {
-    pthread_mutex_lock(&g_rmu);
-    for (vtex **pp = &g_tex[t->serial % NHASH]; *pp; pp = &(*pp)->next) if ((*pp)->serial == t->serial) { vtex *v = *pp; *pp = v->next; pthread_mutex_unlock(&g_rmu); tex_free(v); return; }
-    pthread_mutex_unlock(&g_rmu);
-}
 int mtl_tex_gpu_owned(uint64_t serial) {
     pthread_mutex_lock(&g_rmu);
     vtex *v = tex_find(serial);
@@ -5294,6 +5292,7 @@ void mtl_alias_drop_pool(const void *pool) {
     // or RegisterImage explicitly makes the ID live again. Encoded Vulkan views
     // retain their normal deferred resource lifetime through the submit fence.
     for (int i = 0; i < g_ntreg; i++) if (g_treg[i].ok && g_treg[i].t.pool == pool) g_treg[i].ok = 0;
+    texture_alias_drop_pool(pool);
     g_registration_generation++;
     pthread_mutex_unlock(&g_rmu);
 }
