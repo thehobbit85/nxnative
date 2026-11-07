@@ -16,16 +16,29 @@ static void check_deferred_cubes(NVNdevice *device, NVNqueue *queue, NVNcommandB
     API(nvnCommandBufferSetCopyRowStride)(cb, 0);
     API(nvnCommandBufferSetCopyImageStride)(cb, 0);
     for (int t = 0; t < 5; ++t) {
-        API(nvnTextureBuilderSetTarget)(&tb, t < 4 ? NVN_TEXTURE_TARGET_CUBEMAP : NVN_TEXTURE_TARGET_2D);
-        API(nvnTextureBuilderSetSize3D)(&tb, t < 4 ? 1 : 6, 1, t < 4 ? 6 : 1);
+        int second_cube = t % 2;
+        API(nvnTextureBuilderSetTarget)(&tb, t == 4 ? NVN_TEXTURE_TARGET_2D :
+                                             second_cube ? NVN_TEXTURE_TARGET_2D_ARRAY : NVN_TEXTURE_TARGET_CUBEMAP);
+        API(nvnTextureBuilderSetSize3D)(&tb, t < 4 ? 1 : 6, 1, t == 4 ? 1 : second_cube ? 12 : 6);
         assert(API(nvnTextureBuilderGetStorageSize)(&tb) <= 0x4000);
         API(nvnTextureBuilderSetStorage)(&tb, pool, 0x32000 + 0x4000 * t);
         assert(API(nvnTextureInitialize)(&images[t], &tb));
         if (t == 4) break;
-        API(nvnTexturePoolRegisterTexture)(&tp[t / 2], 256 + t % 2, &images[t], NULL);
+        NVNtextureView view;
+        API(nvnTextureViewSetDefaults)(&view);
+        API(nvnTextureViewSetTarget)(&view, NVN_TEXTURE_TARGET_CUBEMAP);
+        // Both name the second cube: in cube units, then in explicit faces.
+        API(nvnTextureViewSetLayers)(&view, t == 1 ? 1 : 6, t == 1 ? 1 : 6);
+        API(nvnTexturePoolRegisterTexture)(&tp[t / 2], 256 + t % 2, &images[t], second_cube ? &view : NULL);
         for (int f = 0; f < 6; ++f) {
             memory[data + 24 * t + 4 * f] = 1 + 48 * t + 7 * f;
             memory[data + 24 * t + 4 * f + 3] = 255;
+        }
+        faces.zoffset = 0;
+        if (second_cube) {
+            memset(memory + data + 160, 0, 24);
+            API(nvnCommandBufferCopyBufferToTexture)(cb, addr + data + 160, &images[t], NULL, &faces, 0);
+            faces.zoffset = 6;
         }
         API(nvnCommandBufferCopyBufferToTexture)(cb, addr + data + 24 * t, &images[t], NULL, &faces, 0);
     }

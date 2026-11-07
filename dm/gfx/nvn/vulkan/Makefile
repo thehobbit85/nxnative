@@ -12,7 +12,7 @@ REPLAY_CPPFLAGS ?= -DDM_VK_DESCRIPTOR_POOL_DIVISOR=1024
 SRC = tests/t_replay.c nvn_vk.c ../nvn_dirty.c ../nvn_tex.c ../../tex/nvn_deswizzle.c
 $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: ../../tests/recorded_draw_texture.h ../../tests/recorded_sampler_reduction.h ../../tests/recorded_sparse_texture.h ../../tests/recorded_query_lifetime.h ../../tests/recorded_feedback_control.h
 $(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: spv_storage_texels.inc spv_sampler_pairs.inc ../nvn_border.h spv_alpha.h spv_integer_outputs.h spv_fragment_outputs.h
-$(B)/t_replay: ../../tests/packed_texel_corpus.h ../../tests/dlss_spatial_corpus.h ../../tests/dlss_temporal_corpus.h ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/depth_views.inc tests/logic.inc tests/feedback_capture.inc
+$(B)/t_replay: ../../tests/packed_texel_corpus.h ../../tests/dlss_spatial_corpus.h ../../tests/dlss_temporal_corpus.h ../../tests/recorded_list.h ../../tests/polygon_offset_corpus.h ../../tests/polygon_fill_corpus.h ../../tests/alpha_coverage_corpus.h tests/alpha.inc tests/depth_views.inc tests/cube_ranges.inc tests/logic.inc tests/feedback_capture.inc
 CLEAR_SRC := .
 CLEAR_GEN := $(B)/clear-shaders
 include clear_shaders.mk
@@ -172,6 +172,11 @@ $(B)/shaders/0000000000000052.spv: tests/depth_range.vert
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 $< -o $@
 	echo 'stage vs' > $(@:.spv=.vk.txt)
+fixture: $(B)/shaders/000000000000006d.spv
+$(B)/shaders/000000000000006d.spv: tests/cube_ranges.comp tests/cube_ranges.vk.txt
+	mkdir -p $(@D)
+	$(GLSLC) --target-env=vulkan1.1 $< -o $@
+	cp tests/cube_ranges.vk.txt $(@:.spv=.vk.txt)
 $(B)/shaders/000000000000006a.spv: tests/typed_border.comp tests/typed_border_separate.vk.txt
 	mkdir -p $(B)/shaders
 	$(GLSLC) --target-env=vulkan1.1 -DSEPARATE $< -o $@
