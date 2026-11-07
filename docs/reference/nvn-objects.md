@@ -825,6 +825,7 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** thousands of first uploads a frame in a scene whose textures do not change: Ocarina of Time, about 15,000 a frame.
 - **Cause:** the engine copies an `NVNtexture` by value and finalizes the copy, while the original stays in use. The host keyed the texture by serial, so finalizing the copy deleted the host texture of the original, and its next use uploaded it again.
 - **Fix:** general (`nvn_mtl.m` `mtl_tex_release`). The registry keeps the address of the object that was initialized, and a finalize is ignored when that owner still holds the texture's magic and serial (read with `vm_read_overwrite`, as the owner's memory may be gone). `t_cpu_tex` checks both orders.
+- **Android Vulkan:** `texture_alias.inc` preserves the same original-object ownership for ordinary and packaged textures. It uses the shared `dm_host_read` kernel read before ignoring a copied finalization; moved, overwritten or unmapped originals allow the surviving copy to retire the resource. `texture-alias-check` exercises live copies, invalidated and unmapped owners, pool eviction and final reference counts under native sanitizers and Android Bionic.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
 ### Freeing a memory pool during a texture ID walk

@@ -940,9 +940,9 @@ sampler-border-check: sampler-border-fixture $(B)/t_sample_border
 	  $(SPIRV_VAL) --target-env vulkan1.1 "$(B)/border-$$key"; \
 	done
 
-$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: texture_alias.inc
+$(B)/t_replay $(B)/t_recorded_transfer $(B)/t_recorded_transfer_android: texture_alias.inc ../../../host/host_memory.h
 
-$(B)/t_texture_alias: tests/t_texture_alias.c texture_alias.inc ../nvn_hmap.h ../nvn_obj.h ../nvn_tex.c
+$(B)/t_texture_alias: tests/t_texture_alias.c texture_alias.inc ../nvn_hmap.h ../nvn_obj.h ../nvn_tex.c ../../../host/host_memory.h
 	mkdir -p $(B)
 	$(BUILD_CC) -O1 -g -Wall -Wextra -Werror -Wno-unused-function $(BUILD_CFLAGS) -I../include $< ../nvn_tex.c -o $@
 .PHONY: texture-alias-check

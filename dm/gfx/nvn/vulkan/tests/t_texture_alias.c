@@ -1,12 +1,14 @@
 // Resource ownership is observable without a GPU: retired images may leave the
 // active tables only when no serial/pool owner remains. Actual fences are covered
 // by the public NVN fixture shared with Metal.
+#define _GNU_SOURCE
 #include "../../nvn_obj.h"
 #include <assert.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 static void die(const char *format,...) { (void)format;abort(); }
 typedef struct vtex { uint64_t serial,len,alias_seen;unsigned serial_refs;int alias_owned;struct vtex *next; } vtex;
 #define NHASH 64
@@ -15,7 +17,7 @@ static uint64_t g_fence;static unsigned retired;
 static void tex_free(vtex *v) { (void)v;retired++; }
 #include "../texture_alias.inc"
 static tex_t description(pool_t *pool,uint64_t serial,int64_t offset,unsigned width) {
-    tex_t t={.pool=pool,.mem=pool->mem+offset,.off=offset,.serial=serial,
+    tex_t t={.magic=MAGIC('T','E','X',0),.pool=pool,.mem=pool->mem+offset,.off=offset,.serial=serial,
         .d={.width=width,.height=8,.depth=1,.levels=1,.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8}};
     nvn_tex_layout(&t.d,&t.L);return t;
 }
@@ -28,6 +30,13 @@ int main(void) {
     uint8_t memory[0x4000]={0};pool_t pool={.mem=memory,.size=sizeof memory},other=pool;
     tex_t a=description(&pool,1,0,8),b=description(&pool,2,0,16),far=description(&pool,3,0x2000,8),c=description(&other,4,0,8);
     vtex av,bv,fv,cv;publish(&av,&a);publish(&fv,&far);publish(&cv,&c);
+    // Engine-owned copies have the same serial but cannot finalize its owner.
+    tex_t copy=a;mtl_tex_release(&copy);
+    assert(av.serial_refs==1 && tex_find(a.serial)==&av);
+    // This also applies to packaged descriptions excluded from pool aliases.
+    tex_t packaged=description(&pool,8,0,8);packaged.has_layout=1;
+    vtex pv;publish(&pv,&packaged);copy=packaged;mtl_tex_release(&copy);
+    assert(pv.serial_refs==1 && tex_find(packaged.serial)==&pv);
     mtl_tex_release(&a);mtl_tex_release(&far);mtl_tex_release(&c);assert(retired==0);
     g_fence=15;publish(&bv,&b);assert(retired==0); // recently accessed overlap retained
     mtl_tex_release(&b);g_fence=32;
@@ -44,10 +53,17 @@ int main(void) {
     texture_alias_drop_pool(&pool);assert(retired==3);
     mtl_tex_release(&far);mtl_tex_release(&wider);mtl_tex_release(&recent);assert(retired==6);
     texture_alias_drop_pool(&other);assert(retired==6);mtl_tex_release(&c);assert(retired==7);
-    assert(!g_texture_aliases.n && !g_texture_serials.n && !g_texture_keys.n);
+    mtl_tex_release(&packaged);assert(retired==8);
+    tex_t moved=description(&pool,9,0,8);moved.has_layout=1;vtex mv;publish(&mv,&moved);
+    copy=moved;moved.magic=0;mtl_tex_release(&copy);assert(retired==9);
+    tex_t *unmapped=mmap(NULL,16384,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);assert(unmapped!=MAP_FAILED);
+    *unmapped=description(&pool,10,0,8);unmapped->has_layout=1;vtex uv;publish(&uv,unmapped);
+    copy=*unmapped;assert(!munmap(unmapped,16384));mtl_tex_release(&copy);assert(retired==10);
+    assert(!g_texture_aliases.n && !g_texture_serials.n && !g_texture_keys.n && !g_texture_live.n);
     for (unsigned i=0;i<NHASH;i++) assert(!g_tex[i]);
     free(g_texture_aliases.keys);free(g_texture_aliases.vals);free(g_texture_serials.keys);free(g_texture_serials.vals);
     free(g_texture_keys.keys);free(g_texture_keys.vals);
-    puts("Texture ownership retained recent/live/other-pool images and retired stale overlaps and finalized pools");
+    free(g_texture_live.keys);free(g_texture_live.vals);
+    puts("Texture ownership retained recent/live/other-pool images and live originals, and retired stale overlaps, finalized pools and moved/unmapped owners");
     return 0;
 }

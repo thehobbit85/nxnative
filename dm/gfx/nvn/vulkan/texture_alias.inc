@@ -2,10 +2,12 @@
 // The pool owns a shared image independently of the live texture-object IDs.
 // Virtual physical-page aliases need separate sparse ownership handling.
 #include "../nvn_hmap.h"
+#include "../../../host/host_memory.h"
 typedef struct { uint64_t pool;int64_t offset;nvn_texdesc description; } texture_alias_key;
 static nvn_hmap g_texture_aliases={.klen=sizeof(texture_alias_key)};
 static nvn_hmap g_texture_serials={.klen=sizeof(uint64_t)};
 static nvn_hmap g_texture_keys={.klen=sizeof(uint64_t)};
+static nvn_hmap g_texture_live={.klen=sizeof(uint64_t)};
 static void tex_free(vtex *v);
 // Keep a storage-capable linear allocation for each mutable-format family.
 // X and A formats have identical storage; each descriptor retains its own
@@ -102,13 +104,30 @@ static void texture_alias_drop_pool(const void *pool) {
     }
 }
 void mtl_tex_init(const tex_t *t) {
-    texture_alias_key key;if (!texture_key(t,&key)) return;
-    texture_alias_key *stored=malloc(sizeof *stored);if (!stored) die("Vulkan: texture identity allocation");
-    memcpy(stored,&key,sizeof key);
-    pthread_mutex_lock(&g_rmu);free(nvn_hm_put(&g_texture_keys,&t->serial,stored));pthread_mutex_unlock(&g_rmu);
+    if (!t->serial) return;
+    texture_alias_key key,*stored=NULL;
+    if (texture_key(t,&key)) {
+        stored=malloc(sizeof *stored);if (!stored) die("Vulkan: texture identity allocation");
+        memcpy(stored,&key,sizeof key);
+    }
+    pthread_mutex_lock(&g_rmu);
+    nvn_hm_put(&g_texture_live,&t->serial,(void *)t);
+    if (stored) free(nvn_hm_put(&g_texture_keys,&t->serial,stored));
+    pthread_mutex_unlock(&g_rmu);
 }
 void mtl_tex_release(tex_t *t) {
     pthread_mutex_lock(&g_rmu);
+    // As on Metal, an engine may finalize a value-copy while its original
+    // object remains live. Read the owner through the kernel because it may
+    // instead have moved or been unmapped since initialization.
+    const tex_t *owner=nvn_hm_get(&g_texture_live,&t->serial);
+    if (owner && owner!=t) {
+        tex_t seen;
+        if (dm_host_read((uintptr_t)owner,&seen,sizeof seen) && seen.magic==MAGIC('T','E','X',0) && seen.serial==t->serial) {
+            pthread_mutex_unlock(&g_rmu);return;
+        }
+    }
+    nvn_hm_del(&g_texture_live,&t->serial);
     free(nvn_hm_del(&g_texture_keys,&t->serial));
     vtex *v=nvn_hm_del(&g_texture_serials,&t->serial);
     if (v) { if (!v->serial_refs) die("Vulkan: texture serial ownership underflow");v->serial_refs--;texture_retire_unused(v); }
