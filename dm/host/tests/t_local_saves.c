@@ -134,7 +134,11 @@ static int simultaneous(void) {
     CHECK(h_fs_CommitList(both, 2) != RES_OK && file_has("save/slot", "legacy"));
     CHECK(h_fs_Commit("other") == RES_OK && file_has("save.user-" BOB "/slot", "bob2"));
     CHECK(file_has("save/slot", "legacy") && h_fs_Commit("alias") == RES_OK && file_has("save/slot", "alice"));
-    CHECK(h_fs_RenameFile("other:/slot", "player:/moved") != RES_OK && guest_has("other:/slot", "bob2"));
+    CHECK(h_fs_RenameFile("other:/slot", "player:/moved") == RES_RENAME_OTHER_FS && guest_has("other:/slot", "bob2"));
+    // Horizon refuses distinct mount names even when they alias one account transaction.
+    CHECK(h_fs_RenameFile("player:/slot", "alias:/moved") == RES_RENAME_OTHER_FS && guest_has("alias:/slot", "alice"));
+    CHECK(h_fs_RenameFile("player:/slot", "player:/renamed") == RES_OK && guest_has("alias:/renamed", "alice"));
+    CHECK(h_fs_RenameFile("player:/renamed", "player:/slot") == RES_OK && guest_has("alias:/slot", "alice"));
     CHECK(h_fs_MountDeviceSave("common") == RES_OK && write_guest("common:/slot", "device"));
     CHECK(h_fs_Commit("common") == RES_OK && file_has("save_device/slot", "device"));
     int64_t bytes, journal;
