@@ -16,6 +16,7 @@
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#import "../nvn/host_msl.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #import <Metal/Metal.h>
@@ -229,6 +230,7 @@ struct VkPipeline_T {
     const shinfo *vs, *fs; uint32_t vb_mask;
     uint32_t pc_size, nset; VkDescriptorSetLayout set[8];   // from its pipeline layout, which may be destroyed first: the push-constant size, and the set layouts (held) for a missing binding's report
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
+    int fan, restart;   // Metal has no fan topology; expanded at the draw, with Vulkan's provoking vertex
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
     int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
     // Dynamic stencil state (Super Mario 3D All-Stars' Super Mario 64): the reference is the encoder's; the masks are part of a Metal depth-stencil state, so the
@@ -1016,6 +1018,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: p->prim = MTLPrimitiveTypeLineStrip; pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassLine; break;
             case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: p->prim = MTLPrimitiveTypeTriangleStrip; break;
             case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: p->prim = MTLPrimitiveTypeTriangle; break;
+            case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: p->prim = MTLPrimitiveTypeTriangle; p->fan = 1; p->restart = ci->pInputAssemblyState->primitiveRestartEnable; break;
             default: RED1("primitive topology %d not implemented", ci->pInputAssemblyState->topology); p->prim = MTLPrimitiveTypeTriangle; break;
         }
         const VkPipelineRasterizationStateCreateInfo *rs = ci->pRasterizationState;
@@ -1415,6 +1418,48 @@ static int pre_draw(rs_t *s) {
         }
     return 1;
 }
+// Vulkan fan triangle i is (i+1, i+2, 0): rotating it to put the anchor first changes flat-shaded attributes.
+// Array draws have no index-memory dependencies. Indexed draws convert on the GPU after prior copies, and restart produces a compact list plus its indirect count.
+static id<MTLBuffer> fan_buffer(uint32_t count) {
+    NSUInteger size = (NSUInteger)(count - 2) * 12 + 32;
+    id<MTLBuffer> b = count - 2 <= UINT32_MAX / 3 && size <= g_dev.maxBufferLength ? [g_dev newBufferWithLength:size options:MTLResourceStorageModeShared] : nil;
+    if (!b) RED1("cannot allocate triangle fan indices (%u vertices)", count);
+    return b;
+}
+static void fan_arrays(rs_t *s, const c_draw *x) {
+    if (x->count < 3) return;
+    id<MTLBuffer> b = fan_buffer(x->count); if (!b) return;
+    uint32_t *indices = b.contents;
+    for (uint32_t i = 0; i < x->count - 2; i++) {
+        indices[3 * i] = i + 1; indices[3 * i + 1] = i + 2; indices[3 * i + 2] = 0;
+    }
+    [s->re drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)(x->count - 2) * 3 indexType:MTLIndexTypeUInt32 indexBuffer:b
+              indexBufferOffset:0 instanceCount:x->inst baseVertex:x->first baseInstance:x->first_inst];   // preserves VertexIndex and BaseVertex for an array draw
+}
+static void fan_indexed(rs_t *s, const c_drawi *x) {
+    if (x->count < 3) return;
+    // Replay holds g_qmu. The host shader library is compiled at build time, like the NVN layer's own kernels.
+    static id<MTLComputePipelineState> ps;
+    if (!ps) {
+        NSError *e = nil; id<MTLLibrary> lib = host_msl_lib(g_dev, nil, "vk_fan", &e);
+        id<MTLFunction> fn = [lib newFunctionWithName:@"vk_fan"];
+        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        if (!ps) { RED1("cannot build triangle fan conversion: %s", e.localizedDescription.UTF8String); return; }
+    }
+    id<MTLBuffer> input = mem_buf(s->ib->mem), out = fan_buffer(x->count); if (!out) return;
+    struct { uint64_t offset; uint32_t count, isz, restart, inst; int32_t base; uint32_t first_inst; } p = {
+        s->ib->off + s->ibo + (VkDeviceSize)x->first * s->isz, x->count, s->isz, (uint32_t)s->pipe->restart, x->inst, x->voff, x->first_inst};
+    end_rp(s, 0); s->cut = 1; end_blit(s);
+    id<MTLComputeCommandEncoder> ce = [s->cb computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setBuffer:input offset:0 atIndex:0];
+    [ce setBuffer:out offset:32 atIndex:1]; [ce setBuffer:out offset:0 atIndex:2]; [ce setBytes:&p length:sizeof p atIndex:3];
+    // With restart, one linear scan compacts all runs without crossing a marker. Otherwise each triangle is independent.
+    NSUInteger threads = p.restart ? 1 : x->count - 2;
+    [ce dispatchThreads:MTLSizeMake(threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN(threads, ps.threadExecutionWidth), 1, 1)];
+    [ce endEncoding];
+    if (!pre_draw(s)) return;   // reload attachments and restore all draw state after the compute encoder
+    [s->re drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt32 indexBuffer:out indexBufferOffset:32 indirectBuffer:out indirectBufferOffset:0];
+}
 static void replay(rs_t *s, VkCommandBuffer cb) {
     for (size_t o = 0; o < cb->n;) {
         const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
@@ -1438,6 +1483,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 const c_drawi *x = c;
                 if (!x->count || !x->inst || !pre_draw(s)) break;
                 if (!s->ib || !s->ib->mem) { RED1("index buffer not bound"); break; }
+                if (s->pipe->fan) { fan_indexed(s, x); g_n_draw++; break; }
                 [s->re drawIndexedPrimitives:s->pipe->prim indexCount:x->count indexType:s->it indexBuffer:mem_buf(s->ib->mem)
                            indexBufferOffset:s->ib->off + s->ibo + (VkDeviceSize)x->first * s->isz instanceCount:x->inst baseVertex:x->voff baseInstance:x->first_inst];
                 g_n_draw++;
@@ -1473,6 +1519,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
             case C_DRAW: {
                 const c_draw *x = c;
                 if (!x->count || !x->inst || !pre_draw(s)) break;
+                if (s->pipe->fan) { fan_arrays(s, x); g_n_draw++; break; }
                 [s->re drawPrimitives:s->pipe->prim vertexStart:x->first vertexCount:x->count instanceCount:x->inst baseInstance:x->first_inst];
                 g_n_draw++;
                 break;
@@ -1593,7 +1640,7 @@ VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFe
                 VkCommandBuffer c = si[i].pCommandBuffers[j];
                 for (size_t o = 0; o < c->n; o += ((const chdr *)(c->buf + o))->size) {
                     uint32_t op = ((const chdr *)(c->buf + o))->op;   // a slot per query begun, and per encoder one may span: a pass, or what splits a pass's encoder
-                    sq->cap += op == C_QBEGIN; nsplit += op == C_BRP || op == C_COPYB || op == C_COPYB2I || op == C_COPYI || op == C_COPYI2B || op == C_CLEARI;
+                    sq->cap += op == C_QBEGIN; nsplit += op == C_BRP || op == C_COPYB || op == C_COPYB2I || op == C_COPYI || op == C_COPYI2B || op == C_CLEARI || op == C_DRAWI;   // an indexed fan can split its render encoder
                 }
             }
         if (sq->cap) {

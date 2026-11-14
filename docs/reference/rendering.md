@@ -1674,6 +1674,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galaxy needed the additions below, each found from a red line or a screenshot on the route to the Star Festival.
 
+### Vulkan triangle fans
+
+- **Symptom:** `[RED] primitive topology 5 not implemented`; a fan draws disconnected triangles or omits its later wedges.
+- **Cause:** Metal has no triangle-fan primitive. Selecting its triangle-list topology without expanding the vertices changes primitive assembly.
+- **Fix:** `vkCmdDraw` generates triangle-list indices; `vkCmdDrawIndexed` expands the source indices on the GPU after earlier writes. Each triangle is `(i+1, i+2, 0)`, preserving Vulkan's first provoking vertex for flat attributes. Indexed restart markers end the current fan before `vertexOffset` is applied. Index and memory binding offsets, `firstIndex`, vertex offsets and base instances are retained. Conversion splits an open Metal render encoder, stores and reloads its attachments, restores draw state and keeps occlusion-query counts across the split.
+- **Cost and limits:** nonindexed conversion writes three indices per triangle on the CPU. Indexed conversion uses one GPU pass: parallel triangles without restart, one linear scan to compact restart-separated runs otherwise. Its temporary index buffer lives through command completion; allocation failure is reported. Vulkan indirect draw commands are not implemented by this layer. No whole-game performance or visual result is inferred from this change.
+- **Found on:** KINGDOM HEARTS II FINAL MIX's Gummi missions, [issue #1026](https://github.com/seedds/nxnative/issues/1026). The collection's profile is not registered here; its other bring-up and loader issues remain separate.
+
 ### Vulkan shaders generated at run time
 
 - **Symptom:** no SPIR-V file in the RomFS; SPIRV-Cross refuses a module with "Struct member does not have ArrayStride set".
