@@ -22,8 +22,8 @@ static int map(pool_t *virt, pool_t *phys, uint64_t voff, uint64_t poff, uint64_
     map_req req = {.phys = (NVNmemoryPool *)phys, .voff = (int64_t)voff, .poff = (int64_t)poff, .size = size};
     return h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)virt, 1, (const NVNmappingRequest *)&req);
 }
-// A buffer-to-texture copy of the whole of level `level` (w x w) from src, through a view of that level, replayed in the open submission
-static void copy_in(pool_t *cpool, NVNtexture *tx, unsigned level, unsigned w, const void *src) {
+// A buffer-to-texture copy of the whole of level `level` (w x w) from src, through a view of that level, replayed in the open submission. The caller frees the records after submitting.
+static uint8_t *copy_in(pool_t *cpool, NVNtexture *tx, unsigned level, unsigned w, const void *src) {
     NVNcommandBuffer cmd; h_nvnCommandBufferInitialize(&cmd, NULL);
     h_nvnCommandBufferAddCommandMemory(&cmd, (const NVNmemoryPool *)cpool, 0, 65536);
     h_nvnCommandBufferBeginRecording(&cmd);
@@ -31,7 +31,9 @@ static void copy_in(pool_t *cpool, NVNtexture *tx, unsigned level, unsigned w, c
     NVNcopyRegion r = {0, 0, 0, (int)w, (int)w, 1};
     h_nvnCommandBufferCopyBufferToTexture(&cmd, (NVNbufferAddress)src, tx, &v, &r, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
-    state_reset(); memset(&R, 0, sizeof R); mtl_exec(nvn_rec_linear(h, NULL));
+    uint8_t *records = nvn_rec_linear(h, NULL);
+    state_reset(); memset(&R, 0, sizeof R); mtl_exec(records);
+    return records;
 }
 static int words_not(const uint8_t *p, uint64_t n, uint32_t want) { int bad = 0; for (uint64_t i = 0; i < n; i += 4) bad += *(const uint32_t *)(p + i) != want; return bad; }
 // Texels of level `level` (w x w) of the host texture other than want: the texture is looked up (and uploaded if its pages changed) in this submission, and read after it
@@ -65,8 +67,9 @@ static void run(int gpu, pool_t *virt, pool_t *phys, uint8_t *pmem, pool_t *cpoo
     for (uint64_t o = 0; o < lend - l1; o += 4) *(uint32_t *)(pmem + P1 + o) = A;
     CHECK(map(virt, phys, VO + l1, P1, lend - l1), "level 1 mapped, level 0 not");
     for (unsigned i = 0; i < 128 * 128; i++) ((uint32_t *)(cmem + 0x10000))[i] = B;
-    copy_in(cpool, &tx, 1, 128, cmem + 0x10000);
+    uint8_t *records = copy_in(cpool, &tx, 1, 128, cmem + 0x10000);
     next_sub();
+    free(records);
     NvPkg *pk = tex_get(t->serial);
     snprintf(n, sizeof n, "%s: the texture is bound from level 1 (sparse_view)", how); CHECK([pk isKindOfClass:[NvPkg class]] && pk->vbase == 1, n);
     snprintf(n, sizeof n, "%s: the copy into level 1 reaches the physical memory mapped behind it", how); CHECK(words_not(pmem + P1, 128 * 128 * 4, B) == 0, n);
@@ -76,8 +79,9 @@ static void run(int gpu, pool_t *virt, pool_t *phys, uint8_t *pmem, pool_t *cpoo
     // stored there) then uploads the texture again, which reads both copies from the physical memory. (A mapping request over pages mapped before waits for the GPU: not that)
     CHECK(map(virt, phys, VO, P0, l1), "level 0 mapped");
     for (unsigned i = 0; i < 256 * 256; i++) ((uint32_t *)(cmem + 0x20000))[i] = C;
-    copy_in(cpool, &tx, 0, 256, cmem + 0x20000);
+    records = copy_in(cpool, &tx, 0, 256, cmem + 0x20000);
     mtl_sub_commit(); mtl_sub_begin();
+    free(records);
     uint64_t reups = g_pkg_reuploads, done = g_done, sent = g_fence;
     *(volatile uint32_t *)(pmem + P1) = B;
     printf("%s: copy into level 0 committed as fence %llu, %llu completed when the CPU wrote\n", how, (unsigned long long)sent, (unsigned long long)done);
