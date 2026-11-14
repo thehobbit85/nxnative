@@ -1892,6 +1892,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** `GL` and `GLB` register in `swhle`, and `eglGetProcAddress` searches that same table. Both paths retain `GLB`'s big-stack entry; unsupported loader names still return null by default (`DM_GL_STUBS=1` enables diagnostic stubs). `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` exercises the real import resolver and GL registrations, shader creation and source queries, wrapper addresses and missing names in both diagnostic modes, without game files.
 - **Found on:** Darkest Dungeon Complete (`01008F1008DA6000`, update v327680, SDK 3.6.0, provisional profile), reported in [issue #228](https://github.com/seedds/nxnative/issues/228). The import failure is reproduced by the regression test; gameplay and run-time shader capture for this title remain unverified.
 
+### Compressed OpenGL texture arrays
+
+- **Symptom:** `glCompressedTexImage3D` and `glCompressedTexSubImage3D` are missing while a game uploads BC7 sRGB textures to `GL_TEXTURE_2D_ARRAY`.
+- **Cause:** the GL layer implements compressed 2D images and array storage separately, but had no compressed array upload entry points. Its pending image levels also held only one layer.
+- **Fix:** both entry points use the common GL import table and preserve the caller's stack arguments before entering the host stack. Each array level retains every layer, with a separate rounded block-row count per layer, including mips smaller than a block. Subimages validate their format, byte count, block alignment and layer bounds, then use the existing ordered texture-upload path. The layer count stays constant across mip levels.
+- **Limitations:** this covers compressed 2D arrays using the layer's existing formats and tightly packed client data. Compressed volume/proxy targets and compressed pixel-unpack-buffer uploads are not implemented. Other missing GL calls and the title's full rendering remain open.
+- **Found on:** [Tomb Raider I-III Remastered, issue #2416](https://github.com/seedds/nxnative/issues/2416); no registered game profile or gameplay validation is available here.
+
 ### Telling a GL game from an NVN or Vulkan one
 
 - **Symptom:** the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.

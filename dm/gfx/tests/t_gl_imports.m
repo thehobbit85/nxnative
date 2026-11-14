@@ -191,6 +191,73 @@ static void test_uniform_buffer(void) {
     del_buf(1, &b[1]); assert(!S.array_buf);
 }
 
+// Compressed arrays keep each layer's block rows separate, including mip levels
+// smaller than one block. Exercise the public entry points and read Metal's bytes.
+static void test_compressed_arrays(void) {
+    void (*image)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLsizei, GLint, GLsizei, const void *) = import("glCompressedTexImage3D");
+    void (*sub)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, uint64_t, uint64_t, const void *) = import("glCompressedTexSubImage3D");
+    assert(h_eglGetProcAddress("glCompressedTexImage3D") == (void *)image);
+    assert(h_eglGetProcAddress("glCompressedTexSubImage3D") == (void *)sub);
+    GLuint name; h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D_ARRAY, name);
+    uint8_t base[128], mip[32], small[32], got[64];
+    for (unsigned i = 0; i < sizeof base; i++) base[i] = (uint8_t)(i + 1);
+    memset(mip, 0x35, 16); memset(mip + 16, 0x76, 16);
+    memset(small, 0x93, 16); memset(small + 16, 0xb2, 16);
+    image(GL_TEXTURE_2D_ARRAY, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 8, 8, 2, 0, sizeof base, base);
+    image(GL_TEXTURE_2D_ARRAY, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2, 0, sizeof mip, mip);
+    image(GL_TEXTURE_2D_ARRAY, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 2, 2, 2, 0, sizeof small, small);
+    tex_t *t = tex_of(name); assert(tex_make(t, 0));
+    assert(t->tex.pixelFormat == MTLPixelFormatBC7_RGBAUnorm_sRGB && t->tex.arrayLength == 2 && t->tex.mipmapLevelCount == 3);
+    for (unsigned lv = 0; lv < 3; lv++) for (unsigned layer = 0; layer < 2; layer++) {
+        unsigned w = 8 >> lv, pitch = lv ? 16 : 32, bytes = lv ? 16 : 64;
+        [t->tex getBytes:got bytesPerRow:pitch bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, w, w) mipmapLevel:lv slice:layer];
+        const uint8_t *want = lv == 0 ? base : lv == 1 ? mip : small;
+        assert(!memcmp(got, want + layer * bytes, bytes));
+    }
+    uint8_t patch[16]; memset(patch, 0xdf, sizeof patch);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 4, 4, 1, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof patch, patch);
+    [t->tex getBytes:got bytesPerRow:32 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 slice:1];
+    assert(!memcmp(got, base + 64, 48) && !memcmp(got + 48, patch, 16));
+    // An upload after a consumer was encoded must use an ordered blit, and
+    // retain the copied bytes even when the caller immediately reuses its input.
+    t->use = g_serial;
+    memset(patch, 0x49, sizeof patch);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof patch, patch);
+    memset(patch, 0xef, sizeof patch);
+    void (*finish)(void) = import("glFinish"); finish();
+    [t->tex getBytes:got bytesPerRow:32 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 slice:0];
+    for (int i = 0; i < 16; i++) assert(got[i] == 0x49);
+    assert(!memcmp(got + 16, base + 16, 48));
+    // A partial last block is legal only at the texture's edge. Invalid uploads
+    // leave all bytes intact and report the GL error instead of reaching Metal.
+    sub(GL_TEXTURE_2D_ARRAY, 2, 0, 0, 0, 2, 2, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof small, small);
+    assert(h_glGetError() == GL_NO_ERROR);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 1, 0, 0, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 16, patch);
+    assert(h_glGetError() == GL_INVALID_OPERATION);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 2, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 16, patch);
+    assert(h_glGetError() == GL_INVALID_VALUE);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 15, patch);
+    assert(h_glGetError() == GL_INVALID_VALUE);
+    // Immutable allocation uses the same upload path; NULL defines storage.
+    h_glDeleteTextures(1, &name); h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D_ARRAY, name);
+    h_glTexStorage3D(GL_TEXTURE_2D_ARRAY, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2);
+    sub(GL_TEXTURE_2D_ARRAY, 1, 0, 0, 0, 2, 2, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof small, small);
+    t = tex_of(name); assert(t->tex && t->tex.arrayLength == 2);
+    [t->tex getBytes:got bytesPerRow:16 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1 slice:1];
+    assert(!memcmp(got, small + 16, 16));
+    image(GL_TEXTURE_2D_ARRAY, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2, 0, sizeof small, small);
+    assert(h_glGetError() == GL_INVALID_OPERATION);   // immutable storage cannot be redefined
+    h_glDeleteTextures(1, &name);
+    h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D_ARRAY, name);
+    image(GL_TEXTURE_2D_ARRAY, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2, 0, sizeof small, NULL);
+    image(GL_TEXTURE_2D_ARRAY, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 2, 2, 2, 0, sizeof small, NULL);
+    sub(GL_TEXTURE_2D_ARRAY, 1, 0, 0, 0, 2, 2, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof small, small);
+    t = tex_of(name); assert(t->tex.mipmapLevelCount == 2);
+    [t->tex getBytes:got bytesPerRow:16 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1 slice:0];
+    assert(!memcmp(got, small, 16));
+    h_glDeleteTextures(1, &name);
+}
+
 int main(int argc, char **argv) {
     (void)argv;
     int stubs = argc > 1;
@@ -295,6 +362,7 @@ int main(int argc, char **argv) {
     test_vertex_binding();
     test_literal_stride_fetch();
     test_uniform_buffer();
+    test_compressed_arrays();
 
     unsigned long sz;
     const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
