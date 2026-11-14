@@ -127,6 +127,14 @@ To enroll a cut for any game's own module:
 - **Check:** this is a separate fallback after every earlier recognizer fails. Adding the rule inside `jump_offsets` before its existing searches could change a previously recognized table's extent by selecting a nearer compare. The fallback preserves those earlier results; synthetic full-rewriter tests cover both the new five-entry form and an existing eight-entry match with a nearer five-entry check.
 - **Found on:** Mario Tennis Aces (0100BDE00862A000) `main+0x35837c` (1.0.0), a five-entry table whose targets all lie in the function ([PR #778](https://github.com/seedds/nxnative/pull/778)). The contributor reported that `main`, `subsdk0` and `sdk` rewrite with zero-extension recognition; gameplay validation remains open.
 
+### Index masked before a bit-test guard
+
+- **Symptom:** `jump table 6d9d44` assertion while rewriting Manual Samuel 1.0.0 (Unity, SDK 3.5.3).
+- **Cause:** `and w13,w17,#7; tbnz w17,#2,exit; ldrsw x13,[x14,x13,lsl #2]; add x18,x13,x14; ...; br x18` has no compare. On the branch's fall-through, bit 2 is clear, so the masked index is 0–3. Reading eight entries from the mask would include unreachable words after the table.
+- **Fix:** a separate last fallback proves the mask-before-test sequence, its straight-line `adrp` / `add` table base, and unchanged index, offset and base until their uses. Other register writes after the target `add` are allowed. It reads exactly `2^B` entries and requires decoded instruction targets. All module branches and resolved tables, including later tables, must enter at the base initialization or outside the proven sequence. Clobbers, calls, traps, decode gaps and bypasses are refused; earlier recognizers retain their results.
+- **Limits:** this fallback does not infer bases across control flow or base-register copies. Synthetic modules validate the reported instruction form; this does not establish game compatibility.
+- **Found on:** [Manual Samuel's report and instruction sequence (#2562)](https://github.com/seedds/nxnative/issues/2562), title ID `0100748009A28000`, v0, main build `ef0161e4ed3c2947b3fe8c3d200107ce`. There is no repository profile for this title.
+
 ### Index masked in the block that branches to the dispatch
 
 - **Symptom:** `jump table <addr>` assertion in a Unity / IL2CPP `main` whose dispatch checks a fresh mask of another register than the one it indexes with.

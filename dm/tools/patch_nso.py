@@ -1307,6 +1307,52 @@ def jump_masked_pred(insl, j):
     t = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
     addresses = {p.address for p in insl}
     return t if all(x in addresses for x in t) else None
+def jump_mask_before_bit(insl, j):
+    """and wI,wS,#(2^(B+1)-1); tbnz wS,#B,exit bounds the following offset-table load to 2^B entries (Manual Samuel, issue #2562).
+    Prove a straight-line full-width base and preserve index/offset/base until their uses. Return targets and addresses whose entry would bypass the proof;
+    the driver checks those addresses against the complete module's branches and all resolved tables before rewriting, including tables discovered later."""
+    def control(p):
+        return p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps') or p.mnemonic.startswith('b.')
+    kg = next((k for k in range(j - 1, max(0, j - 32) - 1, -1) if control(insl[k])), None)
+    if kg is None or kg < 1 or insl[kg].mnemonic != 'tbnz': return None
+    guard, mask = insl[kg], insl[kg - 1]
+    g = re.fullmatch(r'w(\d+), #(0x[0-9a-f]+|\d+), #(?:0x[0-9a-f]+|\d+)', guard.op_str)
+    m = re.fullmatch(r'w(\d+), w(\d+), #(0x[0-9a-f]+|\d+)', mask.op_str) if mask.mnemonic == 'and' else None
+    if not g or not m or g[1] != m[2]: return None
+    bit, idx = int(g[2], 0), 'x' + m[1]
+    if bit > 30 or int(m[3], 0) != (1 << (bit + 1)) - 1: return None
+    kl = next((k for k in range(kg + 1, j) if insl[k].mnemonic == 'ldrsw'), None)
+    if kl is None: return None
+    ld = re.fullmatch(r'(x\d+), \[(x\d+), (x\d+), lsl #2\]', insl[kl].op_str)
+    if not ld or ld[3] != idx: return None
+    ent, base = ld[1], ld[2]
+    if base in (ent, idx) or any(writes_reg(p, idx) for p in insl[kg + 1:kl]): return None
+    ka = next((k for k in range(kl + 1, j) if writes_reg(insl[k], 'x18')), None)
+    if ka is None or insl[ka].mnemonic != 'add' or insl[ka].op_str not in (f'x18, {ent}, {base}', f'x18, {base}, {ent}'): return None
+    if any(writes_reg(p, ent) or writes_reg(p, base) for p in insl[kl + 1:ka]) or any(writes_reg(p, 'x18') for p in insl[ka + 1:j]): return None
+    lo = head = None
+    for k in range(kl - 1, -1, -1):
+        p = insl[k]
+        if k != kg and control(p): return None
+        if not writes_reg(p, base): continue
+        low = re.fullmatch(rf'{base}, {base}, #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'add' else None
+        if lo is None and low: lo = int(low[1], 0); continue
+        if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(base + ','): head = k; break
+        return None
+    if head is None or lo is None or head >= kg - 1: return None
+    run = insl[head:j + 1]
+    if any(b.address != a.address + 4 for a, b in zip(run, run[1:])): return None
+    protected = {p.address for p in run[1:]}
+    for p in insl:
+        if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
+            if p.operands[-1].imm in protected: return None
+    if any(protected.intersection(targets) for targets in tabjumps.values()): return None
+    if any(any(b <= t < b + 4 * width for t in protected) for b, width in jumps.values()): return None
+    tb, n = insl[head].operands[1].imm + lo, 1 << bit
+    if tb < 0 or tb + 4 * n > len(IMG): return None
+    targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
+    addresses = {p.address for p in insl}
+    return (targets, protected) if all(t in addresses and t not in protected for t in targets) else None
 def tail_call_at_end(insl, j):
     """The br x18 is an indirect tail call, not a jump table: the last write of x18 before it is a plain pointer load and the br ends the function. Ace Attorney Investigations Collection
     (Unity 2022.3 IL2CPP) main+0x1d271bc: ldr x18,[x0,#0x18]; ...; ldr x16,[sp]; ...; br x18, a thunk that moves stack arguments and jumps to the method pointer at +0x18"""
@@ -1501,6 +1547,7 @@ def pieces(fa, fb):
     return [(fa + 4 * p, fa + 4 * q) for p, q in zip(b, b[1:])], far
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
 far_into, rmid_all, newly_accepted = [], set(), set()
+mask_before_bit_protected = set()
 if any(fb - fa > BIG_FN for fa, fb in funcs):
     sites18 = sorted(a for a, (k, _) in kinds.items() if k == 'x18'); split = []
     for fa, fb in funcs:
@@ -1540,6 +1587,8 @@ for fa, fb in funcs:
                 if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
                 if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                if not tgt and (bounded := jump_mask_before_bit(insl, j)):
+                    tgt, protected = bounded; mask_before_bit_protected.update(protected)
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
@@ -1575,12 +1624,17 @@ if far_into:   # functions analysed in pieces (pieces above): their far b / bl, 
     for at, to in far_into: assert to not in win_mid and to not in rmid_all, f'far branch into a window or retry block {at:x}'
     for at, tgt in tabjumps.items(): assert not any(t in win_mid or t in rmid_all for t in tgt), f'jump table target into a window or retry block {at:x}'
 
+# Tables resolved later may not bypass the mask-before-bit table's base or guard either.
+for at, targets in tabjumps.items():
+    assert not mask_before_bit_protected.intersection(targets), f'jump table bypasses mask-before-bit proof {at:x}'
+for at, (base, width) in jumps.items():
+    assert not any(base <= t < base + 4 * width for t in mask_before_bit_protected), f'jump table bypasses mask-before-bit proof {at:x}'
 # Direct branches from other functions were not part of the per-function entry check above.
 for w in windows:
     if w[0].address in newly_accepted:
         assert all(b.address == a.address + 4 for a, b in zip(w, w[1:])), f'noncontiguous window {w[0].address:x}'
 new_mid = {x.address for w in windows if w[0].address in newly_accepted for x in w[1:]}
-if new_mid:
+if new_mid or mask_before_bit_protected:
     for start, end in CODE_RANGES:
         for at in range(start, end - 3, 4):
             w = struct.unpack_from('<I', IMG, at)[0]; t = w >> 24
@@ -1589,6 +1643,7 @@ if new_mid:
             elif t & 0x7C == 0x14: d = w & 0x3FFFFFF; d -= (d & 0x2000000) << 1
             else: continue
             dest = at + 4 * d
+            assert dest not in mask_before_bit_protected, f'branch bypasses mask-before-bit proof {at:x}'
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, BX(at, to))
