@@ -4,6 +4,8 @@ The README covers packing and playing. This page is for working on nxnative itse
 
 ## How it works
 
+Transactional saves retain their last committed version when an unexpected host error interrupts a write or a path mutation, including lookup before opening for writing, creating, deleting or renaming an entry. The next commit refuses the incomplete working copy and restores the committed version; ordinary missing/existing-path probes do not invalidate a save. See [save path failures](reference/services.md#a-failed-save-path-operation-still-allowed-the-save-to-commit).
+
 | Part | State |
 |---|---|
 | Rewriter (`dm/tools/patch_nso.py`) | Runs unchanged on every module of every supported game. Per-build cuts are keyed by the module's build ID, in the profile's `patches.py` (a game's own modules) or `dm/tools/sdk_patches.py` (Nintendo's `sdk` modules). Profiles can opt verified cuts into [function matching](reference/rewriter.md#function-matched-cuts-for-unregistered-builds) across updates |
