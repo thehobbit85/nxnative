@@ -40,7 +40,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - 2026-10-28, this profile on `main` (4b0335e), `--platform mac`: the shader split gives the same 56,386 shaders (27,834 vertex, 27,838 pixel, 713 compute, one geometry) and is checked against these tables without a mismatch; stopped in the shader compile (the shader inputs are unchanged since 6d1e07b).
 - 2026-10-27, Mac, this profile on `main` (6d1e07b), `--platform mac-app`, started through the app's launcher (window, no audio): a save made on the Mac with an earlier host loads its Traditional Chinese title menu, and Continue goes into the motel street (the neon sign, the lit phone booth, the player and the fog draw). The bundled archive serves every pipeline base (0 compiled on the device). Frame time p50 35 ms, p95 53 ms while another build compiled shaders on the same Mac. No red line other than `nvnTextureViewCompare`.
 - 2026-10-27, Mac, this profile on `main` (78cb26d), headless, no audio:
-  - **A new save:** the boot, the Team17 VP8 logo, the title with its animated VP8 background, New Game and the difficulty select (text, the portrait, the rain overlay). No red line other than `nvnTextureViewCompare` (below).
+  - **A new save:** the boot, the Team17 VP8 logo, the title with its animated VP8 background, New Game and the difficulty select (text, the portrait, the rain overlay). No red line other than `nvnTextureViewCompare` (resolved since: Found on this game).
   - **A save made on the Mac with an earlier host:** the title (its menu in Traditional Chinese, the save's language) and Continue into the motel street at night. The neon sign, the lit phone booth, the player and the fog all draw. 30 fps.
   - The rerun with this profile registered (not provisional) checked the split against these tables.
 - Earlier, on nxnative 11be43d with a hand-written integer-output table and VP8 decoding added locally, the game was played windowed, with sound and a controller, through the opening, the motel street and the diner. FMOD's output reported no underruns, at 30 fps (p95 about 37 ms).
@@ -50,10 +50,10 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - [Unity 6 Shader objects](../../../docs/reference/shaders.md#unity-6-shader-objects) (6000.3.15f1): 56,386 stage shaders, read with no change.
 - [Integer entry points for integer colour outputs](../../../docs/reference/shaders.md#integer-entry-points-for-integer-colour-outputs): `main0_u` for URP's rendering-layers mask, in 9,720 pixel shaders.
 - [VP8 uses the same libvpx worker and output paths](../../../docs/reference/movies.md#vp8-uses-the-same-libvpx-worker-and-output-paths): the logo and the title background.
+- [`nvnTextureBuilderGetViewOffset`, `nvnTextureViewCompare`, `nvnBlendStateSetAdvancedNormalizedDst`](../../../docs/reference/nvn-objects.md#nvntexturebuildergetviewoffset-nvntextureviewcompare-nvnblendstatesetadvancednormalizeddst): resolved, not run again on this game. The game calls `nvnTextureViewCompare` 60 to 75 times in a short run. On 2026-10-27 the host had no implementation: it logged one `[RED]` line for the function and answered 0 (not equal) to every call, and no visible effect was found. It has been implemented since `8feddfeeb` (Kirby Air Riders).
 
 ## Open
 
-- `nvnTextureViewCompare` is unimplemented (`[RED]`, 60 to 75 calls in a short run); no visible effect has been found yet.
 - A long play session on this host with audio. No `smoke.tsv` route yet.
 - No prewarm list (`pso_manifest.tsv` is empty). A Mac app carries every pair's base in its archive; a run without one (`--platform mac`) builds them at its start.
 - iOS: no IPA built, untested.

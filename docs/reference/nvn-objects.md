@@ -1373,7 +1373,7 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** `[RED] NVN unimplemented function called` for each.
 - **Fix:** the builder's offset is the texture's (`view_offset`). The compare is true when the two views set the same fields to the same values: that true means equal is taken from the name, as no caller in `main` was found to confirm it. The blend flag is kept for its getter; the fixed-function factors the replay uses read a normalized target as it is.
-- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md). [Silver Pines](../../dm/games/0100D5B026844000/README.md) calls `nvnTextureViewCompare` too (60 to 75 times in a short run, before it was implemented).
 
 ### Texture IDs of one storage share one packaged texture
 
